@@ -29,6 +29,8 @@ Softbank Final 알파팀의 프로젝트 모노레포입니다!
 │     ├─ terraform/            # CDC 실행 서버·네트워크·저장소 IaC
 │     ├─ deployment/           # Kafka·Kafka Connect 실행·배포 설정
 │     └─ connectors/           # Debezium Source·JDBC Sink 설정 템플릿
+├─ samples/
+│  └─ target-app/              # 이전 대상 샘플 서비스 (플랫폼 코드 아님)
 └─ docs/ 
 ```
 
