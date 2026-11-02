@@ -37,7 +37,9 @@ flowchart LR
 | `result` | 결과·산출물 | `outputs`(다음 단계 입력), `evidence`(로그·검증 근거 위치) |
 | `pause` / `resume` / `abort` | 중단·재개·취소 | `state`, `reason` |
 
-`state` 값: `pending` · `running` · `waiting_approval` · `succeeded` · `failed` · `paused`
+`state` 값: `pending` · `running` · `waiting_approval` · `paused` · `succeeded` · `failed` · `aborted`
+
+- 종료 상태는 `succeeded` · `failed` · `aborted` 세 가지입니다. `abort`로 멈춘 실행은 `aborted`로 남기며, 성공이나 실패로 표시하지 않습니다.
 
 ```json
 {
@@ -71,9 +73,9 @@ flowchart LR
 | 전체·단계별 진행률 | 각 단계 `status.progress` | |
 | 트래픽 가중치 (원본 / 목적지) | 트래픽 전환 | 담당 미정 |
 | 복제 지연 | db_migration `metrics` | |
-| 행 수·데이터 일치 검증 | db_migration `result.evidence` | 완료 기준 5 |
+| 행 수·데이터 일치 검증 | db_migration `result.evidence` | MVP 완료 기준: 전환 시점 원본·목적지 행 수와 데이터 일치 자동 검증 |
 | 전환 시간 T1−T0 | db_migration | 목표 ≤ 1초 |
-| 요청 실패 수 | 트래픽 전환 / 부하 도구 | 완료 기준 4 |
+| 요청 실패 수 | 트래픽 전환 / 부하 도구 | MVP 완료 기준: 프록시로 GCP 전환 시 사용자 요청 실패 0건 |
 
 **표시 원칙**
 - 모듈이 값을 주지 않으면 **"미제공"** 으로 표시합니다. 0이나 성공으로 채우지 않습니다.
@@ -81,7 +83,7 @@ flowchart LR
 
 ## 6. 22:00 회의에서 정할 것
 
-1. **트래픽 전환 담당자** — 완료 기준 4(요청 실패 0건)의 핵심입니다.
+1. **트래픽 전환 담당자** — MVP 완료 기준 "전환 시 사용자 요청 실패 0건"의 핵심입니다.
 2. **승인 지점** — 제안: ① 계획 승인(provisioning 전) ② 전환 승인(db_migration 쓰기 전환 전).
 3. **자동 실행과 수동 작업의 경계** — 1차 MVP에서 `workflows`가 자동으로 넘길 단계와 사람이 직접 넘길 단계.
 4. 위 3절 공통 규격 채택 여부와 호출 방식(함수 / HTTP / 작업 큐).
