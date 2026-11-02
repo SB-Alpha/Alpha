@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Final Team Alpha Slack Channel
+    url: https://softbankhackathon2026.slack.com/archives/C0CDEFEL6JW
+    about: 실시간 팀 소통 및 긴급 논의
+  - name: 📑 Final Team Alpha Notion Workspace
+    url: https://app.notion.com/p/40b8bee9ada4808b9864f4cac6a889ca
+    about: 회의록, ADR, 아키텍처 문서 및 작업 보드
+  - name: 📊 GitHub Project Board
+    url: https://github.com/orgs/SB-Alpha/projects/1
+    about: 실시간 칸반 작업 보드

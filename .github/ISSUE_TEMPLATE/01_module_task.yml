@@ -1,0 +1,81 @@
+name: "📋 모듈 작업 (Module Task)"
+description: 각 모듈별 기능 구현 및 백로그 작업 등록
+title: "[분야_이름] "
+labels: ["type:feat", "priority:p1-mvp"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### 📋 Final Team Alpha 모듈 작업 템플릿
+        모듈별 입·출력 계약(`schemas.py`) 및 마일스톤 완료 정의에 기반하여 작업을 등록합니다.
+        제목 형식: `[분야_이름] 작업 요약` (예: `[discovery_김준석] DB 버전 및 복제 설정 수집 구현`)
+  - type: dropdown
+    id: module
+    attributes:
+      label: 담당 모듈
+      description: 해당 작업이 속한 모듈을 선택해 주세요.
+      options:
+        - "workflows (박재현)"
+        - "frontend (박재현)"
+        - "provisioning (박준서)"
+        - "db_migration (안재현)"
+        - "discovery (김준석)"
+        - "planning (이주호)"
+        - "cloudflare (트래픽 전환)"
+        - "samples (대상 샘플 앱)"
+        - "infra (인프라 전반)"
+    validations:
+      required: true
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: 목표 마일스톤
+      description: 완료할 목표 마일스톤을 선택해 주세요.
+      options:
+        - "M0: 계약 합의 (11/2 22:00)"
+        - "M1: 계약 코드화 (11/3 12:00)"
+        - "M2: 모듈 단독 실행 (11/3 24:00)"
+        - "M3: 앞단 통합 (11/4 18:00)"
+        - "M4: 전체 통합 (11/4 24:00)"
+        - "M5: E2E 리허설 & 데모 고정 (11/5 18:00)"
+        - "M6: 1차 MVP 최종 테스트 (11/5 22:00)"
+        - "M7: 본선 제출 및 최종 발표 (11/7~11/8)"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 1. 작업 개요 및 목적
+      description: 어떤 작업을 수행하는지 간략히 설명해 주세요.
+      placeholder: "예: Cloud Run 및 Cloud SQL 목적지 인프라 구축을 위한 Terraform 코드 작성"
+    validations:
+      required: true
+  - type: textarea
+    id: input_output
+    attributes:
+      label: 2. 모듈 입·출력 계약 (schemas.py)
+      description: 이전 모듈에서 전달받는 입력과 다음 모듈로 전달할 출력 스펙을 기술해 주세요.
+      value: |
+        - **받는 입력 (Input)**: 
+        - **내보내는 출력 (Output)**: 
+        - **관련 schemas.py 모델**: 
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: 3. 완료 정의 (Acceptance Criteria)
+      description: 이 작업이 성공적으로 완료되었다고 판단할 수 있는 구체적 조건들을 체크리스트 형태로 작성해 주세요.
+      value: |
+        - [ ] 
+        - [ ] 
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: 4. 검증 및 테스트 방법
+      description: 로컬 또는 클라우드에서 동작을 확인하는 방법(pytest, curl, fixture 등)을 적어주세요.
+      placeholder: "pytest apps/backend/tests/discovery/test_discovery.py"
+    validations:
+      required: true
