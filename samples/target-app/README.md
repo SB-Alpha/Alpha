@@ -156,7 +156,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X DELETE http://localhost:8080/api/wor
 | 항목 | 요구사항 |
 | --- | --- |
 | ECS | Fargate, 태스크 1개, 컨테이너 포트 **8080**, `linux/amd64` 이미지 |
-| 헬스체크 | ALB·대상 그룹 경로 **`/health/ready`** (DB 연결까지 확인) |
+| 헬스체크 | ALB·대상 그룹 경로 **`/health/live`** (프로세스만 확인). `/health/ready`(DB 확인)를 쓰면 DB가 잠깐 막힐 때(예: RDS 재부팅) 정상 태스크까지 계속 교체되므로 대상 그룹에는 쓰지 않습니다. `/health/ready`는 트래픽 분배 판단(예: 전환 프록시·Cloudflare 모니터)에만 씁니다. |
 | RDS | **PostgreSQL 16**, Single-AZ 1개 |
 | **CDC 필수** | 사용자 정의 파라미터 그룹에 **`rds.logical_replication = 1`** 설정. 정적 파라미터라 **재시작이 필요**하므로 **DB 생성 시점에** 붙여 두세요 (나중에 켜면 운영 중 재시작 발생). |
 | 연결 | `PGSSLMODE=require` 권장, `PGPASSWORD`는 비밀 참조로 주입 |
