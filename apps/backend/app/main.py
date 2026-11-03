@@ -18,6 +18,9 @@ def create_app() -> FastAPI:
         return {"status": "ok", "scope": "process"}
 
     # Register feature routers here once they have real implementations.
+    from app.features.workflows.router import router as workflows_router
+
+    app.include_router(workflows_router)
     return app
 
 
