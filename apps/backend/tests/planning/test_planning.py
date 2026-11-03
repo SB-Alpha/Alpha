@@ -17,6 +17,9 @@ def _ready_input(**db_overrides) -> PlanningInput:
         "database_name": "workitems",
         "tables": [{"name": "work_items", "row_count": 1000, "has_primary_key": True}],
         "logical_replication": True,
+        "username": "alpha",
+        "instance_class": "db.t3.micro",
+        "allocated_storage_gb": 20,
     }
     db.update(db_overrides)
     return PlanningInput.model_validate({
@@ -28,7 +31,11 @@ def _ready_input(**db_overrides) -> PlanningInput:
                 "cpu_units": 512,
                 "memory_mib": 1024,
                 "health_check_path": "/health/ready",
-                "secret_refs": ["arn:aws:secretsmanager:ap-northeast-2:123:secret:pg"],
+                "env_vars": {"LOG_LEVEL": "INFO", "APP_ENV": "aws", "PGHOST": "x"},
+                "secret_refs": {
+                    "PGPASSWORD": "arn:aws:secretsmanager:ap-northeast-2:123:secret:pg",
+                    "API_KEY": "arn:aws:secretsmanager:ap-northeast-2:123:secret:api",
+                },
             },
             "db": db,
         },
@@ -44,9 +51,13 @@ def test_all_checks_pass_is_approvable():
     plan = run(_ready_input())
     assert [c.result for c in plan.checks] == ["pass"] * 4
     assert plan.approvable and plan.blocking == []
-    assert plan.target_infra.cpu == "1"
-    assert plan.target_infra.memory == "1024Mi"
-    assert plan.target_infra.db_version == "POSTGRES_16"
+    infra = plan.target_infra
+    assert infra.cpu == 1 and infra.memory == 1024
+    assert infra.db_version == "16"
+    assert infra.db_tier == "db-g1-small" and infra.db_disk_size_gb == 20 and infra.db_user == "alpha"
+    # provisioning 이 채우는 PG*·APP_ENV 는 빠지고, 나머지만 넘어감
+    assert infra.env_vars == {"LOG_LEVEL": "INFO"}
+    assert infra.secret_refs == {"API_KEY": "target-app-api-key"}
     assert len(plan.summary) == 3
     assert [s.needs_approval for s in plan.steps].count(True) == 2
 
@@ -80,6 +91,16 @@ def test_target_infra_converts_to_tfvars():
     json.dumps(tfvars)  # tfvars.json 으로 그대로 쓸 수 있어야 함
     assert tfvars["region"] == "asia-northeast3"
     assert tfvars["db_logical_decoding"] is True
+    # 평평한 구조: 값은 스칼라 또는 문자열 map 만
+    for v in tfvars.values():
+        assert not isinstance(v, (list, dict)) or all(isinstance(x, str) for x in v.values())
+
+
+def test_unknown_db_size_is_left_to_provisioning_default():
+    plan = run(_ready_input(instance_class="db.r5.large", allocated_storage_gb=None, username=None))
+    tfvars = plan.target_infra.to_tfvars()
+    assert "db_tier" not in tfvars and "db_disk_size_gb" not in tfvars and "db_user" not in tfvars
+    assert any("DB 등급" in r.title for r in plan.risks)
 
 
 def test_reports_progress_to_ctx():
