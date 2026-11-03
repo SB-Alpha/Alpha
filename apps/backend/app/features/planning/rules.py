@@ -19,8 +19,22 @@ MIN_SOURCE_PG_MAJOR = 10  # pgoutput 논리 복제 최소 버전
 # 원본이 값을 안 줬을 때 쓰는 기본값. 쓰이면 risks 에 남깁니다.
 DEFAULT_PORT = 8080
 DEFAULT_HEALTH_PATH = "/health/ready"
-DEFAULT_CPU = "1"
-DEFAULT_MEMORY = "512Mi"
+DEFAULT_CPU = 1  # vCPU
+DEFAULT_MEMORY = 512  # MiB
+
+# provisioning 이 직접 채우는 환경 변수 (DB 접속은 Terraform 출력, PORT 는 Cloud Run 이 넣음)
+PROVISIONING_INJECTED_ENV = {
+    "PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGSSLMODE", "APP_ENV", "PORT",
+}
+
+# RDS 인스턴스 클래스 → 메모리(GiB). MVP 대상 크기만 둡니다.
+RDS_MEMORY_GIB = {
+    "db.t3.micro": 1, "db.t4g.micro": 1,
+    "db.t3.small": 2, "db.t4g.small": 2,
+}
+CLOUD_SQL_MIN_DISK_GB = 10
+# Cloud SQL 공유 코어 등급의 메모리 상한(GB). 이보다 큰 원본은 자동 매핑하지 않고 provisioning 기본값을 씁니다.
+SHARED_CORE_TIER = ("db-g1-small", 1.7)
 
 
 def _pg_major(version: str | None) -> int | None:
@@ -120,16 +134,29 @@ def run_checks(inv: InventoryForPlanning) -> list[PlanCheck]:
     return checks
 
 
-def _cloud_run_cpu(cpu_units: int | None) -> str | None:
+def _cloud_run_cpu(cpu_units: int | None) -> int | None:
     if cpu_units is None:
         return None
-    return str(max(1, math.ceil(cpu_units / 1024)))
+    return max(1, math.ceil(cpu_units / 1024))
 
 
-def _cloud_run_memory(memory_mib: int | None) -> str | None:
+def _cloud_run_memory(memory_mib: int | None) -> int | None:
     if memory_mib is None:
         return None
-    return f"{max(512, memory_mib)}Mi"
+    return max(DEFAULT_MEMORY, memory_mib)
+
+
+def _db_tier(instance_class: str | None) -> str | None:
+    """원본 메모리 이상인 가장 작은 Cloud SQL 등급. 표에 없거나 공유 코어보다 크면 None."""
+    gib = RDS_MEMORY_GIB.get((instance_class or "").lower())
+    if gib is None:
+        return None
+    tier, tier_gb = SHARED_CORE_TIER
+    return tier if gib <= tier_gb else None
+
+
+def _secret_name(service_name: str, env_name: str) -> str:
+    return f"{service_name}-{env_name.lower().replace('_', '-')}"
 
 
 def build_target_infra(inv: InventoryForPlanning, target: TargetSelection) -> tuple[TargetInfra, list[Risk]]:
@@ -145,18 +172,31 @@ def build_target_infra(inv: InventoryForPlanning, target: TargetSelection) -> tu
             return default
         return value
 
+    db_tier = _db_tier(db.instance_class)
+    if db_tier is None:
+        risks.append(Risk(
+            level="low", title="DB 등급은 provisioning 기본값",
+            detail=f"원본 인스턴스 클래스 {db.instance_class or '미제공'} 은 자동 매핑 범위 밖이라 "
+                   "db_tier 를 넘기지 않습니다.",
+        ))
+    disk = max(CLOUD_SQL_MIN_DISK_GB, db.allocated_storage_gb) if db.allocated_storage_gb else None
+
     infra = TargetInfra(
         region=target.region,
         service_name=app.service_name,
         source_image=app.image_uri,
         container_port=fallback(app.container_port, DEFAULT_PORT, "컨테이너 포트"),
         cpu=fallback(_cloud_run_cpu(app.cpu_units), DEFAULT_CPU, "CPU"),
-        memory=fallback(_cloud_run_memory(app.memory_mib), DEFAULT_MEMORY, "메모리"),
+        memory=fallback(_cloud_run_memory(app.memory_mib), DEFAULT_MEMORY, "메모리(MiB)"),
         health_check_path=fallback(app.health_check_path, DEFAULT_HEALTH_PATH, "상태 확인 경로"),
-        env_names=list(app.env_names),
-        secret_refs=list(app.secret_refs),
-        db_version=f"POSTGRES_{TARGET_PG_MAJOR}",
+        env_vars={k: v for k, v in app.env_vars.items() if k not in PROVISIONING_INJECTED_ENV},
+        secret_refs={k: _secret_name(app.service_name, k)
+                     for k in app.secret_refs if k not in PROVISIONING_INJECTED_ENV},
+        db_version=str(TARGET_PG_MAJOR),
         db_name=db.database_name,
+        db_user=db.username,
+        db_tier=db_tier,
+        db_disk_size_gb=disk,
     )
     return infra, risks
 
@@ -204,8 +244,8 @@ def build_steps() -> list[PlanStep]:
 
 def rule_summary(infra: TargetInfra, checks: list[PlanCheck], approvable: bool) -> list[str]:
     passed = sum(c.result == "pass" for c in checks)
-    line1 = (f"{infra.service_name} 를 GCP {infra.region} 의 Cloud Run({infra.cpu} CPU, {infra.memory}) "
-             f"+ Cloud SQL {infra.db_version} 로 옮깁니다.")
+    line1 = (f"{infra.service_name} 를 GCP {infra.region} 의 Cloud Run({infra.cpu} vCPU, {infra.memory}MiB) "
+             f"+ Cloud SQL PostgreSQL {infra.db_version} 로 옮깁니다.")
     line2 = f"필수 조건 {passed}/{len(checks)} 통과."
     if approvable:
         line3 = "승인하면 목적지를 만들고 CDC 동기화 후 전환 승인 ②에서 다시 멈춥니다."
