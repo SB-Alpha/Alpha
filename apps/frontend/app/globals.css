@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+/* 운영 콘솔: 밝은 종이 바탕 + 진한 잉크. 색은 상태(진행·사람 필요·완료·실패)에만 씁니다. */
+@theme {
+  --color-paper: #f6f4ef;
+  --color-ink: #1c1917;
+  --color-accent: #3730a3;
+  --font-sans: "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, monospace;
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
