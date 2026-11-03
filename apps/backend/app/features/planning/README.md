@@ -1,18 +1,57 @@
 # planning
 
+담당: 이주호 · 리뷰: 박준서, 안재현
+
 ## 책임
-수집 정보를 기반으로 배포 목적지(GCP)에 어떻게 배포할지 계획을 수립합니다.
-특정 에이전트 프레임워크나 모델은 아직 선택하지 않았습니다.
+`SourceInventory`(discovery) 와 목적지 선택(GCP 리전)으로 **승인할 수 있는 `MigrationPlan`** 을 만듭니다.
 
-## 예상 입력
-- `discovery` 결과
-- 다른 모듈의 실행 결과·상태
+- 필수 조건은 **코드로** 검사합니다 (`rules.py`). AI 판단으로 통과시키지 않습니다.
+- AI 는 위험 설명·요약 초안만 씁니다. **AI 호출이 실패해도 규칙 기반 계획은 나옵니다.**
+- 값이 없으면 `unknown` 으로 두고 승인 불가(`approvable=false`)로 표시합니다. 가짜 통과 없음.
 
-## 예상 출력
-- 목적지 구성안과 배포·이전 계획 (`provisioning`, `db_migration`이 사용)
+## 진입 함수
+```python
+from app.features.planning.service import run
+plan = run(PlanningInput(...), ctx)   # ctx.report(state, progress, metrics, message)
+```
+단독 확인: `POST /planning/plan` (body = `PlanningInput`)
+
+## 입력 — `PlanningInput`
+| 필드 | 출처 | 설명 |
+| --- | --- | --- |
+| `inventory.app` | discovery | 서비스 이름, 이미지 URI·digest, 포트, Fargate CPU·메모리, 상태 확인 경로, 환경 변수 **이름**, 비밀 **참조** |
+| `inventory.db` | discovery | 엔진·버전, DB 이름, 테이블(행 수·PK 여부), 논리 복제 설정(`rds.logical_replication`, `wal_level`) |
+| `inventory.gaps` | discovery | 수집 실패 항목 |
+| `target.region` | 사용자 | GCP 리전 |
+
+> 임시: `InventoryForPlanning` 은 planning 이 읽는 필드만 적은 것입니다. 김준석님 `SourceInventory` 확정 후 그 모델로 교체합니다.
+
+## 출력 — `MigrationPlan` (→ 승인 ① 화면, provisioning, db_migration)
+| 필드 | 설명 |
+| --- | --- |
+| `target_infra` | provisioning(Terraform) 입력. `to_tfvars()` 로 그대로 tfvars 가 됩니다 |
+| `checks` | 필수 조건 4개: PG 버전 호환 · 논리 복제 · PK 존재 · 이미지 확보. 결과 `pass`/`fail`/`unknown` |
+| `risks` | 위험 목록 (`source`: `rule` / `ai`) |
+| `summary` | 승인 화면용 3줄 (`summary_source`: `rule` / `ai`) |
+| `steps` | 실행 순서 (승인 ①·② 지점 포함) |
+| `approvable` / `blocking` | 모든 필수 조건이 `pass` 일 때만 `true`. 아니면 이유 목록 |
+
+## 매핑 규칙 (원본 → 목적지)
+| 원본 | 목적지 | 규칙 |
+| --- | --- | --- |
+| Fargate CPU 단위 | Cloud Run `cpu` | `ceil(units/1024)`, 최소 1 |
+| Fargate 메모리 MiB | Cloud Run `memory` | 최소 512Mi |
+| RDS PostgreSQL 10~16 | Cloud SQL `POSTGRES_16` | 16 초과(다운그레이드)·10 미만은 fail |
+| 값 없음 | 기본값 (포트 8080, `/health/ready`, 1 CPU, 512Mi) | 기본값을 쓰면 `risks` 에 남김 |
 
 ## 미정 사항 (합의 필요)
-- 세부 기능 범위
-- 에이전트 프레임워크·모델
-- 출력 스키마, 사람 승인과의 관계
-- 담당자
+- [ ] `target_infra` 필드 이름 ↔ Terraform 변수 1:1 (박준서)
+- [ ] `SourceInventory` 필드 확정 후 입력 모델 교체 (김준석)
+- [ ] 승인 화면에 보일 요약 형태 (박재현)
+- [ ] AI 모델·호출 방식 (risks·summary 보강)
+- [ ] `Reporter` → workflows `RunContext` 로 교체 (박재현)
+
+## fixture
+`apps/backend/tests/planning/fixtures/`
+- `inventory.sample.json`: **실제 discovery 결과 아님.** `samples/target-app` README 기준으로 손으로 만든 입력입니다. 실제 inventory fixture 가 나오면 교체합니다.
+- `plan.sample.json`: 위 입력으로 `run()` 을 실제 실행한 결과.
