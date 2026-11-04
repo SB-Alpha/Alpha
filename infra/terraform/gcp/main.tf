@@ -25,6 +25,14 @@ module "database" {
   db_disk_size_gb     = var.db_disk_size_gb
   db_logical_decoding = var.db_logical_decoding
 
-  # Cloud SQL 은 network 의 사설 서비스 연결이 끝난 뒤에 만들어야 한다
+  # Cloud SQL 은 network 의 사설 서비스 연결이 끝난 뒤
   depends_on = [module.network]
+}
+
+module "secrets" {
+  source      = "./modules/secrets"
+  project_id  = var.project_id
+  name        = var.service_name
+  db_password = module.database.db_password
+  secret_refs = var.secret_refs
 }
