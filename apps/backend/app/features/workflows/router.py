@@ -18,6 +18,7 @@ from .schemas import (
     RunStatus,
     StageName,
 )
+from .runners import RUNNERS
 from .store import RunNotFound, RunStore
 
 router = APIRouter(prefix="/runs", tags=["workflows"])
@@ -25,8 +26,8 @@ router = APIRouter(prefix="/runs", tags=["workflows"])
 
 @lru_cache
 def get_engine() -> Engine:
-    # 모듈이 연결되면 여기서 runners={StageName.PLANNING: ..., ...} 로 등록합니다.
-    return Engine(RunStore(get_settings().workflows_db_path))
+    # 연결된 모듈은 runners.RUNNERS 에 단계별로 등록합니다. 없는 단계는 수동 입력 대기입니다.
+    return Engine(RunStore(get_settings().workflows_db_path), RUNNERS)
 
 
 def _apply(run_id: str, action: Callable[[], RunStatus]) -> RunStatus:
