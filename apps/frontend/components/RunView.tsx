@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
+import { DashboardPanel } from "@/components/DashboardPanel";
 import { PlanApproval } from "@/components/PlanApproval";
 import { RunActions } from "@/components/RunActions";
 import { StageStepper } from "@/components/StageStepper";
@@ -86,6 +87,8 @@ export function RunView() {
               {run.message && <p className="mt-1 text-sm text-ink/70">{run.message}</p>}
             </div>
           </header>
+
+          <DashboardPanel run={run} />
 
           <StageStepper run={run} />
 
