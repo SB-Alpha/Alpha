@@ -8,7 +8,7 @@ from app.main import app
 from .fakes import ACCOUNT, session
 
 INP = AssessmentInput(aws_credentials_ref="secret://run-1/aws", db_admin_ref="secret://run-1/db-admin",
-                      source_region="ap-northeast-2", target_region="asia-northeast3")
+                      aws_region="ap-northeast-2", target_region="asia-northeast3")
 
 
 def test_db_not_implemented_blocks_approval_but_app_part_flows():
@@ -32,7 +32,7 @@ def test_db_not_implemented_blocks_approval_but_app_part_flows():
     assert out.source.app.db_user == "alpha"
     assert out.source.credentials_ref.cloud == "secret://run-1/aws"
     assert out.source.credentials_ref.db_admin == "secret://run-1/db-admin"
-    assert calls[-1] == ("waiting_approval", 100)
+    assert calls[-1] == ("succeeded", 100)
 
 
 def test_db_part_filled_makes_plan_approvable(monkeypatch):

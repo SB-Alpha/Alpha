@@ -5,8 +5,8 @@ from .fakes import ACCOUNT, DIGEST, IMAGE, FakeAwsError, container, session
 
 
 def _inp(**kw) -> AssessmentInput:
-    base = {"aws_credentials_ref": "secret://run-1/aws", "source_region": "ap-northeast-2",
-            "target_region": "asia-northeast3", "repo_url": "https://github.com/SB-Alpha/target-app"}
+    base = {"aws_credentials_ref": "secret://run-1/aws", "aws_region": "ap-northeast-2",
+            "target_region": "asia-northeast3", "github_repo_url": "https://github.com/SB-Alpha/target-app"}
     base.update(kw)
     return AssessmentInput(**base)
 

@@ -222,10 +222,13 @@ def collect_risks(inv: InventoryForPlanning, checks: list[PlanCheck]) -> list[Ri
     for gap in inv.gaps:
         risks.append(Risk(level="medium", title="원본 수집 누락", detail=gap))
 
-    if inv.app.secret_refs:
+    moved = sorted(k for k in inv.app.secret_refs if k not in PROVISIONING_INJECTED_ENV)
+    if moved:
         risks.append(Risk(
-            level="medium", title="비밀값 이전 필요",
-            detail=f"비밀 참조 {len(inv.app.secret_refs)}개를 GCP Secret Manager 에 다시 등록해야 합니다.",
+            level="high", title="비밀값 이전 필요",
+            detail=f"비밀 {len(moved)}개({', '.join(moved)})의 값을 GCP Secret Manager 에 넣어야 합니다. "
+                   "Terraform 은 빈 비밀만 만들고 Cloud Run 은 그 최신 값을 읽으므로, "
+                   "값을 넣기 전에는 앱 배포가 실패합니다.",
         ))
 
     if inv.db.database_name is None:

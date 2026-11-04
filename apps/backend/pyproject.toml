@@ -14,6 +14,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ai = [
+    "anthropic",  # assessment AI 보강 (ALPHA_AI_ENABLED=1 일 때만 사용)
+]
 dev = [
     "pytest>=8",
     "httpx>=0.27",

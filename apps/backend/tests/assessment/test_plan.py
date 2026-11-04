@@ -118,3 +118,18 @@ def test_router():
     res = client.post("/assessment/plan", json=body)
     assert res.status_code == 200
     assert res.json()["approvable"] is False
+
+
+def test_secret_values_must_move_before_deploy():
+    plan = run(_ready_input())
+    risk = next(r for r in plan.risks if r.title == "비밀값 이전 필요")
+    # PGPASSWORD 는 provisioning 이 만들므로 빠지고, API_KEY 만 옮길 대상
+    assert risk.level == "high" and "API_KEY" in risk.detail and "PGPASSWORD" not in risk.detail
+
+
+def test_gcp_name_rule():
+    from app.features.assessment.rules import gcp_name
+
+    assert gcp_name("Target_App") == "target-app"
+    assert gcp_name("1st-service").startswith("app-")
+    assert len(gcp_name("x" * 80)) <= 49

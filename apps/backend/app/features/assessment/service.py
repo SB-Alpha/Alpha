@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from . import ai as ai_part
 from . import app as app_part
 from . import db as db_part
 from . import plan as plan_part
@@ -43,7 +44,7 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
 
     report(5, "원본 AWS 연결")
     if session is None:
-        session, reason = session_for(inp.aws_credentials_ref, inp.source_region)
+        session, reason = session_for(inp.aws_credentials_ref, inp.aws_region)
         if reason:
             gaps.append(reason)
 
@@ -65,10 +66,13 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
         db_facts = db_facts.model_copy(update={"username": app_res.db_user})
     inventory = InventoryForPlanning(app=app_res.facts, db=db_facts, gaps=gaps)
     plan = plan_part.build(PlanningInput(inventory=inventory, target=TargetSelection(region=inp.target_region)))
+    if ai_part.enabled():
+        report(90, "AI 로 요약·위험 설명 보강")
+        plan = ai_part.enhance(plan)  # 실패하면 규칙 결과 그대로
 
     source = SourceInfo(
         account_id=app_res.account_id,
-        region=inp.source_region,
+        region=inp.aws_region,
         db=db_res.source_db,
         network=db_res.network,
         app=SourceApp(db_user=app_res.db_user),
@@ -76,7 +80,7 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
         credentials_ref=SourceCredentials(cloud=inp.aws_credentials_ref, db_admin=inp.db_admin_ref),
     )
 
-    report(100, "계획 생성 완료", state="waiting_approval")
+    report(100, "계획 생성 완료", state="succeeded")  # 승인 ① 대기는 workflows 가 게이트로 처리
     return AssessmentOutput(source=source, plan=plan, gaps=gaps)
 
 

@@ -17,6 +17,17 @@ out = run(AssessmentInput(...), ctx)   # ctx.report(state, progress, metrics, me
 ```
 단독 확인: `POST /assessment/run` (body = `AssessmentInput`), 조회 없이 계획만: `POST /assessment/plan` (body = `PlanningInput`)
 
+- 진행 보고: 5 연결 → 20 DB → 50 앱 → 80 판정 → (90 AI) → 100 `succeeded`. 승인 ① 대기는 workflows 게이트가 처리.
+- workflows `MigrationRequest`(PR #22) 와 이름을 맞춤: `github_repo_url`, `aws_region`, `ecs_service`, `rds_instance_id`, `target_region`.
+  키는 `aws_role_ref`(역할 ARN) 대신 `aws_credentials_ref`(키 이름표) — 원본 키 방식 합의(안재현) 후 맞춥니다.
+
+실제 원본으로 확인 · fixture 만들기 (계정 ID · 네트워크 ID · RDS 주소는 자동으로 가림):
+```
+pip install -e ".[dev]"
+python -m app.features.assessment.cli --profile <읽기 전용 프로필> --aws-region ap-northeast-2 \
+    --out tests/assessment/fixtures/output.real.json
+```
+
 ## 파일
 | 파일 | 담당 | 하는 일 |
 | --- | --- | --- |
@@ -26,15 +37,17 @@ out = run(AssessmentInput(...), ctx)   # ctx.report(state, progress, metrics, me
 | `db.py` | 김준석 | RDS·PG·네트워크 조회 → `DbAssessment` (**아직 미구현: "미구현" 을 gaps 로 반환**) |
 | `app.py` | 이주호 | ECS·ECR 조회 → `AppAssessment` |
 | `plan.py` · `rules.py` | 이주호 | 필수 조건 판정, 목적지 매핑, risks·summary |
+| `ai.py` | 이주호 | AI 보강 (기본 꺼짐, `ALPHA_AI_ENABLED=1` + `pip install -e ".[ai]"`). summary 3줄·설명용 risks 만. 판정·target_infra 는 안 바꿈, 실패하면 규칙 결과 |
+| `cli.py` | 이주호 | 실제 원본 조회 → JSON (기본으로 가림) |
 
 ## 입력 — `AssessmentInput` (workflows → assessment)
 | 필드 | 설명 |
 | --- | --- |
-| `run_id`, `repo_url` | workflows · 사용자 |
+| `run_id`, `github_repo_url` | workflows · 사용자 |
 | `aws_credentials_ref` | 원본 AWS 키 이름표. `secret://...`(backend DB, `core/secrets.resolve`) 또는 로컬 개발용 `profile:<이름>` |
 | `db_admin_ref` | 원본 DB 관리자 계정 이름표 (db.py 가 PG 카탈로그 조회에 사용) |
-| `source_region` / `target_region` | 원본 AWS 리전 / 목적지 GCP 리전 |
-| `ecs_cluster`, `ecs_service`, `db_instance_id` | 선택. 후보가 여러 개일 때만. 비우면 하나뿐일 때 자동 선택, 여러 개면 고르지 않고 gaps |
+| `aws_region` / `target_region` | 원본 AWS 리전 / 목적지 GCP 리전 |
+| `ecs_cluster`, `ecs_service`, `rds_instance_id` | 선택. 후보가 여러 개일 때만. 비우면 하나뿐일 때 자동 선택, 여러 개면 고르지 않고 gaps |
 
 ## 출력 — `AssessmentOutput`
 | 필드 | 받는 쪽 | 내용 |

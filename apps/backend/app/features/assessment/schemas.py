@@ -161,15 +161,15 @@ class AssessmentInput(BaseModel):
     """workflows → assessment. 비밀은 원문이 아니라 이름표(secret://...)만 받습니다."""
 
     run_id: str | None = None
-    repo_url: str | None = None
+    github_repo_url: str | None = None
     aws_credentials_ref: str  # 원본 AWS 키 이름표
     db_admin_ref: str | None = None  # 원본 DB 관리자 계정 이름표 (db.py 가 PG 카탈로그 조회에 씀)
-    source_region: str  # 원본 AWS 리전. 예: "ap-northeast-2"
+    aws_region: str  # 원본 AWS 리전. 예: "ap-northeast-2"
     target_region: str  # 목적지 GCP 리전. 예: "asia-northeast3"
     # 원본 계정에 후보가 여러 개일 때만 지정. 비우면 하나뿐일 때 자동으로 고릅니다.
     ecs_cluster: str | None = None
     ecs_service: str | None = None
-    db_instance_id: str | None = None
+    rds_instance_id: str | None = None
 
 
 class SourceDb(BaseModel):

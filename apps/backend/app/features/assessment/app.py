@@ -140,8 +140,8 @@ def _only_one(res: dict | None, key: str, what: str, input_name: str, gaps: list
 def fallback_name(inp: AssessmentInput) -> str:
     if inp.ecs_service:
         return inp.ecs_service.rsplit("/", 1)[-1]
-    if inp.repo_url:
-        return inp.repo_url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    if inp.github_repo_url:
+        return inp.github_repo_url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
     return "미제공"
 
 
