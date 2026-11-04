@@ -1,0 +1,36 @@
+{
+  "_note": "실제 discovery 결과 아님. samples/target-app README 값 + 박준서님이 알려준 원본 RDS 사양(db.t3.micro, 20GB, 사용자 alpha, 11/3)만 넣은 손 작성 입력. 모르는 값은 null. 실제 inventory fixture 가 나오면 교체.",
+  "inventory": {
+    "app": {
+      "service_name": "target-app",
+      "image_uri": null,
+      "image_digest": null,
+      "container_port": 8080,
+      "cpu_units": null,
+      "memory_mib": null,
+      "health_check_path": "/health/ready",
+      "env_vars": {},
+      "secret_refs": {}
+    },
+    "db": {
+      "engine": "postgres",
+      "engine_version": "16",
+      "database_name": null,
+      "username": "alpha",
+      "instance_class": "db.t3.micro",
+      "allocated_storage_gb": 20,
+      "tables": [
+        {"schema_name": "public", "name": "work_items", "row_count": null, "has_primary_key": true}
+      ],
+      "logical_replication": null,
+      "wal_level": null
+    },
+    "gaps": [
+      "ECR 이미지 URI·digest 미수집",
+      "Fargate 태스크 CPU·메모리 미수집",
+      "RDS DB 이름·rds.logical_replication 실제 값 미수집",
+      "비밀 아닌 환경 변수 값(LOG_LEVEL 등)·PGPASSWORD 비밀 참조(ARN) 미수집"
+    ]
+  },
+  "target": {"cloud": "gcp", "region": "asia-northeast3"}
+}
