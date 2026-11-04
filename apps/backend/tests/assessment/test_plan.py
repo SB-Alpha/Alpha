@@ -3,8 +3,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.features.planning.schemas import PlanningInput
-from app.features.planning.service import run
+from app.features.assessment.schemas import PlanningInput
+from app.features.assessment.plan import build as run
 from app.main import app
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -103,17 +103,6 @@ def test_unknown_db_size_is_left_to_provisioning_default():
     assert any("DB 등급" in r.title for r in plan.risks)
 
 
-def test_reports_progress_to_ctx():
-    calls = []
-
-    class Ctx:
-        def report(self, state, progress, metrics=None, message=None):
-            calls.append((state, progress))
-
-    run(_ready_input(), Ctx())
-    assert calls[-1] == ("waiting_approval", 100)
-
-
 def test_sample_fixture_matches_committed_plan():
     inp = PlanningInput.model_validate(json.loads((FIXTURES / "inventory.sample.json").read_text(encoding="utf-8")))
     plan = run(inp).model_dump(mode="json", exclude={"generated_at"})
@@ -126,6 +115,6 @@ def test_sample_fixture_matches_committed_plan():
 def test_router():
     client = TestClient(app)
     body = json.loads((FIXTURES / "inventory.sample.json").read_text(encoding="utf-8"))
-    res = client.post("/planning/plan", json=body)
+    res = client.post("/assessment/plan", json=body)
     assert res.status_code == 200
     assert res.json()["approvable"] is False

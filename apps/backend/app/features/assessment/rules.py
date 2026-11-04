@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 from .schemas import (
     InventoryForPlanning,
@@ -155,6 +156,14 @@ def _db_tier(instance_class: str | None) -> str | None:
     return tier if gib <= tier_gb else None
 
 
+def gcp_name(name: str) -> str:
+    """GCP 자원 이름 규칙(소문자·숫자·하이픈, 문자로 시작, 49자 이하)에 맞춥니다. ECS 이름은 대문자·_ 를 허용함."""
+    cleaned = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
+    if not cleaned or not cleaned[0].isalpha():
+        cleaned = "app-" + cleaned
+    return cleaned[:49].rstrip("-")
+
+
 def _secret_name(service_name: str, env_name: str) -> str:
     return f"{service_name}-{env_name.lower().replace('_', '-')}"
 
@@ -180,17 +189,18 @@ def build_target_infra(inv: InventoryForPlanning, target: TargetSelection) -> tu
                    "db_tier 를 넘기지 않습니다.",
         ))
     disk = max(CLOUD_SQL_MIN_DISK_GB, db.allocated_storage_gb) if db.allocated_storage_gb else None
+    service_name = gcp_name(app.service_name)
 
     infra = TargetInfra(
         region=target.region,
-        service_name=app.service_name,
+        service_name=service_name,
         source_image=app.image_uri,
         container_port=fallback(app.container_port, DEFAULT_PORT, "컨테이너 포트"),
         cpu=fallback(_cloud_run_cpu(app.cpu_units), DEFAULT_CPU, "CPU"),
         memory=fallback(_cloud_run_memory(app.memory_mib), DEFAULT_MEMORY, "메모리(MiB)"),
         health_check_path=fallback(app.health_check_path, DEFAULT_HEALTH_PATH, "상태 확인 경로"),
         env_vars={k: v for k, v in app.env_vars.items() if k not in PROVISIONING_INJECTED_ENV},
-        secret_refs={k: _secret_name(app.service_name, k)
+        secret_refs={k: _secret_name(service_name, k)
                      for k in app.secret_refs if k not in PROVISIONING_INJECTED_ENV},
         db_version=str(TARGET_PG_MAJOR),
         db_name=db.database_name,
@@ -220,6 +230,13 @@ def collect_risks(inv: InventoryForPlanning, checks: list[PlanCheck]) -> list[Ri
 
     if inv.db.database_name is None:
         risks.append(Risk(level="medium", title="DB 이름 미제공", detail="목적지 DB 이름을 정할 수 없습니다."))
+
+    if inv.db.publicly_accessible is True:
+        risks.append(Risk(
+            level="high", title="원본 DB 퍼블릭 액세스 켜짐",
+            detail="RDS 주소가 공인 IP 로 풀려 CDC 가 VPN 을 타지 못하고 접속에 실패합니다. "
+                   "이전 전에 퍼블릭 액세스를 꺼야 합니다 (cdc 명세 2절, 대상 서비스 수정 T6).",
+        ))
 
     risks.append(Risk(
         level="low", title="Cloud SQL 생성 시간",

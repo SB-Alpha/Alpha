@@ -1,11 +1,12 @@
-"""planning 모듈의 입력·출력 계약.
+"""assessment 모듈의 입력·출력 계약 (11/4 discovery + planning 통합).
 
 다른 모듈은 이 파일만 import 합니다. 바꾸려면 받는 쪽 담당자 리뷰가 필요합니다.
 
-임시 사항 (합의되면 교체):
-- `InventoryForPlanning`: discovery 의 `SourceInventory` 가 나오기 전까지 planning 이
-  실제로 읽는 필드만 적어 둔 것입니다. SourceInventory 확정 후 그 모델로 바꿉니다.
-- `TargetInfra`: 박준서님 Terraform 변수와 이름·형식을 맞춘 것입니다 (11/3 DM 합의).
+- 바깥 계약: `AssessmentInput` (workflows → assessment), `AssessmentOutput` (assessment → workflows)
+  - `AssessmentOutput.source`: db_migration(안재현) 입력. 칸 이름은 cdc 명세 2절을 따릅니다.
+  - `AssessmentOutput.plan`: 승인 ① 화면(박재현) + `plan.target_infra` 는 provisioning(박준서) 입력.
+- 내부 계약: `DbAssessment` (db.py, 김준석) / `AppAssessment` (app.py, 이주호) → service.py 가 합칩니다.
+- `TargetInfra`: 박준서님 Terraform 변수와 이름·형식을 맞춘 것입니다 (11/3 합의, PR #26).
 """
 
 from __future__ import annotations
@@ -42,9 +43,10 @@ class TableInfo(BaseModel):
 
 
 class DbInfo(BaseModel):
-    """원본 DB 정보 (discovery 의 SourceInventory.db 에서 옴)."""
+    """원본 DB 정보 (db.py 가 채움)."""
 
     engine: str | None = None  # 예: "postgres"
+    publicly_accessible: bool | None = None  # RDS 퍼블릭 액세스. 켜져 있으면 CDC 가 VPN 을 못 탐
     engine_version: str | None = None  # 예: "16.4"
     database_name: str | None = None
     username: str | None = None  # 앱 DB 사용자 이름 (비밀번호 아님)
@@ -56,11 +58,11 @@ class DbInfo(BaseModel):
 
 
 class InventoryForPlanning(BaseModel):
-    """planning 이 SourceInventory 에서 읽는 부분. (임시 — SourceInventory 확정 후 교체)"""
+    """판정·매핑(plan.py)이 읽는 원본 사실. db.py·app.py 결과를 service.py 가 합쳐 만듭니다."""
 
     app: AppInfo
     db: DbInfo
-    gaps: list[str] = Field(default_factory=list)  # discovery 가 수집하지 못한 항목
+    gaps: list[str] = Field(default_factory=list)  # 조회하지 못한 항목
 
 
 class TargetSelection(BaseModel):
@@ -148,3 +150,90 @@ class MigrationPlan(BaseModel):
     approvable: bool  # 모든 필수 조건이 pass 일 때만 True
     blocking: list[str] = Field(default_factory=list)  # approvable=False 인 이유
     generated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# assessment 바깥 계약
+# ---------------------------------------------------------------------------
+
+
+class AssessmentInput(BaseModel):
+    """workflows → assessment. 비밀은 원문이 아니라 이름표(secret://...)만 받습니다."""
+
+    run_id: str | None = None
+    repo_url: str | None = None
+    aws_credentials_ref: str  # 원본 AWS 키 이름표
+    db_admin_ref: str | None = None  # 원본 DB 관리자 계정 이름표 (db.py 가 PG 카탈로그 조회에 씀)
+    source_region: str  # 원본 AWS 리전. 예: "ap-northeast-2"
+    target_region: str  # 목적지 GCP 리전. 예: "asia-northeast3"
+    # 원본 계정에 후보가 여러 개일 때만 지정. 비우면 하나뿐일 때 자동으로 고릅니다.
+    ecs_cluster: str | None = None
+    ecs_service: str | None = None
+    db_instance_id: str | None = None
+
+
+class SourceDb(BaseModel):
+    instance_id: str | None = None
+    host: str | None = None
+    port: int | None = None
+    database: str | None = None
+    version: str | None = None
+    publicly_accessible: bool | None = None
+    logical_replication: bool | None = None
+
+
+class SourceNetwork(BaseModel):
+    vpc_id: str | None = None
+    cidr: str | None = None
+    route_table_ids: list[str] = Field(default_factory=list)
+    db_security_group_id: str | None = None
+
+
+class SourceApp(BaseModel):
+    db_user: str | None = None  # 앱 설정의 PGUSER
+
+
+class SourceCredentials(BaseModel):
+    cloud: str | None = None  # AWS 키 이름표
+    db_admin: str | None = None  # DB 관리자 계정 이름표
+
+
+class SourceInfo(BaseModel):
+    """db_migration 입력. 칸 이름 = cdc 명세 2절 (안재현). 모르는 값은 None 으로 둡니다."""
+
+    account_id: str | None = None
+    region: str | None = None
+    db: SourceDb = Field(default_factory=SourceDb)
+    network: SourceNetwork = Field(default_factory=SourceNetwork)
+    app: SourceApp = Field(default_factory=SourceApp)
+    tables: list[str] = Field(default_factory=list)  # "schema.table"
+    credentials_ref: SourceCredentials = Field(default_factory=SourceCredentials)
+
+
+class AssessmentOutput(BaseModel):
+    source: SourceInfo
+    plan: MigrationPlan
+    gaps: list[str] = Field(default_factory=list)  # 조회 실패 항목. 값은 지어내지 않음
+
+
+# ---------------------------------------------------------------------------
+# assessment 내부 계약 (db.py · app.py → service.py)
+# ---------------------------------------------------------------------------
+
+
+class DbAssessment(BaseModel):
+    """db.py(김준석) 결과: DB·네트워크 조회 사실."""
+
+    facts: DbInfo = Field(default_factory=DbInfo)
+    source_db: SourceDb = Field(default_factory=SourceDb)
+    network: SourceNetwork = Field(default_factory=SourceNetwork)
+    gaps: list[str] = Field(default_factory=list)
+
+
+class AppAssessment(BaseModel):
+    """app.py(이주호) 결과: ECS·ECR 조회 사실."""
+
+    facts: AppInfo
+    account_id: str | None = None
+    db_user: str | None = None  # 앱 설정 PGUSER
+    gaps: list[str] = Field(default_factory=list)
