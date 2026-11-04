@@ -22,6 +22,12 @@ variable "source_image" {
   default     = null
 }
 
+variable "container_image" {
+  description = "Cloud Run 이 실행할 Artifact Registry 이미지 주소. 비우면 registry 주소 기준 기본값을 씀"
+  type        = string
+  default     = null
+}
+
 variable "container_port" {
   description = "컨테이너 포트"
   type        = number
