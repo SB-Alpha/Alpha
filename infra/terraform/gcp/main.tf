@@ -36,3 +36,13 @@ module "secrets" {
   db_password = module.database.db_password
   secret_refs = var.secret_refs
 }
+
+module "iam" {
+  source     = "./modules/iam"
+  project_id = var.project_id
+  name       = var.service_name
+  secret_ids = concat(
+    [module.secrets.db_password_secret_id],
+    values(module.secrets.secret_ref_ids),
+  )
+}
