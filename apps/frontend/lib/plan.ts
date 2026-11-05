@@ -30,28 +30,29 @@ const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((s): s is
 
 export function readPlan(output: unknown): PlanView | null {
   if (!isRecord(output)) return null;
-  const checks = Array.isArray(output.checks)
-    ? output.checks.filter(isRecord).map((c): PlanCheck => ({
+  const root = isRecord(output.plan) ? output.plan : output;
+  const checks = Array.isArray(root.checks)
+    ? root.checks.filter(isRecord).map((c): PlanCheck => ({
         id: String(c.id ?? ""),
         title: String(c.title ?? c.id ?? "이름 없음"),
         result: c.result === "pass" || c.result === "fail" ? c.result : "unknown",
         detail: typeof c.detail === "string" ? c.detail : "",
       }))
     : [];
-  const risks = Array.isArray(output.risks)
-    ? output.risks.filter(isRecord).map((r): PlanRisk => ({
+  const risks = Array.isArray(root.risks)
+    ? root.risks.filter(isRecord).map((r): PlanRisk => ({
         level: r.level === "high" || r.level === "low" ? r.level : "medium",
         title: String(r.title ?? ""),
         detail: typeof r.detail === "string" ? r.detail : "",
       }))
     : [];
   return {
-    summary: strings(output.summary),
+    summary: strings(root.summary),
     checks,
     risks,
-    approvable: typeof output.approvable === "boolean" ? output.approvable : null,
-    blocking: strings(output.blocking),
-    summarySource: output.summary_source === "ai" || output.summary_source === "rule" ? output.summary_source : null,
+    approvable: typeof root.approvable === "boolean" ? root.approvable : null,
+    blocking: strings(root.blocking),
+    summarySource: root.summary_source === "ai" || root.summary_source === "rule" ? root.summary_source : null,
   };
 }
 

@@ -5,6 +5,7 @@ export const STAGE_LABEL: Record<StageName, string> = {
   planning: "이전 계획",
   provisioning: "목적지 구축",
   db_migration: "DB 동기화",
+  app_deploy: "앱 배포",
   cutover: "트래픽 전환",
 };
 

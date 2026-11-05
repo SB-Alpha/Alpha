@@ -17,10 +17,12 @@ const REQUIRED_FIELDS: { key: FieldKey; label: string; placeholder: string }[] =
 ];
 
 const REFERENCE_FIELDS: { key: FieldKey; label: string; placeholder: string }[] = [
+  { key: "aws_credentials_ref", label: "AWS 자격증명 참조", placeholder: "secret://aws/default 또는 profile:default" },
   { key: "aws_role_ref", label: "AWS 조회 역할 ARN", placeholder: "arn:aws:iam::<account>:role/<name>" },
   { key: "ecs_service", label: "ECS 서비스", placeholder: "target-app" },
   { key: "rds_instance_id", label: "RDS 식별자", placeholder: "target-db" },
   { key: "db_credentials_ref", label: "DB 접속 정보 참조", placeholder: "arn:aws:secretsmanager:..." },
+  { key: "db_admin_ref", label: "DB 관리자 계정 참조", placeholder: "secret://db/admin" },
 ];
 
 const INITIAL: Record<FieldKey, string> = {
@@ -28,9 +30,11 @@ const INITIAL: Record<FieldKey, string> = {
   aws_region: "ap-northeast-2",
   target_region: "asia-northeast3",
   aws_role_ref: "",
+  aws_credentials_ref: "",
   ecs_service: "",
   rds_instance_id: "",
   db_credentials_ref: "",
+  db_admin_ref: "",
 };
 
 function toRequest(form: Record<FieldKey, string>): MigrationRequest {
@@ -40,9 +44,11 @@ function toRequest(form: Record<FieldKey, string>): MigrationRequest {
     aws_region: form.aws_region.trim(),
     target_region: form.target_region.trim() || "asia-northeast3",
     aws_role_ref: optional(form.aws_role_ref),
+    aws_credentials_ref: optional(form.aws_credentials_ref),
     ecs_service: optional(form.ecs_service),
     rds_instance_id: optional(form.rds_instance_id),
     db_credentials_ref: optional(form.db_credentials_ref),
+    db_admin_ref: optional(form.db_admin_ref),
   };
 }
 

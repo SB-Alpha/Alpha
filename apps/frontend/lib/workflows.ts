@@ -10,11 +10,11 @@ export type WorkflowState =
   | "failed"
   | "aborted";
 
-export type StageName = "discovery" | "planning" | "provisioning" | "db_migration" | "cutover";
+export type StageName = "discovery" | "planning" | "provisioning" | "db_migration" | "app_deploy" | "cutover";
 
 export type Gate = "plan" | "cutover";
 
-export const STAGE_ORDER: StageName[] = ["discovery", "planning", "provisioning", "db_migration", "cutover"];
+export const STAGE_ORDER: StageName[] = ["discovery", "planning", "provisioning", "db_migration", "app_deploy", "cutover"];
 
 export const GATE_BEFORE: Partial<Record<StageName, Gate>> = { provisioning: "plan", cutover: "cutover" };
 
@@ -22,9 +22,11 @@ export interface MigrationRequest {
   github_repo_url: string;
   aws_region: string;
   aws_role_ref?: string | null;
+  aws_credentials_ref?: string | null;
   ecs_service?: string | null;
   rds_instance_id?: string | null;
   db_credentials_ref?: string | null;
+  db_admin_ref?: string | null;
   target_region?: string;
 }
 
