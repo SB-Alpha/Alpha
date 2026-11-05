@@ -205,12 +205,15 @@ def run_app_deploy(run: RunStatus, ctx: RunContext) -> Any:
     """
     target_infra = _extract_plan_target_infra(run)
 
+    import os
     from app.features.provisioning import service as provisioning_service
     from app.features.provisioning.schemas import AppDeployInput
 
+    worker_url = os.environ.get("WORKER_URL")
     inp = AppDeployInput(
         run_id=run.run_id,
         target_infra=target_infra,
+        update_worker_target=bool(worker_url),
     )
     return provisioning_service.deploy_app(inp, ctx)
 
