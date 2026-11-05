@@ -1,0 +1,11 @@
+# 복사해서 terraform.tfvars로 쓴다. terraform.tfvars는 커밋하지 않는다.
+vpc_id               = "vpc-<원본 VPC>"
+route_table_ids      = ["rtb-<RDS 서브넷 라우팅 테이블>"]
+db_security_group_id = "sg-<RDS 보안 그룹>"
+
+# oci_ip는 OCI 루트 출력 oracle_tunnel_ips["aws-0"], ["aws-1"]. 공유 비밀은 OCI 쪽과 같은 값.
+tunnels = [
+  { oci_ip = "192.0.2.10", inside_cidr = "169.254.21.0/30" },
+  { oci_ip = "192.0.2.11", inside_cidr = "169.254.22.0/30" },
+]
+shared_secrets = ["<aws-0 비밀>", "<aws-1 비밀>"]

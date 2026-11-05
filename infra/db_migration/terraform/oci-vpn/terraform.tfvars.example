@@ -1,0 +1,43 @@
+# 복사해서 terraform.tfvars로 쓴다. 평소에는 backend 모듈(vpn.py)이 값을 만들어 넘긴다.
+compartment_id = "ocid1.compartment.oc1..xxxx"
+drg_id         = "ocid1.drg.oc1.xxxx"
+
+tunnels = {
+  # cpe_ip는 AWS tunnel1 공인 IP. BGP 주소는 169.254.10.0~19.255를 피한다 (OCI가 거부).
+  "aws-0" = {
+    cpe_ip        = "203.0.113.10"
+    peer_cidrs    = ["172.31.0.0/16"]
+    peer_asn      = "64512"
+    oracle_bgp_ip = "169.254.21.2/30"
+    peer_bgp_ip   = "169.254.21.1/30"
+  }
+  "aws-1" = {
+    cpe_ip        = "203.0.113.11"
+    peer_cidrs    = ["172.31.0.0/16"]
+    peer_asn      = "64512"
+    oracle_bgp_ip = "169.254.22.2/30"
+    peer_bgp_ip   = "169.254.22.1/30"
+  }
+  # cpe_ip는 GCP ha_vpn_interface_ips[0], [1].
+  "gcp-0" = {
+    cpe_ip        = "198.51.100.10"
+    peer_cidrs    = ["10.10.0.0/16", "10.20.0.0/20"]
+    peer_asn      = "65010"
+    oracle_bgp_ip = "169.254.31.2/30"
+    peer_bgp_ip   = "169.254.31.1/30"
+  }
+  "gcp-1" = {
+    cpe_ip        = "198.51.100.11"
+    peer_cidrs    = ["10.10.0.0/16", "10.20.0.0/20"]
+    peer_asn      = "65010"
+    oracle_bgp_ip = "169.254.32.2/30"
+    peer_bgp_ip   = "169.254.32.1/30"
+  }
+}
+
+shared_secrets = {
+  "aws-0" = "<영문·숫자 8~64자>"
+  "aws-1" = "<영문·숫자 8~64자>"
+  "gcp-0" = "<영문·숫자 8~64자>"
+  "gcp-1" = "<영문·숫자 8~64자>"
+}

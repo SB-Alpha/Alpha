@@ -1,0 +1,12 @@
+# 복사해서 terraform.tfvars로 쓴다. terraform.tfvars는 커밋하지 않는다.
+project              = "<GCP 프로젝트 ID>"
+network              = "<목적지 VPC 이름>"
+advertised_ip_ranges = ["10.20.0.0/20"] # Cloud SQL PSA 할당 대역
+
+# 1단계: 비워 두고 apply → ha_vpn_interface_ips를 OCI 쪽 gcp-0, gcp-1 cpe_ip에 넣는다.
+# 3단계: OCI 출력 oracle_tunnel_ips["gcp-0"], ["gcp-1"]로 채우고 다시 apply.
+oci_tunnels = [
+  # { oci_ip = "192.0.2.20", gcp_bgp_ip = "169.254.31.1/30", oci_bgp_ip = "169.254.31.2" },
+  # { oci_ip = "192.0.2.21", gcp_bgp_ip = "169.254.32.1/30", oci_bgp_ip = "169.254.32.2" },
+]
+# shared_secrets = ["<gcp-0 비밀>", "<gcp-1 비밀>"]
