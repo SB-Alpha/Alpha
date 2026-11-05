@@ -19,6 +19,7 @@ resource "google_sql_database_instance" "this" {
     ip_configuration {
       ipv4_enabled    = false # 공개 IP 없이 사설 IP 만 사용
       private_network = var.network_id
+      ssl_mode        = "ENCRYPTED_ONLY" # 암호화 필수, 클라이언트 인증서는 요구하지 않음
     }
 
     # CDC(논리 복제) 대상이므로 켠다
@@ -45,4 +46,17 @@ resource "google_sql_user" "this" {
   project  = var.project_id
   instance = google_sql_database_instance.this.name
   password = random_password.db.result
+}
+
+# db_migration 이 VPN 접속 후 SQL(CREATE ROLE 등)을 실행할 때 쓰는 관리자 계정의 비밀번호
+resource "random_password" "admin" {
+  length  = 24
+  special = false
+}
+
+resource "google_sql_user" "admin" {
+  name     = "postgres"
+  project  = var.project_id
+  instance = google_sql_database_instance.this.name
+  password = random_password.admin.result
 }

@@ -38,9 +38,10 @@ module "secrets" {
 }
 
 module "iam" {
-  source     = "./modules/iam"
-  project_id = var.project_id
-  name       = var.service_name
+  source         = "./modules/iam"
+  project_id     = var.project_id
+  name           = var.service_name
+  create_vpn_key = var.create_vpn_key
   secret_ids = concat(
     [module.secrets.db_password_secret_id],
     values(module.secrets.secret_ref_ids),
@@ -48,6 +49,7 @@ module "iam" {
 }
 
 module "app" {
+  count                 = var.deploy_app ? 1 : 0
   source                = "./modules/app"
   project_id            = var.project_id
   region                = var.region

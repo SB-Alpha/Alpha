@@ -22,6 +22,18 @@ variable "source_image" {
   default     = null
 }
 
+variable "deploy_app" {
+  description = "Cloud Run 앱을 배포할지. db_migration 이 streaming 에 들어가 테이블이 만들어진 뒤에 true 로 바꿔 두 번째 apply 를 한다"
+  type        = bool
+  default     = false
+}
+
+variable "create_vpn_key" {
+  description = "VPN 서비스 계정 키를 발급할지. 조직 정책이 키 발급을 막고 있으면 false"
+  type        = bool
+  default     = false
+}
+
 variable "container_image" {
   description = "Cloud Run 이 실행할 Artifact Registry 이미지 주소. 비우면 registry 주소 기준 기본값을 씀"
   type        = string
