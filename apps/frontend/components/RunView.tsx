@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { DashboardPanel } from "@/components/DashboardPanel";
 import { PlanApproval } from "@/components/PlanApproval";
 import { RunActions } from "@/components/RunActions";
+import { SelfHealingCard } from "@/components/SelfHealingCard";
 import { StageStepper } from "@/components/StageStepper";
 import { StateBadge } from "@/components/StateBadge";
 import { formatTime } from "@/lib/labels";
@@ -96,6 +97,13 @@ export function RunView() {
             run={run}
             isBusy={isBusy}
             onApprove={(comment) => act(() => workflows.approve(run.run_id, "plan", comment))}
+          />
+
+          <SelfHealingCard
+            run={run}
+            onApplyManual={(output) =>
+              run.current_stage && act(() => workflows.submitManual(run.run_id, run.current_stage!, output, "AI 자가치유 권장 픽스처 주입"))
+            }
           />
 
           <RunActions

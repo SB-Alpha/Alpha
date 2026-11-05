@@ -10,6 +10,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from app.core.config import get_settings
 
 from .engine import Engine, InvalidTransition
+from .healer import SelfHealingDiagnosis, diagnose_run
 from .schemas import (
     AbortRequest,
     ApproveRequest,
@@ -98,3 +99,11 @@ def submit_manual(
     run = _apply(run_id, lambda: engine.submit_manual(run_id, stage, req))
     background.add_task(engine.advance, run_id)
     return run
+
+
+@router.get("/{run_id}/diagnosis", response_model=SelfHealingDiagnosis)
+@router.post("/{run_id}/diagnose", response_model=SelfHealingDiagnosis)
+def get_diagnosis(run_id: str, engine: Engine = Depends(get_engine)) -> SelfHealingDiagnosis:
+    """장애 발생 시 AI 자가치유(Self-Healing) 진단 리포트를 생성합니다."""
+    run = _apply(run_id, lambda: engine.get(run_id))
+    return diagnose_run(run)

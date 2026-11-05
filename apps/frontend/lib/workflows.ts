@@ -54,6 +54,14 @@ export interface RunStatus {
   updated_at: string;
 }
 
+export interface SelfHealingDiagnosis {
+  category: string;
+  root_cause: string;
+  action_plan: string[];
+  suggested_manual_input?: Record<string, unknown> | null;
+  diagnosed_by: "ai" | "rule";
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -107,4 +115,5 @@ export const workflows = {
   resume: (runId: string) => post<RunStatus>(`/${encodeURIComponent(runId)}/resume`),
   submitManual: (runId: string, stage: StageName, output: Record<string, unknown>, note?: string) =>
     post<RunStatus>(`/${encodeURIComponent(runId)}/stages/${stage}/manual`, { output, note: note || null }),
+  getDiagnosis: (runId: string) => call<SelfHealingDiagnosis>(`/${encodeURIComponent(runId)}/diagnosis`),
 };
