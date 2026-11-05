@@ -156,6 +156,57 @@ def test_db_migration_runner_calls_service(engine, monkeypatch):
     assert calls[0]["target"] == {"project_id": "p-1"}
 
 
+def test_db_migration_runner_detects_streaming_in_background(engine, monkeypatch):
+    import threading
+
+    stop_event = threading.Event()
+
+    def fake_streaming_run(inp, proxy_ctx):
+        # 스트리밍 도달 보고 후 백그라운드에서 계속 대기
+        proxy_ctx.report("running", 50, {"phase": "streaming", "copied_rows": 100}, "CDC 스트리밍 중")
+        stop_event.wait(timeout=2.0)
+        return {"state": "stopped", "job_id": inp["run_id"]}
+
+    monkeypatch.setattr("app.features.db_migration.service.run", fake_streaming_run, raising=False)
+
+    reports = []
+
+    class FakeCtx:
+        def report(self, state, progress, metrics=None, message=None):
+            reports.append((state, progress, metrics, message))
+
+    run = engine.create_run(REQUEST)
+    run = run.model_copy(update={"outputs": {
+        "planning": {"source": {"tables": ["public.users"]}},
+        "provisioning": {"target": {"project_id": "p-1"}},
+    }})
+
+    out = run_db_migration(run, ctx=FakeCtx(), poll_interval_s=0.01)  # type: ignore[arg-type]
+    stop_event.set()
+
+    assert out["state"] == "streaming"
+    assert out["phase"] == "streaming"
+    assert out["metrics"]["copied_rows"] == 100
+    assert any("CDC 스트리밍 복제 중" in r[3] for r in reports if r[3])
+
+
+def test_db_migration_runner_raises_on_background_error(engine, monkeypatch):
+    def broken_run(inp, proxy_ctx):
+        raise RuntimeError("VPN 연결 실패")
+
+    monkeypatch.setattr("app.features.db_migration.service.run", broken_run, raising=False)
+
+    run = engine.create_run(REQUEST)
+    run = run.model_copy(update={"outputs": {
+        "planning": {"source": {"tables": ["public.users"]}},
+        "provisioning": {"target": {"project_id": "p-1"}},
+    }})
+
+    with pytest.raises(RuntimeError, match="VPN 연결 실패"):
+        run_db_migration(run, ctx=None, poll_interval_s=0.01)  # type: ignore[arg-type]
+
+
+
 def test_db_migration_runner_missing_outputs_raises(engine):
     run = engine.create_run(REQUEST)
     with pytest.raises(MissingStageOutput, match="원본"):

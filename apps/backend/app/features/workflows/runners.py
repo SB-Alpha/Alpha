@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -85,7 +86,13 @@ def run_provisioning(run: RunStatus, ctx: RunContext) -> Any:
     return provisioning_service.run(inp, ctx)
 
 
-def run_db_migration(run: RunStatus, ctx: RunContext) -> Any:
+def run_db_migration(
+    run: RunStatus,
+    ctx: RunContext,
+    *,
+    poll_interval_s: float = 0.5,
+    timeout_s: float = 600.0,
+) -> Any:
     # assessment(source)와 provisioning(target) 결과를 조립하여 CDC DB 마이그레이션을 실행합니다.
     planning_out = run.outputs.get(StageName.PLANNING.value)
     if not planning_out or not planning_out.get("source"):
@@ -102,6 +109,7 @@ def run_db_migration(run: RunStatus, ctx: RunContext) -> Any:
         target = target.model_dump()
 
     from app.features.db_migration import service as db_migration_service
+    from app.features.db_migration.guide_workflow import APP_DEPLOY_PHASES, to_job_id
 
     source_dict = dict(source)
     if "tables" in source_dict and isinstance(source_dict["tables"], list):
@@ -116,7 +124,72 @@ def run_db_migration(run: RunStatus, ctx: RunContext) -> Any:
         "source": source_dict,
         "target": dict(target),
     }
-    return db_migration_service.run(inp, ctx)
+
+    job_id = to_job_id(run.run_id)
+    ready_event = threading.Event()
+    result_holder: list[Any] = []
+    error_holder: list[Exception] = []
+    latest_metrics: dict[str, Any] = {}
+    latest_phase = ["init"]
+
+    class _ReportingProxy:
+        def report(
+            self,
+            state: str,
+            progress: int,
+            metrics: dict[str, Any] | None = None,
+            message: str | None = None,
+        ) -> None:
+            if metrics:
+                latest_metrics.update(metrics)
+                phase = metrics.get("phase")
+                if phase:
+                    latest_phase[0] = phase
+                    if phase in APP_DEPLOY_PHASES:
+                        ready_event.set()
+            if ctx is not None:
+                ctx.report(state, progress, metrics, message)
+
+    def _worker() -> None:
+        try:
+            res = db_migration_service.run(inp, _ReportingProxy())
+            result_holder.append(res)
+        except Exception as exc:
+            error_holder.append(exc)
+        finally:
+            ready_event.set()
+
+    thread = threading.Thread(target=_worker, daemon=True, name=f"cdc-runner-{job_id}")
+    thread.start()
+
+    start_t = time.monotonic()
+    while True:
+        if error_holder:
+            raise error_holder[0]
+
+        if result_holder:
+            res = result_holder[0]
+            if hasattr(res, "state") and res.state == "failed":
+                raise RuntimeError(getattr(res, "message", "db_migration 실패"))
+            if isinstance(res, dict) and res.get("state") == "failed":
+                raise RuntimeError(res.get("message", "db_migration 실패"))
+            return res
+
+        if ready_event.is_set():
+            phase = latest_phase[0]
+            if ctx is not None:
+                ctx.report("running", 100, latest_metrics, f"CDC 스트리밍 복제 중 ({phase})")
+            return {
+                "job_id": job_id,
+                "phase": phase,
+                "state": "streaming",
+                "metrics": latest_metrics,
+            }
+
+        if time.monotonic() - start_t > timeout_s:
+            raise TimeoutError(f"CDC 스트리밍 진입 대기 시간({timeout_s}초)을 초과했습니다")
+
+        time.sleep(poll_interval_s)
 
 
 def run_app_deploy(run: RunStatus, ctx: RunContext) -> Any:
