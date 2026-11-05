@@ -1,0 +1,163 @@
+{
+  "target_infra": {
+    "region": "asia-northeast3",
+    "service_name": "target-app",
+    "source_image": null,
+    "container_port": 8080,
+    "cpu": 1,
+    "memory": 512,
+    "health_check_path": "/health/ready",
+    "env_vars": {},
+    "secret_refs": {},
+    "db_version": "16",
+    "db_name": null,
+    "db_user": "alpha",
+    "db_tier": "db-g1-small",
+    "db_disk_size_gb": 20,
+    "db_logical_decoding": true
+  },
+  "checks": [
+    {
+      "id": "pg_version_compatible",
+      "title": "PostgreSQL 버전 호환",
+      "result": "pass",
+      "detail": "원본 16 → 목적지 16"
+    },
+    {
+      "id": "logical_replication_enabled",
+      "title": "논리 복제 설정",
+      "result": "unknown",
+      "detail": "논리 복제 설정 미제공"
+    },
+    {
+      "id": "primary_keys_present",
+      "title": "모든 테이블에 PK",
+      "result": "pass",
+      "detail": "1개 테이블 모두 PK 있음"
+    },
+    {
+      "id": "image_available",
+      "title": "컨테이너 이미지 확보",
+      "result": "unknown",
+      "detail": "원본 이미지 주소 미제공"
+    }
+  ],
+  "risks": [
+    {
+      "level": "medium",
+      "title": "확인 안 됨: 논리 복제 설정",
+      "detail": "논리 복제 설정 미제공",
+      "source": "rule"
+    },
+    {
+      "level": "medium",
+      "title": "확인 안 됨: 컨테이너 이미지 확보",
+      "detail": "원본 이미지 주소 미제공",
+      "source": "rule"
+    },
+    {
+      "level": "medium",
+      "title": "원본 수집 누락",
+      "detail": "ECR 이미지 URI·digest 미수집",
+      "source": "rule"
+    },
+    {
+      "level": "medium",
+      "title": "원본 수집 누락",
+      "detail": "Fargate 태스크 CPU·메모리 미수집",
+      "source": "rule"
+    },
+    {
+      "level": "medium",
+      "title": "원본 수집 누락",
+      "detail": "RDS DB 이름·rds.logical_replication 실제 값 미수집",
+      "source": "rule"
+    },
+    {
+      "level": "medium",
+      "title": "원본 수집 누락",
+      "detail": "비밀 아닌 환경 변수 값(LOG_LEVEL 등)·PGPASSWORD 비밀 참조(ARN) 미수집",
+      "source": "rule"
+    },
+    {
+      "level": "medium",
+      "title": "DB 이름 미제공",
+      "detail": "목적지 DB 이름을 정할 수 없습니다.",
+      "source": "rule"
+    },
+    {
+      "level": "low",
+      "title": "Cloud SQL 생성 시간",
+      "detail": "Cloud SQL 생성은 오래 걸릴 수 있습니다. 실제 소요 시간은 provisioning 측정값을 따릅니다.",
+      "source": "rule"
+    },
+    {
+      "level": "medium",
+      "title": "CPU 기본값 사용",
+      "detail": "원본에서 CPU 을(를) 받지 못해 기본값 1 로 계획했습니다. 확인이 필요합니다.",
+      "source": "rule"
+    },
+    {
+      "level": "medium",
+      "title": "메모리(MiB) 기본값 사용",
+      "detail": "원본에서 메모리(MiB) 을(를) 받지 못해 기본값 512 로 계획했습니다. 확인이 필요합니다.",
+      "source": "rule"
+    }
+  ],
+  "summary": [
+    "target-app 를 GCP asia-northeast3 의 Cloud Run(1 vCPU, 512MiB) + Cloud SQL PostgreSQL 16 로 옮깁니다.",
+    "필수 조건 2/4 통과.",
+    "승인 불가: 논리 복제 설정, 컨테이너 이미지 확보 확인 필요."
+  ],
+  "summary_source": "rule",
+  "steps": [
+    {
+      "order": 1,
+      "module": "workflows",
+      "action": "계획 승인 ①",
+      "needs_approval": true
+    },
+    {
+      "order": 2,
+      "module": "provisioning",
+      "action": "이미지 이동 ECR → Artifact Registry",
+      "needs_approval": false
+    },
+    {
+      "order": 3,
+      "module": "provisioning",
+      "action": "terraform apply: VPC, Cloud SQL(논리 디코딩), Artifact Registry, Cloud Run, Secret Manager",
+      "needs_approval": false
+    },
+    {
+      "order": 4,
+      "module": "provisioning",
+      "action": "Cloud Run 상태 확인 경로 성공 확인 → TargetEnv 반환",
+      "needs_approval": false
+    },
+    {
+      "order": 5,
+      "module": "db_migration",
+      "action": "CDC 초기 복사 + 변경분 동기화, 행 수·데이터 대조",
+      "needs_approval": false
+    },
+    {
+      "order": 6,
+      "module": "workflows",
+      "action": "전환 승인 ②",
+      "needs_approval": true
+    },
+    {
+      "order": 7,
+      "module": "traffic",
+      "action": "Cloudflare 보류 → 최종 변경분 반영·검증 → 경로를 GCP 로 변경 → 보류 해제",
+      "needs_approval": false
+    }
+  ],
+  "approvable": false,
+  "blocking": [
+    "논리 복제 설정: 논리 복제 설정 미제공",
+    "컨테이너 이미지 확보: 원본 이미지 주소 미제공"
+  ],
+  "generated_at": "2026-11-03T12:19:25.526658Z"
+}

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Work Items</title>
+  <style>
+    :root { --fg: #1d1d1f; --muted: #6e6e73; --line: #d2d2d7; --accent: #0b63ce; --bg: #fafafa; }
+    body { font-family: system-ui, -apple-system, sans-serif; color: var(--fg); background: var(--bg);
+           max-width: 760px; margin: 32px auto; padding: 0 16px; }
+    header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    h1 { margin: 0; font-size: 1.5rem; }
+    .meta { color: var(--muted); font-size: .85rem; }
+    form { display: flex; gap: 8px; margin: 20px 0; flex-wrap: wrap; }
+    input, select, button { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
+    input[name=title] { flex: 1 1 220px; }
+    button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; }
+    button.ghost { background: transparent; color: var(--fg); border-color: var(--line); }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { display: flex; gap: 8px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); }
+    li .title { flex: 1; overflow-wrap: anywhere; }
+    li .when { color: var(--muted); font-size: .8rem; white-space: nowrap; }
+    #error { color: #b00020; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>업무 항목</h1>
+    <span class="meta" id="meta">불러오는 중…</span>
+  </header>
+
+  <form id="create">
+    <input name="title" placeholder="새 업무 항목" maxlength="200" required>
+    <button type="submit">추가</button>
+  </form>
+  <p id="error" role="alert"></p>
+  <ul id="items"></ul>
+
+  <script>
+    const API = '/api/work-items';
+    const STATUSES = { todo: '할 일', in_progress: '진행 중', done: '완료' };
+    const $ = (sel) => document.querySelector(sel);
+
+    async function call(method, url, body) {
+      const res = await fetch(url, {
+        method,
+        headers: body ? { 'Content-Type': 'application/json' } : {},
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (!res.ok) throw new Error(`${method} ${url} → ${res.status}`);
+      $('#meta').textContent = `served by: ${res.headers.get('X-Served-By') ?? '알 수 없음'}`;
+      return res.status === 204 ? null : res.json();
+    }
+
+    function row(item) {
+      const li = document.createElement('li');
+
+      const title = document.createElement('span');
+      title.className = 'title';
+      title.textContent = item.title;
+
+      const status = document.createElement('select');
+      for (const [value, label] of Object.entries(STATUSES)) {
+        status.add(new Option(label, value, false, value === item.status));
+      }
+      status.onchange = () => run(() => call('PATCH', `${API}/${item.id}`, { status: status.value }));
+
+      const edit = document.createElement('button');
+      edit.className = 'ghost';
+      edit.textContent = '수정';
+      edit.onclick = () => {
+        const next = prompt('제목 수정', item.title);
+        if (next && next.trim()) run(() => call('PATCH', `${API}/${item.id}`, { title: next.trim() }));
+      };
+
+      const del = document.createElement('button');
+      del.className = 'ghost';
+      del.textContent = '삭제';
+      del.onclick = () => run(() => call('DELETE', `${API}/${item.id}`));
+
+      const when = document.createElement('span');
+      when.className = 'when';
+      when.textContent = new Date(item.updated_at).toLocaleString('ko-KR');
+
+      li.append(title, status, when, edit, del);
+      return li;
+    }
+
+    async function load() {
+      const items = await call('GET', `${API}?limit=50`);
+      $('#items').replaceChildren(...items.map(row));
+    }
+
+    async function run(action) {
+      $('#error').textContent = '';
+      try {
+        await action();
+        await load();
+      } catch (err) {
+        $('#error').textContent = err.message;
+      }
+    }
+
+    $('#create').onsubmit = (event) => {
+      event.preventDefault();
+      const input = event.target.title;
+      const title = input.value.trim();
+      if (!title) return;
+      run(async () => {
+        await call('POST', API, { title });
+        input.value = '';
+      });
+    };
+
+    run(() => Promise.resolve());
+  </script>
+</body>
+</html>
