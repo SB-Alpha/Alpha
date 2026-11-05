@@ -153,6 +153,17 @@ await check("에이전트가 release 를 안 부르면 max_hold_ms + 10초 뒤 �
   assert.match(body.released_at, ISO_MS);
 });
 
+// ---- 경로가 // 로 시작해도 원본 호스트에 머문다 ----
+// 예전 방식(new URL(경로, base))은 //호스트/경로 를 "다른 호스트"로 해석해서 요청이 엉뚱한 곳으로 나갔다.
+await check("경로가 //다른호스트/... 이어도 요청은 설정된 원본(aws)으로만 간다", async () => {
+  await control("reset", {});
+  for (const path of ["//localhost:9003/x", "//127.0.0.1:9003/x", "///localhost:9003/x"]) {
+    const res = await fetch(BASE + path);
+    await res.arrayBuffer();
+    assert.equal(res.headers.get("x-served-by"), "aws", `${path} -> ${res.headers.get("x-served-by")}`);
+  }
+});
+
 // ---- target 명령 (규격 밖 보조 기능): GCP 쪽 원본 주소를 실행 중에 바꾼다. 세 번째 가짜 원본 9003(gcp2) 필요 ----
 const targetUrl = async () => (await control("target")).body.url;
 
