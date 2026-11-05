@@ -17,6 +17,16 @@ class MissingStageOutput(RuntimeError):
     """요청이나 앞 단계 출력이 없어 이 단계 입력을 만들 수 없을 때."""
 
 
+DISCOVERY_MERGED_MESSAGE = "assessment 에 통합 — 원본 조회는 planning 단계에서 합니다"
+
+
+def run_discovery(run: RunStatus, ctx: RunContext) -> dict[str, Any]:
+    # 11/4 합의로 discovery·planning 은 assessment 하나로 합쳤습니다 (PR #27). 원본 조회 결과는
+    # planning 출력의 `source` 에 있으므로 이 단계는 조회 없이 그 사실만 남기고 넘깁니다.
+    ctx.report("running", 100, None, DISCOVERY_MERGED_MESSAGE)
+    return {"merged_into": StageName.PLANNING.value, "note": DISCOVERY_MERGED_MESSAGE}
+
+
 def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
     # assessment 가 discovery·planning 을 합친 모듈입니다 (PR #27). 출력은 {source, plan, gaps}.
     req = run.request
@@ -43,5 +53,6 @@ def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
 
 
 RUNNERS: Mapping[StageName, StageRunner] = {
+    StageName.DISCOVERY: run_discovery,
     StageName.PLANNING: run_assessment,
 }

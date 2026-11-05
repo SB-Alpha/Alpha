@@ -5,9 +5,13 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from app.features.workflows.engine import Engine
-from app.features.workflows.runners import RUNNERS, MissingStageOutput, run_assessment
+from app.features.workflows.runners import (
+    DISCOVERY_MERGED_MESSAGE,
+    RUNNERS,
+    MissingStageOutput,
+    run_assessment,
+)
 from app.features.workflows.schemas import (
-    ManualStageInput,
     MigrationRequest,
     StageName,
     WorkflowState,
@@ -48,10 +52,8 @@ def fake_assessment(monkeypatch):
 
 
 def test_assessment_runs_and_waits_for_plan_approval(engine, fake_assessment):
-    run_id = engine.advance(engine.create_run(REQUEST).run_id).run_id
-    engine.submit_manual(run_id, StageName.DISCOVERY, ManualStageInput(output={}, note="assessment 로 통합"))
-
-    run = engine.advance(run_id)
+    run = engine.advance(engine.create_run(REQUEST).run_id)
+    run_id = run.run_id
 
     assert run.state == WorkflowState.WAITING_APPROVAL
     assert run.waiting_gate == "plan"
@@ -89,3 +91,15 @@ def test_absent_assessment_module_gives_clear_error(engine, monkeypatch):
 
     with pytest.raises(RuntimeError, match="assessment 모듈을 찾을 수 없습니다"):
         run_assessment(engine.create_run(REQUEST), ctx=None)  # type: ignore[arg-type]
+
+
+def test_discovery_passes_through_as_merged_into_assessment(engine, fake_assessment):
+    run = engine.advance(engine.create_run(REQUEST).run_id)
+
+    discovery = run.stage(StageName.DISCOVERY)
+    assert discovery.state == WorkflowState.SUCCEEDED
+    assert discovery.manual is False
+    assert "assessment 에 통합" in discovery.message
+    assert run.outputs["discovery"] == {"merged_into": "planning", "note": DISCOVERY_MERGED_MESSAGE}
+    # 원본 조회는 planning(assessment) 한 번만
+    assert len(fake_assessment.calls) == 1

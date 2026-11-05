@@ -11,6 +11,8 @@
 discovery → planning → [승인 ① plan] → provisioning → db_migration → app_deploy → [승인 ② cutover] → cutover
 ```
 
+- `discovery` 는 assessment 에 통합돼(11/4, PR #27) 조회 없이 바로 통과합니다 (`merged_into: planning`). 원본 조회 결과는 planning 출력의 `source` 에 있습니다.
+
 | 상황 | run `state` | 단계 `state` |
 | --- | --- | --- |
 | 단계 실행 중 | `running` | `running` (모듈이 `ctx.report()`로 갱신) |
