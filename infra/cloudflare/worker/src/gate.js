@@ -16,6 +16,7 @@ const initialState = () => ({
   held_count: 0,
   updated_at: null,
   max_hold_ms: DEFAULT_MAX_HOLD_MS,
+  target_url: null, // 제어 명령(target)으로 정한 GCP 쪽 원본 주소. null 이면 설정값 UPSTREAM_TARGET 을 쓴다
 });
 
 const ok = (body) => ({ status: 200, body });
@@ -51,7 +52,8 @@ export class Gate extends DurableObject {
     }
     let inflightSource = 0;
     for (const ticket of this.tickets.values()) if (ticket.origin === "SOURCE") inflightSource++;
-    const { max_hold_ms: _internal, ...visible } = this.state;
+    // max_hold_ms, target_url 은 내부용이라 상태 객체(규격)에는 넣지 않는다
+    const { max_hold_ms: _internal, target_url: _target, ...visible } = this.state;
     return { ...visible, inflight_source: inflightSource };
   }
 
@@ -93,7 +95,8 @@ export class Gate extends DurableObject {
     const origin = this.state.mode;
     const ticket = ++this.seq;
     this.tickets.set(ticket, { origin, startedAt: Date.now() });
-    return { origin, ticket };
+    // target: 제어 명령으로 정한 GCP 쪽 주소 (없으면 null). 예전에 저장된 상태에는 이 칸이 없어서 ?? 로 맞춘다
+    return { origin, ticket, target: this.state.target_url ?? null };
   }
 
   // exit: 요청이 원본에서 응답을 받아 끝났을 때 부른다. "처리 중" 명단에서 번호표를 지운다.
@@ -148,6 +151,19 @@ export class Gate extends DurableObject {
   async status() {
     await this.expireHold();
     return ok(this.view());
+  }
+
+  // GCP 쪽 원본 주소를 바꿈. url 이 null 이면 설정값(UPSTREAM_TARGET)으로 되돌림.
+  async setTarget({ url }) {
+    await this.expireHold();
+    if (this.state.mode === "TARGET") return conflict("mode is TARGET: the target url cannot change after the cutover");
+    this.state.target_url = url;
+    await this.save();
+    return ok({ url });
+  }
+
+  async getTarget() {
+    return ok({ url: this.state.target_url ?? null });
   }
 
 // reset: 규격에는 없는 보조 기능. 처음 상태(SOURCE)로 되돌림
