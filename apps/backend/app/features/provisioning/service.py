@@ -217,6 +217,7 @@ def deploy_app(
     if not app_url:
         raise ProvisioningError("app_url 출력이 없습니다. 앱이 배포되지 않았습니다")
 
+    # /health/ready 는 DB 연결까지 본다. 컷오버 전에 DB 에 붙는지 알아야 해서, TF startup probe(health_check_path, /health/live)와 일부러 다르다.
     _wait_healthy(
         app_url.rstrip("/") + "/health/ready",
         ctx,

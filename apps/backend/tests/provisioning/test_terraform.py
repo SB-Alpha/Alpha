@@ -25,7 +25,9 @@ case "$1" in
   apply)
     echo "a.b: Creating..."
     echo "a.b: Creation complete after 1s [id=x]"
-    if [ -n "$FAKE_SLOW" ]; then sleep 30; fi
+    if [ -n "$FAKE_MARKER" ]; then trap 'echo got-sigint > "$FAKE_MARKER"; exit 130' INT; fi
+    if [ -n "$FAKE_IGNORE_INT" ]; then trap '' INT; fi
+    if [ -n "$FAKE_SLOW" ]; then sleep 30 & wait; fi
     exit ${FAKE_EXIT:-0} ;;
 esac
 """
@@ -77,6 +79,37 @@ def test_an_exception_in_the_line_handler_stops_terraform(cli, tmp_path, monkeyp
     with pytest.raises(RuntimeError, match="aborted"):
         cli.apply(tmp_path / "p", on_line=abort)
     assert time.monotonic() - started < 10  # 30초 잠자는 프로세스를 기다리지 않고 끝나야 한다
+
+
+def _abort_after_first_resource(line):
+    if "Creation complete" in line:
+        raise RuntimeError("aborted by operator")
+
+
+def test_abort_sends_sigint_first_so_terraform_can_clean_up(cli, tmp_path, monkeypatch):
+    # kill 로 바로 끝내면 terraform 이 상태 잠금을 풀 기회가 없다. SIGINT 를 받으면 스스로 정리하고 끝난다.
+    marker = tmp_path / "sigint-marker"
+    monkeypatch.setenv("FAKE_SLOW", "1")
+    monkeypatch.setenv("FAKE_MARKER", str(marker))
+
+    with pytest.raises(RuntimeError, match="aborted"):
+        cli.apply(tmp_path / "p", on_line=_abort_after_first_resource)
+    assert marker.read_text().strip() == "got-sigint"
+
+
+def test_abort_force_kills_a_terraform_that_ignores_sigint_after_the_grace_period(tmp_path, monkeypatch):
+    binary = tmp_path / "fake-terraform"
+    binary.write_text(SCRIPT)
+    binary.chmod(0o755)
+    slow_cli = TerraformCli(tmp_path, binary=str(binary), timeout_s=20, stop_grace_s=1)
+    monkeypatch.setenv("FAKE_SLOW", "1")
+    monkeypatch.setenv("FAKE_IGNORE_INT", "1")
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="aborted"):
+        slow_cli.apply(tmp_path / "p", on_line=_abort_after_first_resource)
+    elapsed = time.monotonic() - started
+    assert 0.8 <= elapsed < 10  # 유예 시간(1초)은 기다렸다가, 30초 잠자는 프로세스는 끝까지 기다리지 않는다
 
 
 def test_output_and_show_are_parsed_as_json(cli, tmp_path):

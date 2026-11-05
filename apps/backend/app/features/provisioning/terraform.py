@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import threading
 from collections import deque
@@ -51,10 +52,26 @@ def summarize_plan(plan: Mapping[str, Any]) -> tuple[dict[str, int], list[str]]:
 
 
 class TerraformCli:
-    def __init__(self, workdir: Path, *, binary: str = "terraform", timeout_s: float = 1800.0) -> None:
+    def __init__(
+        self, workdir: Path, *, binary: str = "terraform", timeout_s: float = 1800.0, stop_grace_s: float = 60.0
+    ) -> None:
         self.workdir = Path(workdir)  # terraform 을 실행할 폴더 (infra/terraform/gcp)
         self.binary = binary  # 실행 파일 이름. 시험에서는 가짜 스크립트로 바꿔 끼운다
-        self.timeout_s = timeout_s  # 이 시간(기본 30분)을 넘기면 강제로 끝낸다
+        self.timeout_s = timeout_s  # 이 시간(기본 30분)을 넘기면 끝낸다
+        self.stop_grace_s = stop_grace_s  # 중단 신호(SIGINT)를 보낸 뒤 스스로 끝나기를 기다리는 시간. 넘기면 강제 종료
+
+    def _interrupt(self, proc: subprocess.Popen[str]) -> None:
+        # terraform 은 SIGINT 를 받으면 진행 중인 작업을 정리하고 상태 잠금을 풀고 끝난다. 강제 종료(kill)는 잠금을 남길 수 있다.
+        # 정해진 시간 안에 끝나지 않을 때만 강제로 끝낸다.
+        if proc.poll() is not None:
+            return
+        proc.send_signal(signal.SIGINT)
+        force = threading.Timer(self.stop_grace_s, proc.kill)
+        force.start()
+        try:
+            proc.wait()
+        finally:
+            force.cancel()
 
     def _env(self) -> dict[str, str]:
         # 현재 환경변수를 그대로 쓰고(HCP·GCP 로그인 정보가 여기서 전달된다), 두 가지만 더한다.
@@ -79,7 +96,8 @@ class TerraformCli:
         except FileNotFoundError as exc:
             raise ProvisioningError(f"terraform 실행 파일을 찾을 수 없습니다: {self.binary}") from exc
 
-        timer = threading.Timer(self.timeout_s, proc.kill)  # 너무 오래 걸리면 강제 종료하는 알람
+        # 너무 오래 걸리면 중단 신호를 보내는 알람 (끝나지 않으면 _interrupt 와 같은 유예 시간 뒤 강제 종료)
+        timer = threading.Timer(self.timeout_s, self._interrupt, args=(proc,))
         timer.start()
         tail: deque[str] = deque(maxlen=15)  # 실패했을 때 보여 줄 "마지막 15줄" 만 기억한다
         try:
@@ -92,8 +110,7 @@ class TerraformCli:
             code = proc.wait()
         except BaseException:
             # 어떤 이유로든 도중에 빠져나가면 terraform 도 같이 멈춘다 (혼자 계속 돌며 인프라를 바꾸지 않도록)
-            proc.kill()
-            proc.wait()
+            self._interrupt(proc)
             raise
         finally:
             timer.cancel()
