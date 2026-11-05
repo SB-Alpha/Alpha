@@ -1,0 +1,4 @@
+# 로컬 시험용 설정. 이 파일을 .dev.vars 로 복사해서 쓴다 (.dev.vars 는 커밋하지 않는다).
+CONTROL_TOKEN=dev-token
+UPSTREAM_SOURCE=http://127.0.0.1:9001
+UPSTREAM_TARGET=http://127.0.0.1:9002

@@ -1,0 +1,14 @@
+{
+  // 운영 도메인 라우트(routes)는 일부러 넣지 않았다. 배포 전 workers.dev 에서 먼저 확인하고,
+  // 라우트는 확인이 끝난 뒤 별도로 추가한다. (README 참고)
+  "name": "traffic-gate",
+  "main": "src/index.js",
+  "compatibility_date": "2025-06-01",
+  "durable_objects": {
+    "bindings": [{ "name": "GATE", "class_name": "Gate" }]
+  },
+  // 무료 요금제에서는 SQLite 기반 Durable Object 만 쓸 수 있다.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Gate"] }]
+  // 설정 값 UPSTREAM_SOURCE(AWS 원본), UPSTREAM_TARGET(GCP 원본)과 비밀 CONTROL_TOKEN 은 코드에 넣지 않는다.
+  //   로컬: .dev.vars  /  배포: wrangler secret put CONTROL_TOKEN (UPSTREAM_* 도 같은 방식으로 등록 가능)
+}

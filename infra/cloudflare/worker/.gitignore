@@ -1,0 +1,7 @@
+node_modules/
+.wrangler/
+
+# 로컬 설정(제어 토큰 등). 환경별 파일(.dev.vars.staging 등)까지 막고, 예시 파일만 올린다.
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
