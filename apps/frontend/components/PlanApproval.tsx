@@ -109,8 +109,8 @@ export function PlanApproval({ run, isBusy, onApprove }: Props) {
               {decision.reason}
               {plan && plan.blocking.length > 0 && (
                 <ul className="mt-1 list-disc pl-5">
-                  {plan.blocking.map((b) => (
-                    <li key={b}>{b}</li>
+                  {plan.blocking.map((b, i) => (
+                    <li key={`${b}-${i}`}>{b}</li>
                   ))}
                 </ul>
               )}
