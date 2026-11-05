@@ -148,7 +148,10 @@ def run_db_migration(
                     if phase in APP_DEPLOY_PHASES:
                         ready_event.set()
             if ctx is not None:
-                ctx.report(state, progress, metrics, message)
+                # db_migration/service.py 가 종료 시점에 ctx.report("failed", ...) 또는 ctx.report("stopped", ...) 를 호출할 수 있습니다.
+                # workflows 규격상 완료/실패는 runner 반환 및 예외로 판정하므로, reportable 상태일 때만 forward 합니다.
+                if state in ("running", "waiting_approval", "paused"):
+                    ctx.report(state, progress, metrics, message)
 
     def _worker() -> None:
         try:
