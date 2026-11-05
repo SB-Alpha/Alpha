@@ -1,0 +1,22 @@
+{
+  "name": "${JOB_ID}-source",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "plugin.name": "pgoutput",
+    "database.hostname": "${SOURCE_HOST}",
+    "database.port": "${SOURCE_PORT}",
+    "database.dbname": "${SOURCE_DB}",
+    "database.user": "${file:/etc/alpha-cdc/secrets/${JOB_ID}.properties:source.user}",
+    "database.password": "${file:/etc/alpha-cdc/secrets/${JOB_ID}.properties:source.password}",
+    "database.sslmode": "${SOURCE_SSLMODE}",
+    "topic.prefix": "${JOB_ID}",
+    "slot.name": "${SLOT_NAME}",
+    "publication.name": "${PUBLICATION_NAME}",
+    "publication.autocreate.mode": "disabled",
+    "table.include.list": "${TABLES}",
+    "snapshot.mode": "initial",
+    "heartbeat.interval.ms": "10000",
+    "tombstones.on.delete": "false"
+  }
+}

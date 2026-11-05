@@ -1,0 +1,16 @@
+{
+  "name": "${JOB_ID}-sink",
+  "config": {
+    "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
+    "tasks.max": "1",
+    "topics.regex": "${JOB_ID}\\.[^.]+\\.[^.]+",
+    "connection.url": "jdbc:postgresql://${TARGET_HOST}:${TARGET_PORT}/${TARGET_DB}?sslmode=${TARGET_SSLMODE}",
+    "connection.username": "${file:/etc/alpha-cdc/secrets/${JOB_ID}.properties:target.user}",
+    "connection.password": "${file:/etc/alpha-cdc/secrets/${JOB_ID}.properties:target.password}",
+    "insert.mode": "upsert",
+    "delete.enabled": "true",
+    "primary.key.mode": "record_key",
+    "schema.evolution": "none",
+    "table.name.format": "${source.schema}.${source.table}"
+  }
+}

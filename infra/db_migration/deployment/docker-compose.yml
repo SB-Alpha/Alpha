@@ -1,0 +1,94 @@
+# CDC 노드 1대에서 도는 컨테이너. 노드마다 같은 파일을 쓰고, 노드별 값은
+# cloud-init이 만든 /etc/alpha-cdc/node.env 에서 읽는다.
+#   docker compose --env-file /etc/alpha-cdc/node.env up -d
+# 노드 IP로 바로 묶이도록 모두 host 네트워크를 쓴다.
+
+x-kafka-cluster-id: &cluster_id ${KAFKA_CLUSTER_ID:-Y2RjLWFscGhhLWthZmthMQ}
+
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      CLUSTER_ID: *cluster_id
+      KAFKA_NODE_ID: ${NODE_ID}
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://${NODE_IP}:9092,CONTROLLER://${NODE_IP}:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://${NODE_IP}:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: ${KAFKA_QUORUM_VOTERS}
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_DEFAULT_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR}
+      KAFKA_MIN_INSYNC_REPLICAS: ${KAFKA_MIN_ISR}
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR}
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR}
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: ${KAFKA_MIN_ISR}
+      KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # heap은 deploy.sh가 노드 메모리에서 계산해 node.env에 넣는다 (메모리 20%·30%).
+      KAFKA_HEAP_OPTS: -Xms${KAFKA_HEAP_MB:-768}m -Xmx${KAFKA_HEAP_MB:-768}m
+    volumes:
+      - /var/lib/alpha-cdc/kafka:/var/lib/kafka/data
+
+  connect:
+    image: quay.io/debezium/connect:2.7.3.Final
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    environment:
+      BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP}
+      GROUP_ID: alpha-cdc-connect
+      CONFIG_STORAGE_TOPIC: _connect_configs
+      OFFSET_STORAGE_TOPIC: _connect_offsets
+      STATUS_STORAGE_TOPIC: _connect_status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR}
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR}
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR}
+      # 이 이미지가 읽는 이름이다. 틀리면 리더가 아닌 노드가 받은 요청을 전달하지 못해 409가 난다.
+      ADVERTISED_HOST_NAME: ${NODE_IP}
+      REST_PORT: "8083"
+      HEAP_OPTS: -Xms${CONNECT_HEAP_MB:-1024}m -Xmx${CONNECT_HEAP_MB:-1024}m
+      # 커넥터 설정에는 비밀번호 대신 ${file:/etc/alpha-cdc/secrets/<파일>:<키>} 참조만 둔다.
+      CONNECT_CONFIG_PROVIDERS: file
+      CONNECT_CONFIG_PROVIDERS_FILE_CLASS: org.apache.kafka.common.config.provider.FileConfigProvider
+    volumes:
+      - /etc/alpha-cdc/secrets:/etc/alpha-cdc/secrets:ro
+
+  agent:
+    # 이미지는 deploy.sh가 올린 소스(/opt/alpha-cdc/src)로 노드에서 빌드한다.
+    build:
+      context: ./src
+      dockerfile: agent/Dockerfile
+    image: alpha-cdc-agent:local
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - connect
+    # 밖에서는 cloudflared(같은 노드)로만 들어온다.
+    command: uvicorn cdc_agent.main:app --host 127.0.0.1 --port 8080
+    environment:
+      NODE_ID: ${NODE_ID}
+      CONNECT_URL: http://${NODE_IP}:8083
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP}
+      KAFKA_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR}
+      WORKER_URL: ${WORKER_URL:-}
+      WORKER_TOKEN_FILE: /etc/alpha-cdc/secrets/worker.token
+      # 작업 비밀을 노드 사이에서 암호화하는 키. push-secrets.sh secrets-key로 넣는다.
+      SECRETS_KEY: ${SECRETS_KEY:-}
+    volumes:
+      # 에이전트가 작업 비밀 파일을 직접 쓴다 (Connect는 읽기만).
+      - /etc/alpha-cdc/secrets:/etc/alpha-cdc/secrets
+
+  cloudflared:
+    image: cloudflare/cloudflared:2024.12.2
+    network_mode: host
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
