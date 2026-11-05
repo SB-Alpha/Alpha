@@ -11,16 +11,12 @@ type Props = {
 export function SelfHealingCard({ run, onApplyManual }: Props) {
   const isFailed = run.state === "failed" || run.state === "paused";
   const [diagnosis, setDiagnosis] = useState<SelfHealingDiagnosis | null>(null);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const loading = isFailed && !diagnosis && !error;
 
   useEffect(() => {
-    if (!isFailed) {
-      setDiagnosis(null);
-      return;
-    }
+    if (!isFailed) return;
     let isCurrent = true;
-    setLoading(true);
     workflows
       .getDiagnosis(run.run_id)
       .then((data) => {
@@ -28,9 +24,6 @@ export function SelfHealingCard({ run, onApplyManual }: Props) {
       })
       .catch((err) => {
         if (isCurrent) setError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => {
-        if (isCurrent) setLoading(false);
       });
 
     return () => {
