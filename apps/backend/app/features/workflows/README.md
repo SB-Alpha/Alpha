@@ -8,7 +8,7 @@
 ## 단계와 승인 지점
 
 ```
-discovery → planning → [승인 ① plan] → provisioning → db_migration → [승인 ② cutover] → cutover
+discovery → planning → [승인 ① plan] → provisioning → db_migration → app_deploy → [승인 ② cutover] → cutover
 ```
 
 | 상황 | run `state` | 단계 `state` |
