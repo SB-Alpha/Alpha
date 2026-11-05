@@ -244,7 +244,12 @@ class Engine:
         ctx = StoreRunContext(self._store, run.run_id, stage)
         try:
             output = self._runners[stage](run, ctx)
-            data = output.model_dump(mode="json") if isinstance(output, BaseModel) else dict(output)
+            if isinstance(output, BaseModel):
+                data = output.model_dump(mode="json")
+            elif isinstance(output, Mapping):
+                data = dict(output)
+            else:  # dict() 는 ["ok", "hi"] 도 받아 주므로 가짜 성공을 막습니다
+                raise TypeError(f"단계 출력은 BaseModel 또는 dict 여야 합니다: {type(output).__name__}")
         except RunAborted:
             return
         except Exception as exc:  # 모듈 오류는 run 을 멈추고 기록합니다
