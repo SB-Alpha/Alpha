@@ -1,0 +1,4 @@
+# 복사해서 terraform.tfvars로 쓴다. terraform.tfvars는 커밋하지 않는다.
+account_id = "<Cloudflare 계정 ID>"
+zone_id    = "<도메인 Zone ID>"
+zone_name  = "example.com"

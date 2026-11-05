@@ -1,0 +1,29 @@
+#cloud-config
+# Docker를 설치하고 노드 정보를 남긴다.
+# Kafka·Connect·에이전트·cloudflared 실행은 infra/db_migration/deployment가 맡는다.
+
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - postgresql-client
+
+write_files:
+  - path: /etc/alpha-cdc/node.env
+    permissions: "0644"
+    content: |
+      NODE_ID=${node_id}
+      NODE_IP=${node_ip}
+      NODE_COUNT=${node_count}
+      KAFKA_QUORUM_VOTERS=${quorum_voters}
+      KAFKA_BOOTSTRAP=${bootstrap}
+      KAFKA_REPLICATION_FACTOR=${node_count}
+      KAFKA_MIN_ISR=${node_count == 3 ? 2 : 1}
+
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker ubuntu
+  - systemctl enable --now docker
+  # Ubuntu 이미지의 기본 iptables가 VCN 안 통신을 막으므로 클러스터 포트를 연다.
+  - iptables -I INPUT -s ${subnet_cidr} -j ACCEPT
+  - netfilter-persistent save || true
