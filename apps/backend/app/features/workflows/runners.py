@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -74,11 +75,8 @@ def run_provisioning(run: RunStatus, ctx: RunContext) -> Any:
     # planning 출력의 target_infra 로 목적지 인프라(VPC, Cloud SQL)를 프로비저닝합니다 (PR #40).
     target_infra = _extract_plan_target_infra(run)
 
-    try:
-        from app.features.provisioning import service as provisioning_service
-        from app.features.provisioning.schemas import ProvisioningInput
-    except ImportError as exc:
-        raise RuntimeError("provisioning 모듈을 찾을 수 없습니다") from exc
+    from app.features.provisioning import service as provisioning_service
+    from app.features.provisioning.schemas import ProvisioningInput
 
     inp = ProvisioningInput(
         run_id=run.run_id,
@@ -103,10 +101,7 @@ def run_db_migration(run: RunStatus, ctx: RunContext) -> Any:
     if hasattr(target, "model_dump"):
         target = target.model_dump()
 
-    try:
-        from app.features.db_migration import service as db_migration_service
-    except ImportError as exc:
-        raise RuntimeError("db_migration 모듈을 찾을 수 없습니다") from exc
+    from app.features.db_migration import service as db_migration_service
 
     inp = {
         "run_id": run.run_id,
@@ -117,14 +112,17 @@ def run_db_migration(run: RunStatus, ctx: RunContext) -> Any:
 
 
 def run_app_deploy(run: RunStatus, ctx: RunContext) -> Any:
-    # DB 마이그레이션 스키마 준비 후 목적지 Cloud Run 앱을 배포하고 /health/ready 200 을 검증합니다.
+    """DB 마이그레이션 스키마 준비 후 목적지 Cloud Run 앱을 배포하고 /health/ready 200 을 검증합니다.
+
+    실행 조건 (환경변수):
+      - WORKER_URL: Cloudflare Worker 주소
+      - WORKER_TOKEN_FILE: Worker 인증 토큰 파일 경로
+      - GCP_PROJECT_ID: 배포 대상 GCP 프로젝트 ID
+    """
     target_infra = _extract_plan_target_infra(run)
 
-    try:
-        from app.features.provisioning import service as provisioning_service
-        from app.features.provisioning.schemas import AppDeployInput
-    except ImportError as exc:
-        raise RuntimeError("provisioning 모듈을 찾을 수 없습니다") from exc
+    from app.features.provisioning import service as provisioning_service
+    from app.features.provisioning.schemas import AppDeployInput
 
     inp = AppDeployInput(
         run_id=run.run_id,
@@ -133,13 +131,18 @@ def run_app_deploy(run: RunStatus, ctx: RunContext) -> Any:
     return provisioning_service.deploy_app(inp, ctx)
 
 
-def run_cutover(run: RunStatus, ctx: RunContext) -> Any:
-    # 승인 ② 완료 후 CDC 에이전트에 cutover 요청(hold -> switch -> release)을 전달합니다.
-    try:
-        from app.features.db_migration.client import AgentSettings, CdcAgentClient
-        from app.features.db_migration.guide_workflow import to_job_id
-    except ImportError as exc:
-        raise RuntimeError("db_migration 모듈을 찾을 수 없습니다") from exc
+def run_cutover(
+    run: RunStatus,
+    ctx: RunContext,
+    *,
+    poll_interval_s: float = 1.0,
+    timeout_s: float = 60.0,
+) -> Any:
+    """승인 ② 완료 후 CDC 에이전트에 cutover 요청(hold -> switch -> release)을 전달하고,
+    에이전트가 stabilizing(전환 완료) 또는 failed/waiting_approval(롤백)에 도달할 때까지 대기합니다.
+    """
+    from app.features.db_migration.client import AgentSettings, CdcAgentClient
+    from app.features.db_migration.guide_workflow import to_job_id
 
     job_id = to_job_id(run.run_id)
     ctx.report("running", 10, None, "트래픽 전환(Cutover) 요청 중")
@@ -149,10 +152,43 @@ def run_cutover(run: RunStatus, ctx: RunContext) -> Any:
     except KeyError:
         raise RuntimeError("CDC_AGENT_URL 환경변수가 설정되지 않아 트래픽 전환을 호출할 수 없습니다") from None
 
+    # 승인 ② 실제 승인자 이름 기록 (감사 추적용)
+    approved_by = "workflows"
+    if run.message and ":" in run.message:
+        approved_by = run.message.split(":", 1)[1].strip() or "workflows"
+
     agent = CdcAgentClient(settings)
-    result = agent.cutover(job_id, approved_by="workflows")
-    ctx.report("running", 100, None, "트래픽 전환 완료")
-    return result
+    agent.cutover(job_id, approved_by=approved_by)
+
+    start_t = time.monotonic()
+    while True:
+        job = agent.get_job(job_id)
+        state = job.get("state")
+        phase = job.get("phase")
+        metrics = job.get("metrics")
+        msg = job.get("message")
+
+        # 1. 성공 상태 (에이전트가 stabilizing 또는 succeeded 도달)
+        if phase == "stabilizing" or state == "succeeded":
+            message = f"트래픽 전환 완료 ({msg})" if msg else "트래픽 전환 완료 (안정화 관찰 중)"
+            ctx.report("running", 100, metrics, message)
+            return job
+
+        # 2. 롤백 상태 (전환 실패 후 원본 복귀)
+        if state == "waiting_approval" or phase == "cutover_ready":
+            raise RuntimeError(f"컷오버 실패로 원본으로 롤백되었습니다: {msg or '상세 불명'}")
+
+        # 3. 영구 실패 상태
+        if state in ("failed", "aborted"):
+            raise RuntimeError(f"컷오버 실패 ({state}): {msg or '상세 불명'}")
+
+        # 4. 진행 중 보고 및 타임아웃 검사
+        if time.monotonic() - start_t > timeout_s:
+            raise TimeoutError(f"트래픽 전환 완료 대기 시간({timeout_s}초)을 초과했습니다")
+
+        progress = job.get("progress", 75)
+        ctx.report("running", progress, metrics, msg or "트래픽 전환 진행 중...")
+        time.sleep(poll_interval_s)
 
 
 RUNNERS: Mapping[StageName, StageRunner] = {

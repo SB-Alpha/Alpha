@@ -195,9 +195,10 @@ def test_cutover_runner_missing_env_raises(engine, monkeypatch):
         run_cutover(run, ctx=FakeCtx())  # type: ignore[arg-type]
 
 
-def test_cutover_runner_calls_agent(engine, monkeypatch):
+def test_cutover_runner_waits_for_stabilizing_and_succeeds(engine, monkeypatch):
     monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
     calls = []
+    poll_counts = [0]
 
     class FakeAgent:
         def __init__(self, settings):
@@ -205,18 +206,91 @@ def test_cutover_runner_calls_agent(engine, monkeypatch):
 
         def cutover(self, job_id, approved_by):
             calls.append((job_id, approved_by))
-            return {"switched": True}
+            return {"accepted": True}
+
+        def get_job(self, job_id):
+            poll_counts[0] += 1
+            if poll_counts[0] == 1:
+                return {"state": "running", "phase": "cutover", "progress": 75}
+            return {
+                "state": "running",
+                "phase": "stabilizing",
+                "progress": 90,
+                "metrics": {"traffic_mode": "TARGET"},
+                "message": "안정화 관찰 중",
+            }
 
     monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", FakeAgent)
 
     run = engine.create_run(REQUEST)
+    run = run.model_copy(update={"message": "전환 승인 ② 완료: 박준서"})
     reports = []
 
     class FakeCtx:
         def report(self, state, progress, metrics=None, message=None):
             reports.append((state, progress, message))
 
-    out = run_cutover(run, ctx=FakeCtx())  # type: ignore[arg-type]
-    assert out == {"switched": True}
-    assert calls == [(run.run_id.replace("-", "_"), "workflows")]
+    out = run_cutover(run, ctx=FakeCtx(), poll_interval_s=0.01)  # type: ignore[arg-type]
+    assert out["phase"] == "stabilizing"
+    assert calls == [(run.run_id.replace("-", "_"), "박준서")]
     assert reports[-1][1] == 100
+    assert "트래픽 전환 완료" in reports[-1][2]
+
+
+def test_cutover_runner_raises_on_rollback(engine, monkeypatch):
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+
+    class FakeAgent:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def cutover(self, job_id, approved_by):
+            return {"accepted": True}
+
+        def get_job(self, job_id):
+            return {
+                "state": "waiting_approval",
+                "phase": "cutover_ready",
+                "message": "전환 실패, 원본으로 재개: marker timeout",
+            }
+
+    monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", FakeAgent)
+
+    run = engine.create_run(REQUEST)
+
+    class FakeCtx:
+        def report(self, *args, **kwargs):
+            pass
+
+    with pytest.raises(RuntimeError, match="컷오버 실패로 원본으로 롤백되었습니다"):
+        run_cutover(run, ctx=FakeCtx(), poll_interval_s=0.01)  # type: ignore[arg-type]
+
+
+def test_cutover_runner_raises_on_failed(engine, monkeypatch):
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+
+    class FakeAgent:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def cutover(self, job_id, approved_by):
+            return {"accepted": True}
+
+        def get_job(self, job_id):
+            return {
+                "state": "failed",
+                "phase": "cutover",
+                "message": "목적지 전환 후 네트워크 에러",
+            }
+
+    monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", FakeAgent)
+
+    run = engine.create_run(REQUEST)
+
+    class FakeCtx:
+        def report(self, *args, **kwargs):
+            pass
+
+    with pytest.raises(RuntimeError, match="컷오버 실패 \\(failed\\)"):
+        run_cutover(run, ctx=FakeCtx(), poll_interval_s=0.01)  # type: ignore[arg-type]
+
