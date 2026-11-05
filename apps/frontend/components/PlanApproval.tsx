@@ -60,8 +60,8 @@ export function PlanApproval({ run, isBusy, onApprove }: Props) {
               <>
                 <h3 className="mt-5 text-xs font-semibold tracking-wide text-ink/50">위험</h3>
                 <ul className="mt-2 space-y-2">
-                  {plan.risks.map((r) => (
-                    <li key={r.title} className={`border-l-2 pl-3 text-sm ${RISK_TONE[r.level]}`}>
+                  {plan.risks.map((r, i) => (
+                    <li key={`${r.title}-${i}`} className={`border-l-2 pl-3 text-sm ${RISK_TONE[r.level]}`}>
                       <p className="font-medium">{r.title}</p>
                       {r.detail && <p className="text-ink/60">{r.detail}</p>}
                     </li>
