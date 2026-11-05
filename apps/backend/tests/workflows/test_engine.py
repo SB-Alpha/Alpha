@@ -107,6 +107,7 @@ def test_full_flow_reaches_succeeded_after_two_approvals(db_path):
         planning=planning_runner,
         provisioning=ok_runner,
         db_migration=ok_runner,
+        app_deploy=ok_runner,
         cutover=ok_runner,
     )
     run_id = engine.create_run(REQUEST).run_id
@@ -207,8 +208,9 @@ def test_report_rejects_invalid_values(db_path):
         ctx.report("done", 10)
     with pytest.raises(ValueError):
         ctx.report("running", 101)
-    with pytest.raises(ValueError):  # 단계 끝은 run() 반환으로만 정해짐
-        ctx.report("succeeded", 100)
+    # 타 모듈(assessment 등)의 succeeded 보고는 크래시 대신 running (progress=100)으로 안전하게 수용
+    ctx.report("succeeded", 100)
+    assert store.get(run_id).stage(StageName.DISCOVERY).progress == 100
 
 
 def test_report_keeps_stage_running_so_it_cannot_be_skipped(db_path):

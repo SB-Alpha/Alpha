@@ -38,6 +38,7 @@ class StageName(str, Enum):
     PLANNING = "planning"
     PROVISIONING = "provisioning"
     DB_MIGRATION = "db_migration"
+    APP_DEPLOY = "app_deploy"
     CUTOVER = "cutover"
 
 

@@ -48,9 +48,14 @@ class StoreRunContext:
         metrics: dict[str, Any] | None = None,
         message: str | None = None,
     ) -> None:
-        # 잘못된 값은 모듈 버그이므로 바로 예외를 냅니다 (조용히 보정하지 않음).
-        if WorkflowState(state) not in _REPORTABLE:
+        parsed_state = WorkflowState(state)
+        # 타 모듈(예: assessment/service.py)이 완료 시점에 report(state="succeeded", progress=100)을
+        # 호출하는 경우가 있으므로, succeeded는 예외 대신 running(진행률 100%)으로 안전하게 수용합니다.
+        if parsed_state == WorkflowState.SUCCEEDED:
+            progress = 100
+        elif parsed_state not in _REPORTABLE:
             raise ValueError(f"report() 로 보낼 수 없는 state 입니다: {state} (종료는 run() 반환·예외로)")
+
         if not 0 <= progress <= 100:
             raise ValueError(f"progress must be 0..100, got {progress}")
 
