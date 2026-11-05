@@ -4,6 +4,32 @@ const DEFAULT_MAX_HOLD_MS = 3_000;
 const MAX_HOLD_MS_LIMIT = 60_000; 
 const MODES = new Set(["SOURCE", "TARGET"]);
 
+const DEFAULT_ALLOWED_TARGET_SUFFIXES = [".run.app"];
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1"]);
+
+// parseTargetUrl: 받은 주소를 검증하고 정리한다. 돌려주는 값: { url } 또는 { error }
+function parseTargetUrl(value, env) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return { error: "url is not a valid URL" };
+  }
+  const local = LOCAL_HOSTS.has(parsed.hostname);
+  if (parsed.protocol !== "https:" && !(local && parsed.protocol === "http:")) {
+    return { error: "url must be https (http is allowed only for localhost)" };
+  }
+  if (parsed.username || parsed.password) return { error: "url must not contain credentials" };
+  if (parsed.search || parsed.hash) return { error: "url must not contain a query or fragment" };
+  if (parsed.pathname !== "/") return { error: "url must not contain a path" };
+  const configured = (env.TARGET_ALLOWED_SUFFIXES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const allowed = configured.length ? configured : DEFAULT_ALLOWED_TARGET_SUFFIXES;
+  if (!local && !allowed.some((suffix) => parsed.hostname.endsWith(suffix))) {
+    return { error: `host must end with one of: ${allowed.join(", ")}` };
+  }
+  return { url: parsed.origin }; // 끝의 / 를 뗀 "https://호스트" 모양
+}
+
 const json = (body, status = 200) => Response.json(body, { status });
 const error = (status, message) => json({ error: message }, status);
 
@@ -28,6 +54,19 @@ async function control(request, url, gate, env) {
   if (command === "status") {
     if (request.method !== "GET") return error(405, "method not allowed");
     return respond(await gate.status());
+  }
+
+  // 규격 밖 보조 명령: GCP 쪽 원본 주소 조회(GET)와 변경(POST). {"url": null} 이면 설정값으로 되돌린다.
+  if (command === "target") {
+    if (request.method === "GET") return respond(await gate.getTarget());
+    if (request.method !== "POST") return error(405, "method not allowed");
+    const body = await readJson(request);
+    if (!body || !("url" in body)) return error(400, 'url is required (use {"url": null} to clear it)');
+    if (body.url === null) return respond(await gate.setTarget({ url: null }));
+    if (typeof body.url !== "string") return error(400, "url must be a string or null");
+    const parsed = parseTargetUrl(body.url, env);
+    if (parsed.error) return error(400, parsed.error);
+    return respond(await gate.setTarget({ url: parsed.url }));
   }
 
   if (!["hold", "switch", "release", "reset"].includes(command)) return error(404, "not found");
@@ -66,9 +105,10 @@ export default {
 
     if (url.pathname.startsWith("/control/")) return control(request, url, gate, env);
 
-    const { origin, ticket } = await gate.enter();
+    const { origin, ticket, target } = await gate.enter();
     try {
-      const base = origin === "TARGET" ? env.UPSTREAM_TARGET : env.UPSTREAM_SOURCE;
+      // TARGET 이면 제어 명령으로 정한 주소(target)를 먼저 쓰고, 없으면 설정값 UPSTREAM_TARGET 을 쓴다
+      const base = origin === "TARGET" ? target || env.UPSTREAM_TARGET : env.UPSTREAM_SOURCE;
       if (!base) return error(500, `upstream for ${origin} is not configured`);
 
       const upstream = new Request(new URL(url.pathname + url.search, base), request);
