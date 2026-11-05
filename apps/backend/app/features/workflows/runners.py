@@ -236,7 +236,9 @@ def run_cutover(
 
     try:
         settings = AgentSettings.from_env()
-    except KeyError:
+        if not settings.url:
+            raise KeyError("CDC_AGENT_URL")
+    except (KeyError, ValueError):
         raise RuntimeError("CDC_AGENT_URL 환경변수가 설정되지 않아 트래픽 전환을 호출할 수 없습니다") from None
 
     # 승인 ② 실제 승인자 이름 기록 (감사 추적용)
