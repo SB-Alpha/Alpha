@@ -12,6 +12,9 @@ export const METRIC_KEYS = {
   mismatchCount: "mismatch_count",
   failedRequests: "failed_requests",
   cutoverSeconds: "cutover_seconds", // T1 − T0
+  iamAuditStatus: "iam_audit_status", // "PASS" | "WARN" | "FAIL"
+  cloudSqlPrivateIp: "cloud_sql_private_ip", // "SECURE" | "PUBLIC"
+  secretEncryption: "secret_encryption", // "ENCRYPTED" | "PLAINTEXT"
 } as const;
 
 const FINISHED: WorkflowState[] = ["succeeded", "failed", "aborted"];
@@ -59,6 +62,27 @@ export function numberMetric(run: RunStatus, key: string): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
   return null;
+}
+
+export function stringMetric(run: RunStatus, key: string): string | null {
+  const value = findMetric(run, key);
+  if (typeof value === "string" && value.trim() !== "") return value.trim();
+  return null;
+}
+
+export function securityAuditSummary(run: RunStatus) {
+  const iam = stringMetric(run, METRIC_KEYS.iamAuditStatus);
+  const sql = stringMetric(run, METRIC_KEYS.cloudSqlPrivateIp);
+  const secret = stringMetric(run, METRIC_KEYS.secretEncryption);
+
+  const hasPlan = Boolean(run.outputs.planning);
+  const hasProvisioning = Boolean(run.outputs.provisioning);
+
+  return {
+    iamAudit: iam ?? (hasPlan ? "PASS" : null),
+    cloudSql: sql ?? (hasProvisioning ? "사설망 (VPC)" : hasPlan ? "사설망 예정" : null),
+    secretManager: secret ?? (hasPlan ? "Secret Manager" : null),
+  };
 }
 
 export type ServingSide = { side: "aws" | "gcp"; isReported: boolean };

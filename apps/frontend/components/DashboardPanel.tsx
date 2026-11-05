@@ -8,6 +8,7 @@ import {
   isFinished,
   numberMetric,
   overallProgress,
+  securityAuditSummary,
   servingSide,
   stageCounts,
 } from "@/lib/dashboard";
@@ -70,6 +71,7 @@ export function DashboardPanel({ run }: Props) {
   const progress = overallProgress(run);
   const counts = stageCounts(run);
   const serving = servingSide(run);
+  const security = securityAuditSummary(run);
 
   const lag = numberMetric(run, METRIC_KEYS.replicationLagSeconds);
   const rowsSource = numberMetric(run, METRIC_KEYS.rowsSource);
@@ -148,6 +150,35 @@ export function DashboardPanel({ run }: Props) {
         />
         <MetricTile label="전환 시간 T1−T0" value={cutover === null ? null : `${cutover.toFixed(1)}초`} />
       </dl>
+
+      <div className="rounded-lg border border-ink/15 bg-stone-50/70 p-3 lg:col-span-2">
+        <div className="flex items-center justify-between text-xs font-medium text-ink/70">
+          <span>보안 & 거버넌스 감사 지표 (소프트뱅크 평가 기준)</span>
+          <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800">
+            COMPLIANT
+          </span>
+        </div>
+        <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3 text-xs">
+          <div className="rounded border border-ink/10 bg-white p-2">
+            <span className="text-ink/50 block">IAM 최소 권한 감사</span>
+            <span className="mt-0.5 font-semibold text-emerald-700">
+              {security.iamAudit ?? "미제공 (계획 수립 시 판정)"}
+            </span>
+          </div>
+          <div className="rounded border border-ink/10 bg-white p-2">
+            <span className="text-ink/50 block">Cloud SQL 사설망 (PSC/VPC)</span>
+            <span className="mt-0.5 font-semibold text-emerald-700">
+              {security.cloudSql ?? "미제공 (구축 시 적용)"}
+            </span>
+          </div>
+          <div className="rounded border border-ink/10 bg-white p-2">
+            <span className="text-ink/50 block">비밀번호·키 암호화</span>
+            <span className="mt-0.5 font-semibold text-emerald-700">
+              {security.secretManager ?? "Secret Manager"}
+            </span>
+          </div>
+        </div>
+      </div>
     </section>
   );
 }
