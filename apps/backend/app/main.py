@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.features.db_migration import router as db_migration
 
 
 def create_app() -> FastAPI:
@@ -18,6 +19,9 @@ def create_app() -> FastAPI:
         return {"status": "ok", "scope": "process"}
 
     # Register feature routers here once they have real implementations.
+    app.include_router(db_migration.router)
+    db_migration.add_exception_handlers(app)
+
     from app.features.assessment.router import router as assessment_router
     from app.features.workflows.router import router as workflows_router
 

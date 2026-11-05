@@ -1,0 +1,101 @@
+# 로컬 시험용 CDC 전체 구성 (클라우드 없이 복제·전환을 확인한다).
+#   ./run.sh up      띄우기 (비밀번호는 매번 새로 만들어 .local/ 에 둔다)
+#   ./run.sh e2e     작업 생성 → 동기화 → 부하 중 전환 → 검증
+#   ./run.sh down    내리기
+# 원본 = AWS RDS 역할, 목적지 = Cloud SQL 역할, fake-worker = Cloudflare Worker 역할.
+
+services:
+  source-db:
+    image: postgres:16
+    # SSL은 실제처럼 sslmode=require로 붙기 위해 이미지의 자체 서명 인증서로 켠다.
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=4", "-c", "max_wal_senders=4",
+              "-c", "ssl=on", "-c", "ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem",
+              "-c", "ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key"]
+    environment:
+      POSTGRES_PASSWORD: ${SOURCE_ADMIN_PASSWORD}
+      APP_PASSWORD: ${SOURCE_APP_PASSWORD}
+    volumes:
+      - ./init/source.sh:/docker-entrypoint-initdb.d/source.sh:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "postgres"]
+      interval: 2s
+      retries: 30
+
+  target-db:
+    image: postgres:16
+    command: ["postgres", "-c", "ssl=on", "-c", "ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem",
+              "-c", "ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key"]
+    environment:
+      POSTGRES_PASSWORD: ${TARGET_ADMIN_PASSWORD}
+    volumes:
+      - ./init/target.sh:/docker-entrypoint-initdb.d/target.sh:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "app"]
+      interval: 2s
+      retries: 30
+
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      CLUSTER_ID: bG9jYWwtYWxwaGEtY2RjMQ
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+
+  connect:
+    image: quay.io/debezium/connect:2.7.3.Final
+    depends_on: [kafka]
+    ports: ["8083:8083"]
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: alpha-cdc-connect
+      CONFIG_STORAGE_TOPIC: _connect_configs
+      OFFSET_STORAGE_TOPIC: _connect_offsets
+      STATUS_STORAGE_TOPIC: _connect_status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      HEAP_OPTS: -Xms512m -Xmx1g
+      CONNECT_CONFIG_PROVIDERS: file
+      CONNECT_CONFIG_PROVIDERS_FILE_CLASS: org.apache.kafka.common.config.provider.FileConfigProvider
+    volumes:
+      - ./.local/secrets:/etc/alpha-cdc/secrets:ro
+
+  agent:
+    build:
+      context: ..
+      dockerfile: agent/Dockerfile
+    image: alpha-cdc-agent:local
+    depends_on: [kafka, connect, source-db, target-db]
+    ports: ["18080:8080"]
+    environment:
+      NODE_ID: local-1
+      CONNECT_URL: http://connect:8083
+      KAFKA_BOOTSTRAP: kafka:9092
+      WORKER_URL: http://fake-worker:8081
+      WORKER_TOKEN_FILE: /etc/alpha-cdc/secrets/worker.token
+      SECRETS_KEY: ${SECRETS_KEY}
+    volumes:
+      - ./.local/secrets:/etc/alpha-cdc/secrets
+
+  fake-worker:
+    image: alpha-cdc-agent:local
+    depends_on: [agent]
+    ports: ["18081:8081"]
+    working_dir: /local
+    command: ["uvicorn", "fake_worker:app", "--host", "0.0.0.0", "--port", "8081"]
+    environment:
+      SOURCE_DSN: host=source-db dbname=postgres user=alpha password=${SOURCE_APP_PASSWORD}
+      TARGET_DSN: host=target-db dbname=app user=tgt_ddl password=${TARGET_DDL_PASSWORD}
+      WORKER_TOKEN: ${WORKER_TOKEN}
+    volumes:
+      - ./fake_worker.py:/local/fake_worker.py:ro
+      - ./load.py:/local/load.py:ro
