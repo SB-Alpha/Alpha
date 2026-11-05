@@ -111,7 +111,12 @@ export default {
       const base = origin === "TARGET" ? target || env.UPSTREAM_TARGET : env.UPSTREAM_SOURCE;
       if (!base) return error(500, `upstream for ${origin} is not configured`);
 
-      const upstream = new Request(new URL(url.pathname + url.search, base), request);
+      // 경로를 new URL(경로, base) 로 합치면 "//호스트/경로" 를 다른 호스트로 해석해서 요청이 엉뚱한 곳으로 나간다.
+      // 그래서 base 의 호스트는 그대로 두고 경로와 쿼리만 바꿔 끼운다.
+      const destination = new URL(base);
+      destination.pathname = url.pathname;
+      destination.search = url.search;
+      const upstream = new Request(destination, request);
       upstream.headers.set("X-Forwarded-Host", url.host);
 
       const response = await fetch(upstream, { redirect: "manual" });
