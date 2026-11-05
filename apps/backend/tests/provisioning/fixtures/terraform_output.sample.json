@@ -1,0 +1,20 @@
+{
+  "_note": "terraform output -json 의 모양을 따른 손질본입니다. 프로젝트 이름은 example-project 로 바꿨고, sensitive 출력의 값은 가짜입니다. 앱을 배포하기 전(deploy_app=false)이라 app_url 은 null 이어서 실제 출력처럼 빠져 있습니다.",
+  "db_admin_password": { "sensitive": true, "type": "string", "value": "FAKE-ADMIN-PASSWORD-DO-NOT-LEAK" },
+  "db_admin_user": { "sensitive": false, "type": "string", "value": "postgres" },
+  "db_instance": { "sensitive": false, "type": "string", "value": "target-app-db" },
+  "db_name": { "sensitive": false, "type": "string", "value": "workitems" },
+  "db_password_secret_id": { "sensitive": false, "type": "string", "value": "target-app-db-password" },
+  "db_port": { "sensitive": false, "type": "number", "value": 5432 },
+  "db_private_ip": { "sensitive": false, "type": "string", "value": "10.244.0.3" },
+  "db_ssl_mode": { "sensitive": false, "type": "string", "value": "ENCRYPTED_ONLY" },
+  "db_user": { "sensitive": false, "type": "string", "value": "alpha" },
+  "db_version": { "sensitive": false, "type": "string", "value": "POSTGRES_16" },
+  "psa_range_cidr": { "sensitive": false, "type": "string", "value": "10.244.0.0/16" },
+  "registry_url": { "sensitive": false, "type": "string", "value": "asia-northeast3-docker.pkg.dev/example-project/target-app" },
+  "service_account_email": { "sensitive": false, "type": "string", "value": "target-app-run@example-project.iam.gserviceaccount.com" },
+  "subnet_cidrs": { "sensitive": false, "type": ["tuple", ["string"]], "value": ["10.10.0.0/24"] },
+  "vpc_name": { "sensitive": false, "type": "string", "value": "target-app" },
+  "vpn_credentials_json": { "sensitive": true, "type": "string", "value": "FAKE-VPN-KEY-DO-NOT-LEAK" },
+  "vpn_service_account_email": { "sensitive": false, "type": "string", "value": "alpha-cdc-vpn@example-project.iam.gserviceaccount.com" }
+}
