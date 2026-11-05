@@ -72,7 +72,7 @@ provisioning 도 같은 키 이름표(`source.credentials_ref.cloud`)를 `resolv
 ## 매핑 규칙 (원본 → 목적지)
 | 원본 | 목적지 | 규칙 |
 | --- | --- | --- |
-| ECS 서비스 이름 | `service_name` | GCP 이름 규칙(소문자·숫자·하이픈)으로 바꿈 |
+| 이미지 저장소 이름 (없으면 ECS 서비스 이름) | `service_name` | GCP 이름 규칙(소문자·숫자·하이픈)으로 바꿈. ECS 서비스 이름엔 자동 생성 접미사가 붙을 수 있어 저장소 이름을 먼저 씀 |
 | Fargate CPU 단위 | `cpu` (vCPU, 숫자) | `ceil(units/1024)`, 최소 1 |
 | Fargate 메모리 MiB | `memory` (MiB, 숫자) | 최소 512 |
 | RDS PostgreSQL 10~16 | `db_version` = `"16"` | 16 초과(다운그레이드)·10 미만은 fail |

@@ -144,3 +144,19 @@ def test_source_image_pinned_to_digest_when_known():
     assert pinned_image(f"{repo}:abc", None) == f"{repo}:abc"
     assert pinned_image("localhost:5000/app:1", "sha256:ff") == "localhost:5000/app@sha256:ff"
     assert pinned_image(None, "sha256:ff") is None
+
+
+def test_service_name_comes_from_image_repo_not_ecs_service():
+    inp = _ready_input()
+    inp.inventory.app.service_name = "target-app-task-service-gtzbb08o"
+    plan = run(inp)
+    assert plan.target_infra.service_name == "target-app"
+    assert plan.target_infra.secret_refs == {"API_KEY": "target-app-api-key"}
+
+
+def test_service_name_falls_back_to_ecs_name_without_image():
+    inp = _ready_input()
+    inp.inventory.app.service_name = "My_Service"
+    inp.inventory.app.image_uri = None
+    plan = run(inp)
+    assert plan.target_infra.service_name == "my-service"

@@ -173,6 +173,15 @@ def pinned_image(uri: str | None, digest: str | None) -> str | None:
     return f"{repo}/{name}@{digest}" if repo else f"{name}@{digest}"
 
 
+def image_repo_name(uri: str | None) -> str | None:
+    """이미지 주소의 저장소 이름 (`.../target-app:tag` → `target-app`). 주소가 없으면 None."""
+    if not uri:
+        return None
+    last = uri.rpartition("/")[2]
+    name = last.split("@", 1)[0].split(":", 1)[0]
+    return name or None
+
+
 def _secret_name(service_name: str, env_name: str) -> str:
     return f"{service_name}-{env_name.lower().replace('_', '-')}"
 
@@ -198,7 +207,9 @@ def build_target_infra(inv: InventoryForPlanning, target: TargetSelection) -> tu
                    "db_tier 를 넘기지 않습니다.",
         ))
     disk = max(CLOUD_SQL_MIN_DISK_GB, db.allocated_storage_gb) if db.allocated_storage_gb else None
-    service_name = gcp_name(app.service_name)
+    # ECS 서비스 이름은 "target-app-task-service-xxxx" 처럼 자동 생성 접미사가 붙어서,
+    # 이미지 저장소 이름을 우선 씁니다. provisioning 의 GCP 자원 이름이 여기서 파생됨 (#27 리뷰)
+    service_name = gcp_name(image_repo_name(app.image_uri) or app.service_name)
 
     infra = TargetInfra(
         region=target.region,
