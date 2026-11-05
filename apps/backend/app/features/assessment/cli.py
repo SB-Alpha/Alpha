@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 
+from .aws import ALLOW_PROFILE_ENV
 from .schemas import AssessmentInput
 from .service import run
 
@@ -45,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_mask and args.out:
         p.error("--no-mask 결과는 파일로 저장하지 않습니다 (공개 레포 보호)")
 
+    os.environ.setdefault(ALLOW_PROFILE_ENV, "1")  # 로컬 CLI 에서만 profile: 허용
     inp = AssessmentInput(
         aws_credentials_ref=f"profile:{args.profile}",
         aws_region=args.aws_region,

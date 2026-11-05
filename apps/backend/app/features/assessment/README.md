@@ -44,7 +44,7 @@ python -m app.features.assessment.cli --profile <읽기 전용 프로필> --aws-
 | 필드 | 설명 |
 | --- | --- |
 | `run_id`, `github_repo_url` | workflows · 사용자 |
-| `aws_credentials_ref` | 원본 AWS 키 이름표. `secret://...`(backend DB, `core/secrets.resolve`) 또는 로컬 개발용 `profile:<이름>` |
+| `aws_credentials_ref` | 원본 AWS 키 이름표. `secret://...`(backend DB, `core/secrets.resolve`) 또는 로컬 개발용 `profile:<이름>`(`ALPHA_ALLOW_AWS_PROFILE=1` 일 때만, cli.py 가 켬). 저장 값은 `{aws_access_key_id, aws_secret_access_key, aws_session_token?}` (#31 `source-cloud` 와 같음) |
 | `db_admin_ref` | 원본 DB 관리자 계정 이름표 (db.py 가 PG 카탈로그 조회에 사용) |
 | `aws_region` / `target_region` | 원본 AWS 리전 / 목적지 GCP 리전 |
 | `ecs_cluster`, `ecs_service`, `rds_instance_id` | 선택. 후보가 여러 개일 때만. 비우면 하나뿐일 때 자동 선택, 여러 개면 고르지 않고 gaps |
