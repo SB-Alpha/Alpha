@@ -9,6 +9,7 @@ provisioning 이 쓸 `plan.target_infra` 와 db_migration 이 쓸 `source` 를 �
 - 필수 조건은 코드로 검사합니다 (`rules.py`). AI 판단으로 통과시키지 않습니다.
 - 조회하지 못한 값은 지어내지 않고 `None` + `gaps` 로 남깁니다 → 해당 check 는 `unknown` → 승인 불가.
 - 키·비밀번호 원문은 받지 않습니다. 이름표(`secret://...`)만 받고, 조회할 때만 꺼냅니다.
+  이름은 db_migration #31 저장 API 규칙을 따릅니다: AWS 키 `secret://<run_id>/source-cloud`, DB 관리자 `secret://<run_id>/source-db-admin`.
 
 ## 진입 함수
 ```python

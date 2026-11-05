@@ -22,8 +22,8 @@ def _fake_modules(monkeypatch, stored):
 
 def test_secret_ref_resolves_dict_from_secret_store(monkeypatch):
     # PR #29 resolve() 는 dict 를 돌려줌
-    _fake_modules(monkeypatch, {"secret://run-1/aws": {"access_key_id": "AKIAEXAMPLE", "secret_access_key": "x"}})
-    sess, why = aws.session_for("secret://run-1/aws", "ap-northeast-2")
+    _fake_modules(monkeypatch, {"secret://run-1/source-cloud": {"access_key_id": "AKIAEXAMPLE", "secret_access_key": "x"}})
+    sess, why = aws.session_for("secret://run-1/source-cloud", "ap-northeast-2")
     assert why is None
     assert sess.kwargs["aws_access_key_id"] == "AKIAEXAMPLE"
     assert sess.kwargs["aws_session_token"] is None and sess.kwargs["region_name"] == "ap-northeast-2"
@@ -31,7 +31,7 @@ def test_secret_ref_resolves_dict_from_secret_store(monkeypatch):
 
 def test_missing_secret_becomes_gap_without_value(monkeypatch):
     _fake_modules(monkeypatch, {})
-    sess, why = aws.session_for("secret://run-1/aws", "ap-northeast-2")
+    sess, why = aws.session_for("secret://run-1/source-cloud", "ap-northeast-2")
     assert sess is None and "KeyError" in why
 
 

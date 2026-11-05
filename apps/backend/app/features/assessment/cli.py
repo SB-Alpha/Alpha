@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     out = run(inp)
     data = out.model_dump(mode="json", exclude={"plan": {"generated_at"}})
     # 로컬 프로필 이름은 fixture 에 남기지 않음
-    data["source"]["credentials_ref"]["cloud"] = "secret://<run>/aws"
+    data["source"]["credentials_ref"]["cloud"] = "secret://<run>/source-cloud"
     text = json.dumps(data, ensure_ascii=False, indent=2)
     if not args.no_mask:
         text = mask(text, out.source.account_id)

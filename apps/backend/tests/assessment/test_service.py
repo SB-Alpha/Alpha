@@ -7,7 +7,7 @@ from app.main import app
 
 from .fakes import ACCOUNT, session
 
-INP = AssessmentInput(aws_credentials_ref="secret://run-1/aws", db_admin_ref="secret://run-1/db-admin",
+INP = AssessmentInput(aws_credentials_ref="secret://run-1/source-cloud", db_admin_ref="secret://run-1/source-db-admin",
                       aws_region="ap-northeast-2", target_region="asia-northeast3")
 
 
@@ -30,8 +30,8 @@ def test_db_not_implemented_blocks_approval_but_app_part_flows():
     # source: cdc 명세 칸
     assert out.source.account_id == ACCOUNT and out.source.region == "ap-northeast-2"
     assert out.source.app.db_user == "alpha"
-    assert out.source.credentials_ref.cloud == "secret://run-1/aws"
-    assert out.source.credentials_ref.db_admin == "secret://run-1/db-admin"
+    assert out.source.credentials_ref.cloud == "secret://run-1/source-cloud"
+    assert out.source.credentials_ref.db_admin == "secret://run-1/source-db-admin"
     assert calls[-1] == ("running", 100)
     assert all(state == "running" for state, _ in calls)
 
