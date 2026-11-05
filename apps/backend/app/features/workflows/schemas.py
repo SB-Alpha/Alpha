@@ -76,9 +76,11 @@ class MigrationRequest(BaseModel):
     github_repo_url: str
     aws_region: str
     aws_role_ref: str | None = None  # 원본 조회용 IAM 역할 ARN
+    aws_credentials_ref: str | None = None  # 원본 AWS 자격증명 참조 (secret://... 등)
     ecs_service: str | None = None
     rds_instance_id: str | None = None
     db_credentials_ref: str | None = None  # 예: Secrets Manager ARN. 값 금지
+    db_admin_ref: str | None = None  # 원본 DB 관리자 계정 참조
     target_region: str = "asia-northeast3"
 
 
