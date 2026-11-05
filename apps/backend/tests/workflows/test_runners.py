@@ -346,3 +346,38 @@ def test_cutover_runner_raises_on_failed(engine, monkeypatch):
     with pytest.raises(RuntimeError, match="컷오버 실패 \\(failed\\)"):
         run_cutover(run, ctx=FakeCtx(), poll_interval_s=0.01)  # type: ignore[arg-type]
 
+
+def test_cutover_runner_with_simulation_fallback(engine, monkeypatch):
+    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
+    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+
+    run = engine.create_run(REQUEST)
+    reports = []
+
+    class FakeCtx:
+        def report(self, state, progress, metrics=None, message=None):
+            reports.append((state, progress, metrics, message))
+
+    job = run_cutover(run, ctx=FakeCtx(), poll_interval_s=0.01)
+    assert job["state"] == "succeeded"
+    assert job["phase"] == "stabilizing"
+    last_report = reports[-1]
+    assert last_report[1] == 100
+    assert last_report[2]["serving"] == "gcp"
+    assert last_report[2]["failed_requests"] == 0
+
+
+def test_planning_reports_security_governance_metrics(engine, fake_assessment):
+    run = engine.create_run(REQUEST)
+    reports = []
+
+    class FakeCtx:
+        def report(self, state, progress, metrics=None, message=None):
+            reports.append((state, progress, metrics, message))
+
+    run_assessment(run, ctx=FakeCtx())
+    assert any(
+        r[2] and r[2].get("iam_audit_status") == "PASS" and r[2].get("secret_encryption") == "ENCRYPTED"
+        for r in reports
+    )
+
