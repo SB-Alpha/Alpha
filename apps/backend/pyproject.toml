@@ -12,11 +12,15 @@ dependencies = [
     "uvicorn>=0.30",
     "httpx>=0.27",
     "pydantic>=2",
+    "boto3>=1.34",  # assessment: 원본 AWS 읽기 전용 조회
     "cryptography>=42",
     "keyring>=25",
 ]
 
 [project.optional-dependencies]
+ai = [
+    "anthropic",  # assessment AI 보강 (ALPHA_AI_ENABLED=1 일 때만 사용)
+]
 dev = [
     "pytest>=8",
     "httpx>=0.27",
