@@ -4,13 +4,16 @@ import { useEffect, useState } from "react";
 import {
   METRIC_KEYS,
   elapsedSeconds,
+  formatBytes,
   formatDuration,
   isFinished,
   numberMetric,
   overallProgress,
   securityAuditSummary,
+  securityTone,
   servingSide,
   stageCounts,
+  tableRowTotals,
 } from "@/lib/dashboard";
 import { GATE_LABEL, STAGE_LABEL } from "@/lib/labels";
 import type { RunStatus } from "@/lib/workflows";
@@ -60,7 +63,20 @@ function MetricTile({ label, value, hint, tone = "neutral" }: { label: string; v
   );
 }
 
+function SecurityCell({ label, value }: { label: string; value: string | null }) {
+  return (
+    <div className="rounded border border-ink/10 bg-white p-2">
+      <span className="block text-ink/50">{label}</span>
+      <span className={`mt-0.5 font-semibold ${value === null ? "text-ink/30" : TONE_CLASS[securityTone(value)]}`}>
+        {value ?? MISSING}
+      </span>
+    </div>
+  );
+}
+
 function currentStepText(run: RunStatus): string {
+  if (run.state === "failed") return "실패";
+  if (run.state === "aborted") return "중단";
   if (run.waiting_gate) return `${GATE_LABEL[run.waiting_gate]} 대기`;
   if (run.current_stage) return STAGE_LABEL[run.current_stage];
   return isFinished(run.state) ? "종료" : "—";
@@ -73,18 +89,16 @@ export function DashboardPanel({ run }: Props) {
   const serving = servingSide(run);
   const security = securityAuditSummary(run);
 
-  const lag = numberMetric(run, METRIC_KEYS.replicationLagSeconds);
-  const rowsSource = numberMetric(run, METRIC_KEYS.rowsSource);
-  const rowsTarget = numberMetric(run, METRIC_KEYS.rowsTarget);
-  const mismatch = numberMetric(run, METRIC_KEYS.mismatchCount);
+  const lag = numberMetric(run, METRIC_KEYS.replicationLagBytes);
+  const copyPercent = numberMetric(run, METRIC_KEYS.copyPercent);
+  const rows = tableRowTotals(run);
+  const mismatch = numberMetric(run, METRIC_KEYS.mismatchTables);
   const failed = numberMetric(run, METRIC_KEYS.failedRequests);
   const cutover = numberMetric(run, METRIC_KEYS.cutoverSeconds);
 
-  const rowsText =
-    rowsSource === null && rowsTarget === null
-      ? null
-      : `${rowsSource?.toLocaleString("ko-KR") ?? "?"} / ${rowsTarget?.toLocaleString("ko-KR") ?? "?"}`;
-  const rowsTone: Tone = rowsSource !== null && rowsTarget !== null ? (rowsSource === rowsTarget ? "good" : "bad") : "neutral";
+  const rowsText = rows && `${rows.source.toLocaleString("ko-KR")} / ${rows.target.toLocaleString("ko-KR")}`;
+  // 복사 중에는 목적지 행 수가 적은 것이 정상이라 빨강으로 표시하지 않습니다.
+  const rowsTone: Tone = rows && rows.source === rows.target ? "good" : "neutral";
 
   return (
     <section aria-labelledby="dashboard-heading" className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
@@ -131,16 +145,17 @@ export function DashboardPanel({ run }: Props) {
       </div>
 
       <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        <MetricTile label="트래픽 처리" value={serving && serving.toUpperCase()} />
+        <MetricTile label="복제 지연" value={lag === null ? null : formatBytes(lag)} hint="CDC 원본 → 목적지" />
         <MetricTile
-          label="트래픽 처리"
-          value={serving.side === "gcp" ? "GCP" : "AWS"}
-          hint={serving.isReported ? "보고값" : "전환 단계 기준 추정"}
+          label="행 수 (원본 / 목적지)"
+          value={rowsText}
+          tone={rowsTone}
+          hint={copyPercent === null ? undefined : `복사 ${copyPercent}%`}
         />
-        <MetricTile label="복제 지연" value={lag === null ? null : `${lag.toFixed(1)}초`} hint="CDC 원본 → 목적지" />
-        <MetricTile label="행 수 (원본 / 목적지)" value={rowsText} tone={rowsTone} />
         <MetricTile
-          label="데이터 불일치"
-          value={mismatch === null ? null : `${mismatch.toLocaleString("ko-KR")}건`}
+          label="불일치 테이블"
+          value={mismatch === null ? null : `${mismatch.toLocaleString("ko-KR")}개`}
           tone={countTone(mismatch)}
         />
         <MetricTile
@@ -153,30 +168,17 @@ export function DashboardPanel({ run }: Props) {
 
       <div className="rounded-lg border border-ink/15 bg-stone-50/70 p-3 lg:col-span-2">
         <div className="flex items-center justify-between text-xs font-medium text-ink/70">
-          <span>보안 & 거버넌스 감사 지표 (소프트뱅크 평가 기준)</span>
-          <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800">
-            COMPLIANT
-          </span>
+          <span>보안 & 거버넌스</span>
+          {security.isCompliant && (
+            <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800">
+              COMPLIANT
+            </span>
+          )}
         </div>
-        <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3 text-xs">
-          <div className="rounded border border-ink/10 bg-white p-2">
-            <span className="text-ink/50 block">IAM 최소 권한 감사</span>
-            <span className="mt-0.5 font-semibold text-emerald-700">
-              {security.iamAudit ?? "미제공 (계획 수립 시 판정)"}
-            </span>
-          </div>
-          <div className="rounded border border-ink/10 bg-white p-2">
-            <span className="text-ink/50 block">Cloud SQL 사설망 (PSC/VPC)</span>
-            <span className="mt-0.5 font-semibold text-emerald-700">
-              {security.cloudSql ?? "미제공 (구축 시 적용)"}
-            </span>
-          </div>
-          <div className="rounded border border-ink/10 bg-white p-2">
-            <span className="text-ink/50 block">비밀번호·키 암호화</span>
-            <span className="mt-0.5 font-semibold text-emerald-700">
-              {security.secretManager ?? "Secret Manager"}
-            </span>
-          </div>
+        <div className="mt-2 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
+          <SecurityCell label="IAM 최소 권한 감사" value={security.iamAudit} />
+          <SecurityCell label="Cloud SQL 사설망" value={security.cloudSql} />
+          <SecurityCell label="비밀번호·키 암호화" value={security.secretEncryption} />
         </div>
       </div>
     </section>

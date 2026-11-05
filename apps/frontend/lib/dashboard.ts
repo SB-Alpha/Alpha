@@ -1,15 +1,15 @@
 // 대시보드 계산. run 상태만으로 만들고, 값이 없으면 null(화면에 "미제공")을 돌려줍니다.
-// 지표 키는 아직 계약이 없어 제안 이름입니다. 모듈이 ctx.report(metrics={...})로 같은 이름을 보고하면
-// 어느 단계에서 왔든 화면에 나타납니다 (확정서 3절 frontend 필수 지표).
+// db_migration 키는 #30·#31 이 실제로 보내는 이름입니다. serving·failed_requests·cutover_seconds 와
+// 보안 키는 보내는 모듈이 아직 없어 "미제공"으로 남습니다. 어느 단계에서 보고하든 화면에 나타납니다.
 
 import type { RunStatus, StageStatus, WorkflowState } from "./workflows";
 
 export const METRIC_KEYS = {
   serving: "serving", // "aws" | "gcp": 지금 요청을 처리하는 쪽
-  replicationLagSeconds: "replication_lag_seconds",
-  rowsSource: "rows_source",
-  rowsTarget: "rows_target",
-  mismatchCount: "mismatch_count",
+  replicationLagBytes: "replication_lag_bytes",
+  copyPercent: "copy_percent",
+  tables: "tables", // { 테이블명: { source_rows, target_rows, percent, match } }
+  mismatchTables: "mismatch", // 불일치 테이블 수
   failedRequests: "failed_requests",
   cutoverSeconds: "cutover_seconds", // T1 − T0
   iamAuditStatus: "iam_audit_status", // "PASS" | "WARN" | "FAIL"
@@ -49,9 +49,9 @@ export function elapsedSeconds(run: RunStatus, nowMs: number): number {
   return Math.max(0, Math.floor((end - start) / 1000));
 }
 
-/** 단계 순서대로 찾아 처음 나온 값을 씁니다. 어느 모듈이 보고하든 같은 칸에 표시됩니다. */
+/** 뒤 단계부터 찾습니다. 같은 키를 여러 단계가 보고하면 가장 최근 단계 값을 씁니다. */
 export function findMetric(run: RunStatus, key: string): unknown {
-  for (const stage of run.stages) {
+  for (const stage of [...run.stages].reverse()) {
     if (key in stage.metrics) return stage.metrics[key];
   }
   return null;
@@ -70,29 +70,52 @@ export function stringMetric(run: RunStatus, key: string): string | null {
   return null;
 }
 
+const SECURITY_GOOD = ["PASS", "SECURE", "ENCRYPTED"];
+const SECURITY_BAD = ["FAIL", "PUBLIC", "PLAINTEXT"];
+
+export type SecurityTone = "neutral" | "good" | "bad";
+
+export function securityTone(value: string | null): SecurityTone {
+  if (value === null) return "neutral";
+  if (SECURITY_GOOD.includes(value)) return "good";
+  return SECURITY_BAD.includes(value) ? "bad" : "neutral";
+}
+
+/** 모듈이 실제로 보고한 값만 돌려줍니다. 보고가 없으면 null 입니다. */
 export function securityAuditSummary(run: RunStatus) {
-  const iam = stringMetric(run, METRIC_KEYS.iamAuditStatus);
-  const sql = stringMetric(run, METRIC_KEYS.cloudSqlPrivateIp);
-  const secret = stringMetric(run, METRIC_KEYS.secretEncryption);
+  const iamAudit = stringMetric(run, METRIC_KEYS.iamAuditStatus);
+  const cloudSql = stringMetric(run, METRIC_KEYS.cloudSqlPrivateIp);
+  const secretEncryption = stringMetric(run, METRIC_KEYS.secretEncryption);
+  const isCompliant = [iamAudit, cloudSql, secretEncryption].every((v) => securityTone(v) === "good");
+  return { iamAudit, cloudSql, secretEncryption, isCompliant };
+}
 
-  const hasPlan = Boolean(run.outputs.planning);
-  const hasProvisioning = Boolean(run.outputs.provisioning);
-
+/** tables 지표의 행 수 합계. 보고 전이거나 형식이 다르면 null 입니다. */
+export function tableRowTotals(run: RunStatus): { source: number; target: number } | null {
+  const tables = findMetric(run, METRIC_KEYS.tables);
+  if (typeof tables !== "object" || tables === null) return null;
+  const rows = Object.values(tables as Record<string, { source_rows?: unknown; target_rows?: unknown }>);
+  if (rows.length === 0) return null;
+  if (!rows.every((r) => Number.isFinite(r?.source_rows) && Number.isFinite(r?.target_rows))) return null;
   return {
-    iamAudit: iam ?? (hasPlan ? "PASS" : null),
-    cloudSql: sql ?? (hasProvisioning ? "사설망 (VPC)" : hasPlan ? "사설망 예정" : null),
-    secretManager: secret ?? (hasPlan ? "Secret Manager" : null),
+    source: rows.reduce((sum, r) => sum + (r.source_rows as number), 0),
+    target: rows.reduce((sum, r) => sum + (r.target_rows as number), 0),
   };
 }
 
-export type ServingSide = { side: "aws" | "gcp"; isReported: boolean };
+export function formatBytes(bytes: number): string {
+  let size = bytes;
+  for (const unit of ["B", "KB", "MB"]) {
+    if (size < 1024) return `${size.toFixed(0)}${unit}`;
+    size /= 1024;
+  }
+  return `${size.toFixed(1)}GB`;
+}
 
-/** 처리 중인 쪽. 보고값이 있으면 그대로, 없으면 전환 단계 완료 여부로만 판단합니다. */
-export function servingSide(run: RunStatus): ServingSide {
+/** 처리 중인 쪽. 보고값만 쓰고, 보고가 없으면 추정하지 않습니다. */
+export function servingSide(run: RunStatus): "aws" | "gcp" | null {
   const reported = findMetric(run, METRIC_KEYS.serving);
-  if (reported === "aws" || reported === "gcp") return { side: reported, isReported: true };
-  const cutover = run.stages.find((s) => s.stage === "cutover");
-  return { side: cutover?.state === "succeeded" ? "gcp" : "aws", isReported: false };
+  return reported === "aws" || reported === "gcp" ? reported : null;
 }
 
 export function formatDuration(totalSeconds: number): string {

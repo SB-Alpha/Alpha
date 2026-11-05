@@ -16,7 +16,8 @@ export function StageStepper({ run }: Props) {
       {run.stages.map((s, i) => {
         const gate = GATE_BEFORE[s.stage];
         const isCurrent = run.current_stage === s.stage;
-        const metrics = Object.entries(s.metrics);
+        // tables 같은 객체 값은 위 대시보드에서 합계로 보여 줍니다.
+        const metrics = Object.entries(s.metrics).filter(([, value]) => typeof value !== "object");
         return (
           <li
             key={s.stage}
