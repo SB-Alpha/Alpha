@@ -38,6 +38,8 @@ class AppDeployInput(BaseModel):
     dry_run: bool = False
 
     health_timeout_s: float = 120.0
+    # True 면 앱이 준비된 뒤 Worker 의 GCP 쪽 원본 주소를 새 Cloud Run 주소로 바꾼다. 환경변수 WORKER_URL 이 필요하다.
+    update_worker_target: bool = True
 
 
 class AppDeployOutput(BaseModel):
@@ -48,3 +50,4 @@ class AppDeployOutput(BaseModel):
     target: dict[str, Any]
     changes: dict[str, int]
     applied: bool
+    worker_target_updated: bool = False  # Worker 의 원본 주소를 app_url 로 바꿨는지

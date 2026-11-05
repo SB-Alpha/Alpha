@@ -216,9 +216,28 @@ def test_secret_values_in_terraform_output_never_reach_the_result():
 
 def make_app_input(**overrides) -> AppDeployInput:
     base = make_input()
-    args = {"run_id": base.run_id, "project_id": base.project_id, "target_infra": base.target_infra}
+    # 기본은 Worker 를 건드리지 않는다. Worker 시험은 update_worker_target=True 로 따로 한다.
+    args = {
+        "run_id": base.run_id,
+        "project_id": base.project_id,
+        "target_infra": base.target_infra,
+        "update_worker_target": False,
+    }
     args.update(overrides)
     return AppDeployInput(**args)
+
+
+class FakeWorker:
+    """Worker 를 실제로 부르지 않는 가짜. 어떤 주소로 불렸는지 기록한다."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.set_calls: list[str] = []
+
+    def set_target(self, url: str) -> None:
+        if self.fail:
+            raise ProvisioningError("Worker target 명령 실패 (HTTP 409)")
+        self.set_calls.append(url)
 
 
 def fake_clock():
@@ -262,6 +281,63 @@ def test_deploy_app_fails_if_terraform_produced_no_app_url():
     tf = FakeTerraform()  # 출력에 app_url 이 없다
     with pytest.raises(ProvisioningError, match="app_url"):
         deploy_app(make_app_input(), FakeContext(), terraform=tf, http_get=lambda url: 200, sleep=lambda s: None)
+
+
+def test_deploy_app_points_the_worker_at_the_new_app_after_it_is_ready():
+    tf, worker = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text()))), FakeWorker()
+    result = deploy_app(
+        make_app_input(update_worker_target=True),
+        FakeContext(),
+        terraform=tf,
+        http_get=lambda url: 200,
+        sleep=lambda s: None,
+        worker=worker,
+    )
+    assert worker.set_calls == ["https://target-app-abc.a.run.app"]
+    assert result.worker_target_updated is True
+
+
+def test_deploy_app_does_not_touch_the_worker_when_the_app_is_not_ready():
+    tf, worker = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text()))), FakeWorker()
+    with pytest.raises(ProvisioningError):
+        deploy_app(
+            make_app_input(update_worker_target=True, health_timeout_s=5),
+            FakeContext(),
+            terraform=tf,
+            http_get=lambda url: 503,
+            sleep=lambda s: None,
+            clock=fake_clock(),
+            worker=worker,
+        )
+    assert worker.set_calls == []  # 준비 안 된 앱으로 트래픽을 돌리게 하면 안 된다
+
+
+def test_deploy_app_fails_before_terraform_when_the_worker_is_not_configured(monkeypatch):
+    monkeypatch.delenv("WORKER_URL", raising=False)
+    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text())))
+    with pytest.raises(ProvisioningError, match="WORKER_URL"):
+        deploy_app(make_app_input(update_worker_target=True), FakeContext(), terraform=tf, http_get=lambda url: 200)
+    assert tf.calls == []  # Cloud Run 을 만들기 전에 멈춘다
+
+
+def test_deploy_app_reports_a_worker_failure_as_an_error():
+    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text())))
+    with pytest.raises(ProvisioningError, match="409"):
+        deploy_app(
+            make_app_input(update_worker_target=True),
+            FakeContext(),
+            terraform=tf,
+            http_get=lambda url: 200,
+            sleep=lambda s: None,
+            worker=FakeWorker(fail=True),
+        )
+
+
+def test_deploy_app_dry_run_does_not_need_or_touch_the_worker(monkeypatch):
+    monkeypatch.delenv("WORKER_URL", raising=False)
+    tf = FakeTerraform()
+    result = deploy_app(make_app_input(dry_run=True, update_worker_target=True), FakeContext(), terraform=tf)
+    assert result.worker_target_updated is False
 
 
 def test_deploy_app_dry_run_does_not_wait_for_the_app():

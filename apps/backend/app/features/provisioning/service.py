@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from .schemas import AppDeployInput, AppDeployOutput, ProvisioningInput, ProvisioningOutput
 from .target import TargetBuildError, build_target, find_problems
 from .terraform import ProvisioningError, TerraformCli, summarize_plan
+from .worker_client import WorkerClient
 
 DEFAULT_REGION = "asia-northeast3" 
 
@@ -189,8 +190,18 @@ def deploy_app(
     http_get: Callable[[str], int] = _default_http_get,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
+    worker: WorkerClient | None = None,
 ) -> AppDeployOutput:
     # app_deploy 단계: 목적지 앱(Cloud Run)을 배포하고 app_url 을 돌려줌.
+    # 앱이 준비되면 Worker 가 그 주소로 보내도록 알림 (update_worker_target).
+    worker_client = None
+    if inp.update_worker_target and not inp.dry_run:
+        worker_client = worker or WorkerClient.from_env()
+        if worker_client is None:
+            raise ProvisioningError(
+                "Worker 주소(환경변수 WORKER_URL)가 없습니다. 지정하거나 입력의 update_worker_target 을 false 로 하세요"
+            )
+
     tf = terraform or default_terraform()
     project_id, counts, applied, outputs = _converge(inp, ctx, tf, deploy_app=True)
 
@@ -214,5 +225,16 @@ def deploy_app(
         sleep=sleep,
         clock=clock,
     )
-    ctx.report("running", 99, message="앱 상태 확인 완료 (/health/ready 200)")
-    return AppDeployOutput(app_url=app_url, healthy=True, target=target, changes=counts, applied=applied)
+    ctx.report("running", 98, message="앱 상태 확인 완료 (/health/ready 200)")
+
+    if worker_client is not None:
+        worker_client.set_target(app_url)
+        ctx.report("running", 99, message="Worker 의 GCP 원본 주소를 새 앱 주소로 설정")
+    return AppDeployOutput(
+        app_url=app_url,
+        healthy=True,
+        target=target,
+        changes=counts,
+        applied=applied,
+        worker_target_updated=worker_client is not None,
+    )
