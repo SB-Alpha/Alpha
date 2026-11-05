@@ -33,6 +33,9 @@ class FakeWorkerServer:
             def _handle(self, method: str) -> None:
                 raw = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode() or None
                 outer.requests.append((method, self.headers.get("Authorization", ""), raw))
+                # Cloudflare 는 파이썬 기본 User-Agent 를 막는다 (실제 Worker 에서 403 / error 1010 으로 확인됨)
+                if self.headers.get("User-Agent", "").startswith("Python-urllib"):
+                    return self._reply(403, {"error": "blocked user agent"})
                 if self.headers.get("Authorization") != f"Bearer {TOKEN}":
                     return self._reply(401, {"error": "unauthorized"})
                 if reject_with:

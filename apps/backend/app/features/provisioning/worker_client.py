@@ -13,6 +13,8 @@ from typing import Any
 from .terraform import ProvisioningError
 
 TIMEOUT_S = 10
+# 파이썬 기본 User-Agent(Python-urllib)는 Cloudflare 가 봇으로 보고 막는다 (HTTP 403, error code 1010).
+USER_AGENT = "alpha-provisioning/1.0"
 
 
 class WorkerClient:
@@ -38,7 +40,11 @@ class WorkerClient:
             f"{self.base_url}/control/target",
             data=data,
             method=method,
-            headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
+            },
         )
         try:
             with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:  # noqa: S310  (운영자가 정한 Worker 주소)
