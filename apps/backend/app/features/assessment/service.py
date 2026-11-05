@@ -80,7 +80,8 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
         credentials_ref=SourceCredentials(cloud=inp.aws_credentials_ref, db_admin=inp.db_admin_ref),
     )
 
-    report(100, "계획 생성 완료", state="succeeded")  # 승인 ① 대기는 workflows 가 게이트로 처리
+    # 단계 성공은 run() 반환으로 workflows 가 정합니다. report 는 진행 중 상태만 (PR #22 RunContext)
+    report(100, "계획 생성 완료")
     return AssessmentOutput(source=source, plan=plan, gaps=gaps)
 
 

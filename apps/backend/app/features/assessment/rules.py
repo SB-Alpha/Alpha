@@ -164,6 +164,15 @@ def gcp_name(name: str) -> str:
     return cleaned[:49].rstrip("-")
 
 
+def pinned_image(uri: str | None, digest: str | None) -> str | None:
+    """digest 를 알면 `저장소@sha256:...` 로 고정합니다. provisioning 이 태그가 아니라 정확히 같은 이미지를 복사하도록."""
+    if not uri or not digest or "@" in uri:
+        return uri
+    repo, _, last = uri.rpartition("/")
+    name = last.split(":", 1)[0]
+    return f"{repo}/{name}@{digest}" if repo else f"{name}@{digest}"
+
+
 def _secret_name(service_name: str, env_name: str) -> str:
     return f"{service_name}-{env_name.lower().replace('_', '-')}"
 
@@ -194,7 +203,7 @@ def build_target_infra(inv: InventoryForPlanning, target: TargetSelection) -> tu
     infra = TargetInfra(
         region=target.region,
         service_name=service_name,
-        source_image=app.image_uri,
+        source_image=pinned_image(app.image_uri, app.image_digest),
         container_port=fallback(app.container_port, DEFAULT_PORT, "컨테이너 포트"),
         cpu=fallback(_cloud_run_cpu(app.cpu_units), DEFAULT_CPU, "CPU"),
         memory=fallback(_cloud_run_memory(app.memory_mib), DEFAULT_MEMORY, "메모리(MiB)"),

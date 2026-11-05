@@ -32,7 +32,8 @@ def test_db_not_implemented_blocks_approval_but_app_part_flows():
     assert out.source.app.db_user == "alpha"
     assert out.source.credentials_ref.cloud == "secret://run-1/aws"
     assert out.source.credentials_ref.db_admin == "secret://run-1/db-admin"
-    assert calls[-1] == ("succeeded", 100)
+    assert calls[-1] == ("running", 100)
+    assert all(state == "running" for state, _ in calls)
 
 
 def test_db_part_filled_makes_plan_approvable(monkeypatch):

@@ -17,7 +17,7 @@ out = run(AssessmentInput(...), ctx)   # ctx.report(state, progress, metrics, me
 ```
 단독 확인: `POST /assessment/run` (body = `AssessmentInput`), 조회 없이 계획만: `POST /assessment/plan` (body = `PlanningInput`)
 
-- 진행 보고: 5 연결 → 20 DB → 50 앱 → 80 판정 → (90 AI) → 100 `succeeded`. 승인 ① 대기는 workflows 게이트가 처리.
+- 진행 보고: 5 연결 → 20 DB → 50 앱 → 80 판정 → (90 AI) → 100, 모두 `running`. 단계 성공은 `run()` 반환으로 workflows 가 정하고, 승인 ① 대기는 workflows 게이트가 처리 (PR #22 `RunContext`).
 - workflows `MigrationRequest`(PR #22) 와 이름을 맞춤: `github_repo_url`, `aws_region`, `ecs_service`, `rds_instance_id`, `target_region`.
   키는 `aws_role_ref`(역할 ARN) 대신 `aws_credentials_ref`(키 이름표) — 원본 키 방식 합의(안재현) 후 맞춥니다.
 
@@ -65,6 +65,10 @@ python -m app.features.assessment.cli --profile <읽기 전용 프로필> --aws-
 - 평문 환경 변수 중 이름이 비밀처럼 보이는 것(`PASSWORD`, `SECRET`, `TOKEN`, `API_KEY` …)은 **값을 버리고** gaps 에 남깁니다.
 - AWS 오류는 메시지 대신 오류 코드만 남깁니다.
 
+provisioning 도 같은 키 이름표(`source.credentials_ref.cloud`)를 `resolve()` 로 꺼내 원본 ECR 이미지를 복사합니다 (박준서, 11/5).
+그래서 사용자가 만드는 키 정책에는 위 읽기 권한에 더해 이미지 내려받기 권한도 넣어야 합니다:
+`ecr:GetAuthorizationToken`(리소스 `*`), `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`, `ecr:BatchCheckLayerAvailability`
+
 ## 매핑 규칙 (원본 → 목적지)
 | 원본 | 목적지 | 규칙 |
 | --- | --- | --- |
@@ -76,7 +80,7 @@ python -m app.features.assessment.cli --profile <읽기 전용 프로필> --aws-
 | RDS 디스크 GB | `db_disk_size_gb` | 원본과 같게, 최소 10 |
 | 환경 변수 | `env_vars` | PG*·APP_ENV·PORT 는 provisioning 이 채우므로 제외 |
 | 비밀 참조 | `secret_refs` | 이름 → `{service_name}-{변수명 소문자}`. 값 이전은 별도 작업 |
-| 이미지 | `source_image` | 원본 ECR 주소 그대로. Artifact Registry 복사는 provisioning |
+| 이미지 | `source_image` | 원본 ECR 주소. digest 를 알면 `저장소@sha256:...` 로 고정 (태그가 바뀌어도 같은 이미지). Artifact Registry 복사는 provisioning |
 | RDS 퍼블릭 액세스 켜짐 | `risks` (high) | CDC 가 VPN 을 못 탐. 이전 전에 꺼야 함 (cdc 명세 2절) |
 | 값 없음 | 기본값 (포트 8080, `/health/ready`, 1 vCPU, 512MiB) | 기본값을 쓰면 `risks` 에 남김 |
 
@@ -84,11 +88,11 @@ python -m app.features.assessment.cli --profile <읽기 전용 프로필> --aws-
 - [x] `target_infra` 필드 이름 ↔ Terraform 변수 1:1 (박준서, 11/3 합의, PR #26)
 - [x] db.py · app.py 반환은 Pydantic 모델 (`DbAssessment` / `AppAssessment`) (김준석, 11/4)
 - [ ] 원본 AWS 키: 사용자가 미리 만든 IAM 사용자 키를 등록 (김준석 제안, 안재현 확인 대기)
-- [ ] `core/secrets.py` 의 `put_secret` / `resolve` (cdc 명세 8절). 없으면 `secret://` 이름표는 gaps 로 끝남
+- [ ] `core/secrets.py` 의 `put_secret` / `resolve` — PR #29(안재현) 의 dict 반환에 맞춤. 머지 전엔 `secret://` 이름표는 gaps 로 끝남
 - [ ] PG 버전 기준: cdc 명세 "16 이상" vs 판정 "10~16" (안재현)
 - [ ] `db_tier` 매핑 규칙 확인 (박준서)
 - [ ] AI 모델·호출 방식 (risks·summary 보강)
-- [ ] `Reporter` → workflows `RunContext` 로 교체 (박재현, PR #22)
+- [ ] `Reporter` → workflows `RunContext` 로 교체 (박재현, PR #22). 모양은 같고, 끝 보고도 `running` 으로 맞춤
 
 ## fixture
 `apps/backend/tests/assessment/fixtures/`

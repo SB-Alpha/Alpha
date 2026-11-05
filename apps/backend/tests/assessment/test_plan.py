@@ -133,3 +133,14 @@ def test_gcp_name_rule():
     assert gcp_name("Target_App") == "target-app"
     assert gcp_name("1st-service").startswith("app-")
     assert len(gcp_name("x" * 80)) <= 49
+
+
+def test_source_image_pinned_to_digest_when_known():
+    from app.features.assessment.rules import pinned_image
+
+    repo = "123.dkr.ecr.ap-northeast-2.amazonaws.com/target-app"
+    assert pinned_image(f"{repo}:abc", "sha256:ff") == f"{repo}@sha256:ff"
+    assert pinned_image(f"{repo}@sha256:ff", "sha256:ff") == f"{repo}@sha256:ff"
+    assert pinned_image(f"{repo}:abc", None) == f"{repo}:abc"
+    assert pinned_image("localhost:5000/app:1", "sha256:ff") == "localhost:5000/app@sha256:ff"
+    assert pinned_image(None, "sha256:ff") is None

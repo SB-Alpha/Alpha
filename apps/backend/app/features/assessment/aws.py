@@ -49,7 +49,9 @@ def session_for(ref: str, region: str) -> tuple[AwsSession | None, str | None]:
         except ImportError:
             return None, "AWS 키 이름표를 풀 수 없음 (core/secrets 미구현)"
         try:
-            creds = json.loads(resolve(ref))
+            creds = resolve(ref)  # PR #29: dict 를 돌려줌
+            if isinstance(creds, str):
+                creds = json.loads(creds)
             return boto3.Session(
                 aws_access_key_id=creds["access_key_id"],
                 aws_secret_access_key=creds["secret_access_key"],
