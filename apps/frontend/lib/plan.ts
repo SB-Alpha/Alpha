@@ -57,13 +57,16 @@ export function readPlan(output: unknown): PlanView | null {
 }
 
 /**
- * 승인 ① 버튼을 열지 정합니다. 팀 합의 전 기본값:
- * - planning 이 approvable=false 를 주면 막습니다 (필수 조건 미통과).
+ * 승인 ① 버튼을 열지 정합니다.
+ * - 필수 조건 미통과(approvable=false) 시에도 운영자가 위험을 인지하고 강제 승인할 수 있도록 경고와 함께 버튼을 엽니다.
  * - 값이 없으면(수동 입력 등) 열어 두되 운영자가 직접 확인하라고 알립니다.
  */
 export function canApprovePlan(plan: PlanView | null): { allowed: boolean; reason: string | null } {
   if (plan?.approvable === false) {
-    return { allowed: false, reason: "필수 조건을 통과하지 못해 승인할 수 없습니다." };
+    return {
+      allowed: true,
+      reason: "필수 조건 미확인/미통과 항목이 있습니다. 운영자 판단 하에 위험을 감수하고 승인합니다.",
+    };
   }
   if (plan === null || plan.approvable === null) {
     return { allowed: true, reason: "planning 결과가 미제공입니다. 수동 입력 내용을 직접 확인한 뒤 승인하세요." };

@@ -128,7 +128,7 @@ export function PlanApproval({ run, isBusy, onApprove }: Props) {
               className={INPUT}
             />
             <button type="submit" disabled={!decision.allowed || isBusy} className={`${BUTTON_PRIMARY} shrink-0`}>
-              계획 승인
+              {plan?.approvable === false ? "위험 감수하고 계획 승인" : "계획 승인"}
             </button>
           </div>
         </form>
