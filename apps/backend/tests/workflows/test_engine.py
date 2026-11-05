@@ -259,14 +259,27 @@ def test_resume_retries_failed_stage(db_path):
         engine.resume(run_id)
 
 
-def test_unserializable_output_fails_stage_instead_of_hanging(db_path):
+@pytest.mark.parametrize("output", [["not", "a", "dict"], ["ok", "hi"]])
+def test_non_mapping_output_fails_stage_instead_of_fake_success(db_path, output):
     def bad_output(run: RunStatus, ctx: RunContext):
-        return ["not", "a", "dict"]
+        return output
 
     engine = make_engine(db_path, discovery=bad_output)
     run = engine.advance(engine.create_run(REQUEST).run_id)
     assert run.state == WorkflowState.FAILED
     assert run.stage(StageName.DISCOVERY).state == WorkflowState.FAILED
+    assert "discovery" not in run.outputs
+
+
+def test_fractional_progress_keeps_run_readable(db_path):
+    store = RunStore(db_path)
+    engine = Engine(store)
+    run_id = engine.create_run(REQUEST).run_id
+
+    StoreRunContext(store, run_id, StageName.DISCOVERY).report("running", 100 / 3)
+
+    assert engine.get(run_id).stage(StageName.DISCOVERY).progress == 33
+    assert [r.run_id for r in engine.list(10)] == [run_id]
 
 
 def test_unknown_run_raises(db_path):

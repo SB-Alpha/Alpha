@@ -58,6 +58,8 @@ class StoreRunContext:
 
         if not 0 <= progress <= 100:
             raise ValueError(f"progress must be 0..100, got {progress}")
+        # with_stage() 는 검증을 안 하므로 소수(done/total*100)를 그대로 저장하면 run 을 다시 못 읽습니다.
+        progress = int(progress)
 
         def change(run: RunStatus) -> RunStatus:
             if run.state == WorkflowState.ABORTED:
