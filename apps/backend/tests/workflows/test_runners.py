@@ -144,14 +144,15 @@ def test_db_migration_runner_calls_service(engine, monkeypatch):
 
     run = engine.create_run(REQUEST)
     run = run.model_copy(update={"outputs": {
-        "planning": {"source": {"account_id": "123"}},
+        "planning": {"source": {"account_id": "123", "tables": ["public.users", "alpha_cdc.cutover_marker", "alpha_cdc.foo"]}},
         "provisioning": {"target": {"project_id": "p-1"}},
     }})
 
     out = run_db_migration(run, ctx=None)  # type: ignore[arg-type]
     assert out == {"state": "streaming", "job_id": "job-1"}
     assert calls[0]["run_id"] == run.run_id
-    assert calls[0]["source"] == {"account_id": "123"}
+    assert calls[0]["source"]["account_id"] == "123"
+    assert calls[0]["source"]["tables"] == ["public.users"]
     assert calls[0]["target"] == {"project_id": "p-1"}
 
 

@@ -103,9 +103,17 @@ def run_db_migration(run: RunStatus, ctx: RunContext) -> Any:
 
     from app.features.db_migration import service as db_migration_service
 
+    source_dict = dict(source)
+    if "tables" in source_dict and isinstance(source_dict["tables"], list):
+        # alpha_cdc.cutover_marker 등 내부 CDC 마커 테이블은 에이전트가 자동 관리하므로 제외합니다 (LyleKim 피드백 반영).
+        source_dict["tables"] = [
+            t for t in source_dict["tables"]
+            if not (isinstance(t, str) and (t.startswith("alpha_cdc.") or t == "alpha_cdc.cutover_marker"))
+        ]
+
     inp = {
         "run_id": run.run_id,
-        "source": dict(source),
+        "source": source_dict,
         "target": dict(target),
     }
     return db_migration_service.run(inp, ctx)
