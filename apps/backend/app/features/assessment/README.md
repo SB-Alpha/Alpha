@@ -18,7 +18,8 @@ out = run(AssessmentInput(...), ctx)   # ctx.report(state, progress, metrics, me
 ```
 단독 확인: `POST /assessment/run` (body = `AssessmentInput`), 조회 없이 계획만: `POST /assessment/plan` (body = `PlanningInput`)
 
-- 진행 보고: 5 연결 → 20 DB → 50 앱 → 80 판정 → (90 AI) → 100, 모두 `running`. 단계 성공은 `run()` 반환으로 workflows 가 정하고, 승인 ① 대기는 workflows 게이트가 처리 (PR #22 `RunContext`).
+- 진행 보고: 5 연결 → 20 DB·앱 동시 조회 → (50 앱 끝, DB 대기) → 80 판정 → (90 AI) → 100, 모두 `running`. 단계 성공은 `run()` 반환으로 workflows 가 정하고, 승인 ① 대기는 workflows 게이트가 처리 (PR #22 `RunContext`).
+- 속도: DB 쪽(RDS → bastion → SSM 터널 → PG)과 앱 쪽(ECS·ECR)은 서로 기다릴 게 없어 스레드 2개로 동시에 조회합니다. AWS 클라이언트는 (서비스, 리전)마다 한 번만 만들어 재사용하고(`aws.CachedSession`), 호출마다 연결 5초·읽기 20초 제한과 표준 재시도(총 3번)를 겁니다. botocore 기본값(60초·legacy 재시도)이면 응답 없는 엔드포인트 하나에 단계가 몇 분씩 멈출 수 있습니다.
 - workflows `MigrationRequest`(PR #22) 와 이름을 맞춤: `github_repo_url`, `aws_region`, `ecs_service`, `rds_instance_id`, `target_region`.
   키는 `aws_role_ref`(역할 ARN) 대신 `aws_credentials_ref`(키 이름표) — 원본 키 방식 합의(안재현) 후 맞춥니다.
 
@@ -83,7 +84,9 @@ python -m app.features.assessment.cli --profile <읽기 전용 프로필> --aws-
 
 - 이미지·포트·CPU·메모리·환경 변수·비밀 참조(ARN)는 태스크 정의, digest 는 ECR, 상태 확인 경로는 컨테이너 healthCheck → 없으면 로드밸런서 대상 그룹.
 - 앱 DB 사용자는 태스크 정의의 `PGUSER` → `source.app.db_user`, `target_infra.db_user`.
-- 평문 환경 변수 중 이름이 비밀처럼 보이는 것(`PASSWORD`, `SECRET`, `TOKEN`, `API_KEY` …)은 **값을 버리고** gaps 에 남깁니다.
+- 평문 환경 변수 중 이름이 비밀처럼 보이는 것(`PASSWORD`, `SECRET`, `TOKEN`, `API_KEY`, `…_KEY` …)은 **값을 버리고** gaps 에 남깁니다.
+- 이름이 평범해도 값에 비밀이 들어 있으면(`postgres://user:비밀번호@…` 같은 접속 주소, AWS 액세스 키, 개인키, JWT, 알려진 API 토큰 형식) 똑같이 값을 버립니다. gaps 에는 이름만 남깁니다.
+- AI 보강(`ai.py`)에 보내는 계획에서는 AWS 계정 ID 를 `<aws-account>` 로 가립니다.
 - AWS 오류는 메시지 대신 오류 코드만 남깁니다.
 
 provisioning 도 같은 키 이름표(`source.credentials_ref.cloud`)를 `resolve()` 로 꺼내 원본 ECR 이미지를 복사합니다 (박준서, 11/5).

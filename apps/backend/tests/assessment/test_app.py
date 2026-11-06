@@ -76,3 +76,26 @@ def test_digest_in_image_is_used_without_ecr_call():
     s = session(container(image=f"{IMAGE.split(':abc')[0]}@{DIGEST}"))
     assert app_part.collect(_inp(), s).facts.image_digest == DIGEST
     assert s.clients["ecr"].calls == []
+
+
+def _env_session(env: list[dict]):
+    return session(container(environment=env))
+
+
+def test_value_with_credentials_is_dropped_even_with_plain_name():
+    leaked = "postgres://alpha:pl41n-pw@db.example:5432/app"
+    res = app_part.collect(_inp(), _env_session([
+        {"name": "DATABASE_URL", "value": leaked},
+        {"name": "UPSTREAM", "value": "AKIAABCDEFGHIJKLMNOP"},
+        {"name": "PUBLIC_URL", "value": "https://example.com/app"},
+    ]))
+    assert "DATABASE_URL" not in res.facts.env_vars and "UPSTREAM" not in res.facts.env_vars
+    assert res.facts.env_vars["PUBLIC_URL"] == "https://example.com/app"
+    assert any("DATABASE_URL" in g for g in res.gaps) and any("UPSTREAM" in g for g in res.gaps)
+    dumped = res.model_dump_json()
+    assert "pl41n-pw" not in dumped and "AKIAABCDEFGHIJKLMNOP" not in dumped
+
+
+def test_names_ending_in_key_are_secret_but_plain_names_are_not():
+    assert app_part.looks_secret("SIGNING_KEY") and app_part.looks_secret("AWS_ACCESS_KEY_ID")
+    assert not app_part.looks_secret("KEYCLOAK_REALM") and not app_part.looks_secret("LOG_LEVEL")
