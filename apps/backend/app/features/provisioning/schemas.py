@@ -43,6 +43,8 @@ class AppDeployInput(BaseModel):
     allow_destroy: bool = False
     dry_run: bool = False
 
+    source_credentials_ref: str | None = None
+
     health_timeout_s: float = 120.0
     # True 면 앱이 준비된 뒤 Worker 의 GCP 쪽 원본 주소를 새 Cloud Run 주소로 바꾼다. 환경변수 WORKER_URL 이 필요하다.
     update_worker_target: bool = True
