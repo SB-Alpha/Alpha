@@ -117,10 +117,13 @@ class TargetInfra(BaseModel):
 
     중첩 없는 평평한 구조여야 그대로 tfvars 로 쓸 수 있습니다.
     project_id 는 provisioning 이 따로 넣습니다.
+    source_service_name · db_memory_gib · db_vcpu 는 GCP Terraform 변수가 아니라 다른 목적지(Azure 등)가
+    자기 규칙으로 바꿔 쓰는 클라우드 중립 값입니다. GCP provisioning 은 선언된 변수만 골라 쓰므로 영향이 없습니다.
     """
 
     region: str
-    service_name: str
+    service_name: str  # GCP 자원 이름 규칙을 적용한 이름
+    source_service_name: str | None = None  # 규칙 적용 전 원래 이름. 목적지마다 자기 이름 규칙을 적용 (클라우드 중립)
     source_image: str | None  # 원본 ECR 주소. Artifact Registry 복사는 provisioning 이 함
     container_port: int
     cpu: int  # vCPU
@@ -131,7 +134,10 @@ class TargetInfra(BaseModel):
     db_version: str  # 예: "16"
     db_name: str | None
     db_user: str | None
-    db_tier: str | None  # Cloud SQL 등급. None 이면 provisioning 기본값
+    db_tier: str | None  # Cloud SQL 등급(GCP 전용). None 이면 provisioning 기본값
+    # 클라우드 중립 DB 크기: 원본 인스턴스의 메모리·vCPU. 목적지마다 자기 등급으로 바꿔 씁니다. 모르면 None
+    db_memory_gib: float | None = None
+    db_vcpu: int | None = None
     db_disk_size_gb: int | None  # None 이면 provisioning 기본값
     db_logical_decoding: bool = True  # CDC 대상이라 항상 켬
 

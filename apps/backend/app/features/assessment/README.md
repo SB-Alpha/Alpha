@@ -97,10 +97,12 @@ provisioning 도 같은 키 이름표(`source.credentials_ref.cloud`)를 `resolv
 | 원본 | 목적지 | 규칙 |
 | --- | --- | --- |
 | 이미지 저장소 이름 (없으면 ECS 서비스 이름) | `service_name` | GCP 이름 규칙(소문자·숫자·하이픈)으로 바꿈. ECS 서비스 이름엔 자동 생성 접미사가 붙을 수 있어 저장소 이름을 먼저 씀 |
+| 위와 같은 이름 (규칙 적용 전) | `source_service_name` | 클라우드 중립. Azure 등 다른 목적지가 자기 이름 규칙을 적용. GCP Terraform 에는 안 넘어감 |
 | Fargate CPU 단위 | `cpu` (vCPU, 숫자) | `ceil(units/1024)`, 최소 1 |
 | Fargate 메모리 MiB | `memory` (MiB, 숫자) | 최소 512 |
 | RDS PostgreSQL 10~16 | `db_version` = `"16"` | 16 초과(다운그레이드)·10 미만은 fail |
 | RDS 인스턴스 클래스 | `db_tier` | 원본 메모리 이상인 가장 작은 등급. 지금은 micro(1GiB) → `db-g1-small` 만. 그 외는 넘기지 않음(기본값) |
+| RDS 인스턴스 클래스 | `db_memory_gib` · `db_vcpu` | 클라우드 중립 DB 크기 (원본 메모리·vCPU). 목적지마다 자기 등급으로 바꿈. 표에 있는 micro·small 만, 그 외는 넘기지 않음. GCP Terraform 에는 안 넘어감 |
 | RDS 디스크 GB | `db_disk_size_gb` | 원본과 같게, 최소 10 |
 | 환경 변수 | `env_vars` | PG*·APP_ENV·PORT 는 provisioning 이 채우므로 제외 |
 | 비밀 참조 | `secret_refs` | 이름 → `{service_name}-{변수명 소문자}`. 값 이전은 별도 작업 |

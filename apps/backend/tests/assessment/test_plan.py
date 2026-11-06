@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.features.assessment.schemas import PlanningInput
 from app.features.assessment.plan import build as run
+from app.features.assessment.rules import gcp_name
 from app.main import app
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -55,6 +56,8 @@ def test_all_checks_pass_is_approvable():
     assert infra.cpu == 1 and infra.memory == 1024
     assert infra.db_version == "16"
     assert infra.db_tier == "db-g1-small" and infra.db_disk_size_gb == 20 and infra.db_user == "alpha"
+    # 클라우드 중립 값: 다른 목적지가 자기 등급·이름 규칙으로 바꿔 씀
+    assert infra.db_memory_gib == 1 and infra.db_vcpu == 2  # db.t3.micro
     # provisioning 이 채우는 PG*·APP_ENV 는 빠지고, 나머지만 넘어감
     assert infra.env_vars == {"LOG_LEVEL": "INFO"}
     assert infra.secret_refs == {"API_KEY": "target-app-api-key"}
@@ -100,6 +103,7 @@ def test_unknown_db_size_is_left_to_provisioning_default():
     plan = run(_ready_input(instance_class="db.r5.large", allocated_storage_gb=None, username=None))
     tfvars = plan.target_infra.to_tfvars()
     assert "db_tier" not in tfvars and "db_disk_size_gb" not in tfvars and "db_user" not in tfvars
+    assert "db_memory_gib" not in tfvars and "db_vcpu" not in tfvars  # 모르는 크기는 지어내지 않음
     assert any("DB 등급" in r.title for r in plan.risks)
 
 
@@ -160,3 +164,16 @@ def test_service_name_falls_back_to_ecs_name_without_image():
     inp.inventory.app.image_uri = None
     plan = run(inp)
     assert plan.target_infra.service_name == "my-service"
+
+
+def test_source_service_name_keeps_name_before_gcp_rules():
+    plan = run(_ready_input())
+    infra = plan.target_infra
+    assert infra.service_name == gcp_name(infra.source_service_name)
+
+
+def test_cloud_neutral_fields_are_not_gcp_terraform_variables():
+    from app.features.provisioning.service import build_tfvars
+
+    tfvars = build_tfvars(run(_ready_input()).target_infra.to_tfvars(), project_id="p", deploy_app=False)
+    assert not {"source_service_name", "db_memory_gib", "db_vcpu"} & set(tfvars)

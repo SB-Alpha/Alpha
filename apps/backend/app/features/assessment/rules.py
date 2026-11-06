@@ -33,6 +33,11 @@ RDS_MEMORY_GIB = {
     "db.t3.micro": 1, "db.t4g.micro": 1,
     "db.t3.small": 2, "db.t4g.small": 2,
 }
+# RDS 인스턴스 클래스 → vCPU. 위 표와 같은 범위만 둡니다.
+RDS_VCPU = {
+    "db.t3.micro": 2, "db.t4g.micro": 2,
+    "db.t3.small": 2, "db.t4g.small": 2,
+}
 CLOUD_SQL_MIN_DISK_GB = 10
 # Cloud SQL 공유 코어 등급의 메모리 상한(GB). 이보다 큰 원본은 자동 매핑하지 않고 provisioning 기본값을 씁니다.
 SHARED_CORE_TIER = ("db-g1-small", 1.7)
@@ -209,11 +214,14 @@ def build_target_infra(inv: InventoryForPlanning, target: TargetSelection) -> tu
     disk = max(CLOUD_SQL_MIN_DISK_GB, db.allocated_storage_gb) if db.allocated_storage_gb else None
     # ECS 서비스 이름은 "target-app-task-service-xxxx" 처럼 자동 생성 접미사가 붙어서,
     # 이미지 저장소 이름을 우선 씁니다. provisioning 의 GCP 자원 이름이 여기서 파생됨 (#27 리뷰)
-    service_name = gcp_name(image_repo_name(app.image_uri) or app.service_name)
+    source_name = image_repo_name(app.image_uri) or app.service_name
+    service_name = gcp_name(source_name)
+    instance_class = (db.instance_class or "").lower()
 
     infra = TargetInfra(
         region=target.region,
         service_name=service_name,
+        source_service_name=source_name,
         source_image=pinned_image(app.image_uri, app.image_digest),
         container_port=fallback(app.container_port, DEFAULT_PORT, "컨테이너 포트"),
         cpu=fallback(_cloud_run_cpu(app.cpu_units), DEFAULT_CPU, "CPU"),
@@ -226,6 +234,8 @@ def build_target_infra(inv: InventoryForPlanning, target: TargetSelection) -> tu
         db_name=db.database_name,
         db_user=db.username,
         db_tier=db_tier,
+        db_memory_gib=RDS_MEMORY_GIB.get(instance_class),
+        db_vcpu=RDS_VCPU.get(instance_class),
         db_disk_size_gb=disk,
     )
     return infra, risks
