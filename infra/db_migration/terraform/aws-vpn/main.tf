@@ -28,6 +28,7 @@ module "vpn" {
   route_table_ids      = var.route_table_ids
   db_security_group_id = var.db_security_group_id
   oci_cidr             = var.oci_cidr
+  db_port              = var.db_port
   tunnels              = var.tunnels
   shared_secrets       = var.shared_secrets
 }

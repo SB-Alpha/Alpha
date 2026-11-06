@@ -61,6 +61,10 @@ variable "oci_cidr" {
   type = string
 }
 
+variable "db_port" {
+  type = number
+}
+
 resource "aws_vpn_gateway" "this" {
   vpc_id          = var.vpc_id
   amazon_side_asn = var.amazon_side_asn
@@ -116,8 +120,8 @@ resource "aws_vpc_security_group_ingress_rule" "oci_postgres" {
   security_group_id = var.db_security_group_id
   cidr_ipv4         = var.oci_cidr
   ip_protocol       = "tcp"
-  from_port         = 5432
-  to_port           = 5432
+  from_port         = var.db_port
+  to_port           = var.db_port
   description       = "OCI CDC over VPN"
 }
 
