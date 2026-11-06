@@ -11,7 +11,7 @@ from cryptography.fernet import Fernet
 
 from app.core.secrets import delete_secret, has_secret, put_secret, resolve
 from app.features import db_migration
-from app.features.db_migration import service, vpn
+from app.features.db_migration import db_workflow, service, vpn
 from app.features.db_migration.client import AgentSettings, CdcAgentClient
 from app.features.db_migration.input_secrets import INPUT_SECRETS
 
@@ -71,10 +71,10 @@ class Recorder:
 
 @pytest.fixture(autouse=True)
 def env(monkeypatch, tmp_path):
-    monkeypatch.setattr(service, "_stop_requested", set())
+    monkeypatch.setattr(db_workflow, "_stop_requested", set())
     monkeypatch.setenv("ALPHA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("ALPHA_SECRETS_KEY", Fernet.generate_key().decode())
-    monkeypatch.setattr(service.time, "sleep", lambda s: None)
+    monkeypatch.setattr(db_workflow.time, "sleep", lambda s: None)
     put_secret(f"{RUN_ID}/source-cloud", {"aws_access_key_id": "k", "aws_secret_access_key": "s"})
     put_secret(f"{RUN_ID}/target-cloud", {"credentials_json": "{}"})
     put_secret(f"{RUN_ID}/source-db-admin", {"user": "alpha", "password": ADMIN_PASSWORD})
@@ -181,8 +181,8 @@ def test_complete_keeps_the_inputs_when_a_live_run_could_not_remove_the_vpn(monk
 
 
 def test_complete_keeps_the_inputs_when_the_run_does_not_end_in_time(monkeypatch, vpn_calls):
-    monkeypatch.setattr(service, "COMPLETE_WAIT_S", -1)
-    monkeypatch.setattr(service, "_active", {RUN_ID})
+    monkeypatch.setenv("CDC_COMPLETE_WAIT_S", "-1")
+    monkeypatch.setattr(db_workflow, "_active", {RUN_ID})
 
     with pytest.raises(RuntimeError, match="call complete again"):
         service.complete(RUN_ID, agent=FakeAgent().client())
@@ -273,7 +273,7 @@ def test_unknown_secret_reference_fails_before_the_vpn(vpn_calls):
 
 
 def test_unreachable_database_fails_and_keeps_the_vpn(vpn_calls, monkeypatch):
-    monkeypatch.setattr(service, "PROBE_WAIT_S", -1)
+    monkeypatch.setenv("CDC_PROBE_WAIT_S", "-1")
     agent = FakeAgent()
     agent.reachable = False
     result = service.run(INPUT, agent=agent.client())
@@ -306,7 +306,7 @@ def test_failed_job_is_reported_and_keeps_the_vpn(vpn_calls):
 
 
 def test_stop_after_a_failed_run_removes_the_vpn_itself(vpn_calls, monkeypatch):
-    monkeypatch.setattr(service, "PROBE_WAIT_S", -1)
+    monkeypatch.setenv("CDC_PROBE_WAIT_S", "-1")
     agent = FakeAgent()
     agent.reachable = False
     service.run(INPUT, agent=agent.client())
@@ -461,7 +461,7 @@ def test_stop_while_the_vpn_is_being_built_ends_the_run(monkeypatch):
     assert calls == ["ensure_vpn", "destroy_vpn"]
     assert "POST /jobs" not in agent.calls
     assert holder["result"].state == "stopped"
-    assert not service._stop_requested
+    assert not db_workflow._stop_requested
 
 
 def test_a_failed_stop_does_not_make_the_run_remove_the_vpn(monkeypatch, vpn_calls):
@@ -471,7 +471,7 @@ def test_a_failed_stop_does_not_make_the_run_remove_the_vpn(monkeypatch, vpn_cal
     agent.abort_status = 502
     with pytest.raises(Exception):
         service.stop(RUN_ID, agent=agent.client())
-    assert not service._stop_requested
+    assert not db_workflow._stop_requested
     assert vpn_calls == ["ensure_vpn"]
 
     agent.abort_status = None

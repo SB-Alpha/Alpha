@@ -6,9 +6,11 @@ Access service-token headers. Long work runs on the agent; callers poll get_job.
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
+
+from .settings import required, tunables
 
 
 @dataclass(frozen=True)
@@ -16,12 +18,13 @@ class AgentSettings:
     url: str
     access_client_id: str | None = None
     access_client_secret: str | None = None
-    timeout_s: float = 30
+    timeout_s: float = field(default_factory=lambda: tunables().agent_timeout_s)
+    abort_timeout_s: float = field(default_factory=lambda: tunables().agent_abort_timeout_s)
 
     @classmethod
     def from_env(cls) -> "AgentSettings":
         return cls(
-            url=os.environ["CDC_AGENT_URL"],
+            url=required("CDC_AGENT_URL"),
             access_client_id=os.getenv("CDC_AGENT_ACCESS_CLIENT_ID"),
             access_client_secret=os.getenv("CDC_AGENT_ACCESS_CLIENT_SECRET"),
         )
@@ -42,6 +45,7 @@ class CdcAgentClient:
             headers["CF-Access-Client-Secret"] = settings.access_client_secret
         self._http = httpx.Client(base_url=settings.url, headers=headers,
                                   timeout=settings.timeout_s, transport=transport)
+        self._cleanup_timeout_s = settings.abort_timeout_s
 
     def _call(self, method: str, path: str, body: dict | list | None = None, timeout_s: float | None = None) -> dict | list:
         kwargs = {} if timeout_s is None else {"timeout": timeout_s}
@@ -64,18 +68,21 @@ class CdcAgentClient:
     def get_job(self, job_id: str) -> dict:
         return self._call("GET", f"/jobs/{job_id}")
 
+    def list_jobs(self) -> list[dict]:
+        return self._call("GET", "/jobs")
+
     def cutover(self, job_id: str, approved_by: str) -> dict:
         return self._call("POST", f"/jobs/{job_id}/cutover", {"approved_by": approved_by})
 
     def retry(self, job_id: str) -> dict:
         return self._call("POST", f"/jobs/{job_id}/retry")
 
+    # close and abort clean up on the agent before answering, which takes longer than other calls.
     def close(self, job_id: str) -> dict:
-        return self._call("POST", f"/jobs/{job_id}/close")
+        return self._call("POST", f"/jobs/{job_id}/close", timeout_s=self._cleanup_timeout_s)
 
     def abort(self, job_id: str) -> dict:
-        # Cleans up on the agent before answering; Cloudflare waits ~100s at most.
-        return self._call("POST", f"/jobs/{job_id}/abort", timeout_s=95)
+        return self._call("POST", f"/jobs/{job_id}/abort", timeout_s=self._cleanup_timeout_s)
 
     def put_secrets(self, job_id: str, values: dict[str, str]) -> dict:
         return self._call("PUT", f"/jobs/{job_id}/secrets", values)
