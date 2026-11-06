@@ -78,9 +78,13 @@ print("validation mismatch:", v.get("mismatch"), "rows:", v.get("rows_checked"))
     # backend run·stop 전체 흐름 (VPN은 건너뜀). backend 의존성이 있는 python으로 실행한다.
     "${PYTHON:-python3}" e2e_run.py
     ;;
+  flow)
+    # db_workflow 전체 흐름: run → cutover → finish (VPN은 건너뜀).
+    "${PYTHON:-python3}" e2e_flow.py
+    ;;
   down)
     compose down -v
     ;;
   *)
-    echo "usage: $0 up|e2e [seconds]|run|down" >&2; exit 2;;
+    echo "usage: $0 up|e2e [seconds]|run|flow|down" >&2; exit 2;;
 esac
