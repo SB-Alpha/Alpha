@@ -59,6 +59,7 @@ def run(inp: <Module>Input, ctx: RunContext) -> <Module>Output: ...
 - 실패 항목이 있으면 `409` 로 거부합니다. `acknowledge_unknown` 으로도 넘어가지 못합니다.
 - 미제공 항목만 있으면 `acknowledge_unknown: true` 일 때만 승인합니다.
 - 복제 지연 기준값(1MiB)은 임시값입니다. 팀 합의 후 바꿉니다.
+- 초기 복사·불일치 테이블: 쓰기 중에는 두 DB 를 다른 순간에 읽어 값이 오가므로, 에이전트가 `cutover_ready` 로 올린 뒤의 순간값으로는 막지 않습니다. 쓰기를 멈춘 전환 기준점에서 다시 검사해 다르면 전환하지 않습니다.
 - `cdc_error`: CDC 추적이 streaming 이후 끝나면 `db_migration` 단계 지표에 남아 승인을 막습니다. 끝난 단계는 다시 열지 않고 지표만 갱신합니다.
 
 ## 화면 지표와 시뮬레이션

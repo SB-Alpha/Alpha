@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
 from typing import Any
 
 from .schemas import CheckStatus, CutoverDecision, CutoverReadiness, ReadinessCheck, RunStatus, StageName
@@ -38,19 +37,47 @@ def _as_number(value: Any) -> float | None:
     return None
 
 
-def _metric_check(
-    run: RunStatus,
-    check_id: str,
-    title: str,
-    key: str,
-    is_pass: Callable[[float], bool],
-    describe: Callable[[float], str],
-) -> ReadinessCheck:
-    value = _as_number(_find_metric(run, key))
+def _lag_check(run: RunStatus) -> ReadinessCheck:
+    base = {"id": "lag", "title": "복제 지연"}
+    value = _as_number(_find_metric(run, "replication_lag_bytes"))
     if value is None:
-        return ReadinessCheck(id=check_id, title=title, status="unknown", detail=_NOT_PROVIDED)
-    status: CheckStatus = "pass" if is_pass(value) else "fail"
-    return ReadinessCheck(id=check_id, title=title, status=status, detail=describe(value))
+        return ReadinessCheck(**base, status="unknown", detail=_NOT_PROVIDED)
+    status: CheckStatus = "pass" if value <= MAX_REPLICATION_LAG_BYTES else "fail"
+    detail = f"{value:,.0f} bytes (기준 {MAX_REPLICATION_LAG_BYTES:,} 이하, 임시)"
+    return ReadinessCheck(**base, status=status, detail=detail)
+
+
+def _is_verified_by_agent(run: RunStatus) -> bool:
+    """에이전트가 복사와 일치를 확인해 cutover_ready 로 올렸는지.
+
+    쓰기 중에는 두 DB 를 다른 순간에 읽어 복사율·불일치 값이 오갑니다. 이 뒤의 순간값으로는 막지 않습니다.
+    쓰기를 멈춘 전환 기준점에서 다시 엄격히 검사해 다르면 전환하지 않습니다.
+    """
+    return _find_metric(run, "phase") == "cutover_ready"
+
+
+def _copy_check(run: RunStatus) -> ReadinessCheck:
+    base = {"id": "copy", "title": "초기 복사"}
+    value = _as_number(_find_metric(run, "copy_percent"))
+    if value is None:
+        return ReadinessCheck(**base, status="unknown", detail=_NOT_PROVIDED)
+    if value >= 100:
+        return ReadinessCheck(**base, status="pass", detail=f"{value:g}%")
+    if _is_verified_by_agent(run):
+        return ReadinessCheck(**base, status="pass", detail=f"복사 완료, 쓰기 반영 중 {value:g}%")
+    return ReadinessCheck(**base, status="fail", detail=f"{value:g}%")
+
+
+def _mismatch_check(run: RunStatus) -> ReadinessCheck:
+    base = {"id": "mismatch", "title": "불일치 테이블"}
+    value = _as_number(_find_metric(run, "mismatch"))
+    if value is None:
+        return ReadinessCheck(**base, status="unknown", detail=_NOT_PROVIDED)
+    if value == 0:
+        return ReadinessCheck(**base, status="pass", detail="0개")
+    if _is_verified_by_agent(run):
+        return ReadinessCheck(**base, status="pass", detail=f"순간 차이 {value:g}개. 전환 기준점에서 최종 검사합니다")
+    return ReadinessCheck(**base, status="fail", detail=f"{value:g}개")
 
 
 def _cdc_check(run: RunStatus) -> ReadinessCheck:
@@ -89,16 +116,9 @@ def _decision(checks: list[ReadinessCheck]) -> CutoverDecision:
 def cutover_readiness(run: RunStatus) -> CutoverReadiness:
     checks = [
         _cdc_check(run),
-        _metric_check(run, "copy", "초기 복사", "copy_percent", lambda v: v >= 100, lambda v: f"{v:g}%"),
-        _metric_check(
-            run,
-            "lag",
-            "복제 지연",
-            "replication_lag_bytes",
-            lambda v: v <= MAX_REPLICATION_LAG_BYTES,
-            lambda v: f"{v:,.0f} bytes (기준 {MAX_REPLICATION_LAG_BYTES:,} 이하, 임시)",
-        ),
-        _metric_check(run, "mismatch", "불일치 테이블", "mismatch", lambda v: v == 0, lambda v: f"{v:g}개"),
+        _copy_check(run),
+        _lag_check(run),
+        _mismatch_check(run),
         _app_health_check(run),
     ]
     return CutoverReadiness(decision=_decision(checks), checks=checks)

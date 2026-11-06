@@ -50,9 +50,9 @@ def test_all_passing_is_go():
 @pytest.mark.parametrize(
     ("change", "check_id"),
     [
-        ({"copy_percent": 99}, "copy"),
+        ({"phase": "streaming", "copy_percent": 99}, "copy"),
         ({"replication_lag_bytes": MAX_REPLICATION_LAG_BYTES + 1}, "lag"),
-        ({"mismatch": 1}, "mismatch"),
+        ({"phase": "streaming", "mismatch": 1}, "mismatch"),
         ({"cdc_error": "커넥터 실패"}, "cdc"),
     ],
 )
@@ -60,6 +60,23 @@ def test_a_failing_metric_is_no_go(change, check_id):
     run = make_run({**GOOD_METRICS, **change})
     assert cutover_readiness(run).decision == "no_go"
     assert check(run, check_id).status == "fail"
+
+
+def test_brief_mismatch_during_live_writes_does_not_block_a_verified_job():
+    # 쓰기 중에는 두 DB 를 다른 순간에 읽어 값이 오간다 (10 rps 로컬 리허설에서 0·1 반복을 실측).
+    run = make_run({**GOOD_METRICS, "mismatch": 1})
+    result = check(run, "mismatch")
+    assert result.status == "pass"
+    assert "기준점" in result.detail
+    assert cutover_readiness(run).decision == "go"
+
+
+def test_copy_percent_dipping_during_live_writes_does_not_block_a_verified_job():
+    # 원본에 행이 먼저 늘어 복사율이 순간 99% 가 된다 (10 rps 로컬 리허설에서 실측).
+    run = make_run({**GOOD_METRICS, "copy_percent": 99})
+    assert check(run, "copy").status == "pass"
+    assert "99%" in check(run, "copy").detail
+    assert cutover_readiness(run).decision == "go"
 
 
 def test_cdc_error_detail_carries_the_reason():
@@ -87,8 +104,9 @@ def test_a_numeric_string_counts_as_a_number():
 
 
 def test_the_latest_stage_report_wins():
-    run = with_stage(make_run({**GOOD_METRICS, "mismatch": 2}), StageName.CUTOVER, metrics={"mismatch": 0})
-    assert check(run, "mismatch").status == "pass"
+    run = make_run({**GOOD_METRICS, "phase": "streaming", "mismatch": 2})
+    assert check(run, "mismatch").status == "fail"
+    assert check(with_stage(run, StageName.CUTOVER, metrics={"mismatch": 0}), "mismatch").status == "pass"
 
 
 def test_app_health_follows_the_deploy_result():
@@ -124,7 +142,7 @@ def test_approve_refuses_unknown_items_until_acknowledged(store):
 
 
 def test_approve_refuses_failures_even_when_acknowledged(store):
-    run = store.create(make_run({**GOOD_METRICS, "mismatch": 1}))
+    run = store.create(make_run({**GOOD_METRICS, "phase": "streaming", "mismatch": 1}))
     engine = Engine(store)
 
     with pytest.raises(InvalidTransition, match="불일치 테이블"):

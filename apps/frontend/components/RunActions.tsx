@@ -45,7 +45,7 @@ export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, 
         <div className="rounded-xl border-2 border-amber-400 bg-white p-5">
           <h3 className="text-lg font-semibold">{GATE_LABEL.cutover}</h3>
           <p className="mt-1 text-sm text-ink/70">
-            DB 동기화가 끝났습니다. 승인하면 요청 보류 → 최종 반영 확인 → 경로 변경 → 보류 해제 순서로 전환합니다.
+            승인하면 요청 보류 → 최종 반영 확인 → 경로 변경 → 보류 해제 순서로 전환합니다.
           </p>
           {readiness && <ReadinessTable checks={readiness.checks} />}
           {decision === "no_go" && (
