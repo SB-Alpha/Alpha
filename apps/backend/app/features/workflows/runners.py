@@ -17,9 +17,8 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any
 
-from .engine import CUTOVER_ON_SOURCE, CUTOVER_OUTCOME, StageRunner
 from .context import RunAborted
-from .engine import StageRunner
+from .engine import CUTOVER_ON_SOURCE, CUTOVER_OUTCOME, StageRunner
 from .prober import ProbedContext, prober_from_env
 from .schemas import RunContext, RunStatus, StageName, WorkflowState
 

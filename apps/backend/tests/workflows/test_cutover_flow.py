@@ -1166,3 +1166,35 @@ def test_failing_final_report_does_not_fail_a_finished_switch(monkeypatch):
 
     assert job["phase"] == "stabilizing"
 
+
+def test_post_switch_failure_resumed_through_the_api_can_still_be_recorded(fast, world, monkeypatch):
+    from app.features.workflows.context import with_stage
+    from app.features.workflows.runners import clean_up_cdc
+
+    # 화면은 이 재개 버튼을 숨기지만 API 는 받습니다. 재개한 뒤에도 빠져나갈 길이 있어야 합니다.
+    failed_after_switch = {"state": "failed", "phase": "cutover", "message": "목적지로 전환 후 오류"}
+    run_id, run = _approve_cutover(fast, [failed_after_switch], world)
+    assert _outcome(run) == "post_switch_failed"
+    fast.resume(run_id)
+    assert fast.advance(run_id).waiting_gate == "cutover"
+    fast._store.update(run_id, lambda r: with_stage(r, StageName.DB_MIGRATION, metrics={"cdc_error": "끝남"}))
+    assert cutover_readiness(fast.get(run_id)).decision == "no_go"
+    calls_before = len(world.cutover_calls)
+
+    # 트래픽이 목적지에 있는 동안 복제를 지우면 안 됩니다.
+    monkeypatch.setattr(
+        "app.features.workflows.runners._read_worker_status", lambda: {"mode": "TARGET", "next_origin": "TARGET"}
+    )
+    stopped = []
+    monkeypatch.setattr("app.features.db_migration.service.stop", lambda run_id, agent=None: stopped.append(run_id))
+    world.jobs = [failed_after_switch]
+    with pytest.raises(RuntimeError):
+        clean_up_cdc(fast.get(run_id))
+    assert stopped == []
+
+    fast.submit_manual(run_id, StageName.CUTOVER, ManualStageInput(output={"checked": True}, note="전환 완료 확인"))
+    run = fast.advance(run_id)
+
+    assert run.state == WorkflowState.SUCCEEDED
+    assert len(world.cutover_calls) == calls_before
+
