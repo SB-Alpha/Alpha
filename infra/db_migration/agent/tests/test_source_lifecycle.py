@@ -16,9 +16,10 @@ REQUEST = {
     "source": {"host": "src", "database": "postgres", "tables": ["public.work_items"], "app_role": "alpha"},
     "target": {"host": "tgt", "database": "app", "app_role": "app_user"},
 }
-PROPS = "\n".join(f"{a}.{f}={a}-{f}"
-                  for a in ("source", "source.app", "source.admin", "target", "target.ddl", "target.admin")
-                  for f in ("user", "password"))
+CONNECT_PROPS = "\n".join(f"{a}.{f}={a}-{f}" for a in ("source", "target") for f in ("user", "password"))
+AGENT_PROPS = "\n".join(f"{a}.{f}={a}-{f}"
+                        for a in ("source.app", "source.admin", "target.ddl", "target.admin")
+                        for f in ("user", "password"))
 
 
 class FakeStore:
@@ -59,9 +60,11 @@ def setup(monkeypatch, tmp_path: Path):
         calls: list = []
         job = Job(job_id="job01", request=JobRequest(**REQUEST), state=state, phase=phase)
         settings = Settings("n1", "http://connect", "kafka", "_jobs", 1, tmp_path, tmp_path,
-                            "http://worker", None, 2, 10, 3)
+                            "http://worker", None, 2, 10, 3, agent_secrets_dir=tmp_path / "agent")
+        settings.agent_secrets_dir.mkdir(exist_ok=True)
         if secrets_file:
-            (tmp_path / "job01.properties").write_text(PROPS)
+            (tmp_path / "job01.properties").write_text(CONNECT_PROPS)
+            (settings.agent_secrets_dir / "job01.properties").write_text(AGENT_PROPS)
         runner = jobs.Runner(settings, FakeStore(job), FakeSecrets(calls))
         runner.connect = FakeConnect(calls)
 

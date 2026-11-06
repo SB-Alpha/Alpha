@@ -22,6 +22,8 @@ class Settings:
     reconcile_interval_s: float
     secrets_key: str | None = field(default=None, repr=False)
     secrets_topic: str = "_alpha_cdc_secrets"
+    # Connect reads only secrets_dir. Accounts it does not use stay here, mounted on the agent only.
+    agent_secrets_dir: Path = Path("/etc/alpha-cdc/agent-secrets")
 
 
 @lru_cache
@@ -42,6 +44,7 @@ def get_settings() -> Settings:
         reconcile_interval_s=float(os.getenv("RECONCILE_INTERVAL_S", "3")),
         secrets_key=os.getenv("SECRETS_KEY") or None,
         secrets_topic=os.getenv("SECRETS_TOPIC", "_alpha_cdc_secrets"),
+        agent_secrets_dir=Path(os.getenv("AGENT_SECRETS_DIR", "/etc/alpha-cdc/agent-secrets")),
     )
 
 

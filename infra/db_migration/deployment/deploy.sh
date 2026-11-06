@@ -10,7 +10,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 
 # shellcheck disable=SC2086
 ssh -i "$key" -o StrictHostKeyChecking=accept-new $target \
-  'sudo mkdir -p /opt/alpha-cdc /var/lib/alpha-cdc/kafka /etc/alpha-cdc/secrets && sudo chown -R 1000:1000 /var/lib/alpha-cdc/kafka && sudo chown 1001:1001 /etc/alpha-cdc/secrets && sudo chmod 700 /etc/alpha-cdc/secrets'
+  'sudo mkdir -p /opt/alpha-cdc /var/lib/alpha-cdc/kafka /etc/alpha-cdc/secrets /etc/alpha-cdc/agent-secrets && sudo chown -R 1000:1000 /var/lib/alpha-cdc/kafka && sudo chown 1001:1001 /etc/alpha-cdc/secrets /etc/alpha-cdc/agent-secrets && sudo chmod 700 /etc/alpha-cdc/secrets /etc/alpha-cdc/agent-secrets && if sudo test -f /etc/alpha-cdc/secrets/worker.token; then sudo mv /etc/alpha-cdc/secrets/worker.token /etc/alpha-cdc/agent-secrets/worker.token; fi'
 # heap을 노드 메모리에 맞춘다. 용량을 키운 뒤 다시 돌리면 그대로 커진다.
 # shellcheck disable=SC2086
 ssh -i "$key" $target 'mem=$(awk "/MemTotal/ {print int(\$2/1024)}" /proc/meminfo) &&

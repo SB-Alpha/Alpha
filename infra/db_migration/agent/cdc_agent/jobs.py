@@ -41,12 +41,17 @@ class JobBusy(RuntimeError):
     """Another agent is working on the job. Try again."""
 
 
+def _secret_files(settings: Settings, job_id: str) -> tuple:
+    name = f"{job_id}.properties"
+    return settings.secrets_dir / name, settings.agent_secrets_dir / name
+
+
 class Credentials:
     def __init__(self, settings: Settings, job: Job):
-        path = settings.secrets_dir / f"{job.job_id}.properties"
-        if not path.exists():
-            raise SecretsNotReady(f"secrets file missing on this node: {path.name}")
-        props = read_properties(path)
+        paths = _secret_files(settings, job.job_id)
+        if not all(path.exists() for path in paths):
+            raise SecretsNotReady(f"secrets files missing on this node: {paths[0].name}")
+        props = {**read_properties(paths[0]), **read_properties(paths[1])}
         src, tgt = job.request.source, job.request.target
 
         def ep(spec, prefix: str) -> db.Endpoint:

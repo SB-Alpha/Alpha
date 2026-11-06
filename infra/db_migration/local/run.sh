@@ -7,7 +7,8 @@ api() { curl -sf "$@"; }
 
 case "${1:-}" in
   up)
-    mkdir -p .local/secrets
+    mkdir -p .local/secrets .local/agent-secrets
+    rm -f .local/secrets/worker.token
     if [ ! -f .local/.env ]; then
       gen() { openssl rand -hex 16; }
       cat > .local/.env <<ENV
@@ -22,8 +23,8 @@ ENV
     fi
     grep -q '^SECRETS_KEY=' .local/.env || echo "SECRETS_KEY=$(openssl rand -base64 32 | tr '+/' '-_')" >> .local/.env
     set -a; . .local/.env; set +a
-    printf '%s' "$WORKER_TOKEN" > .local/secrets/worker.token
-    chmod 644 .local/secrets/worker.token
+    printf '%s' "$WORKER_TOKEN" > .local/agent-secrets/worker.token
+    chmod 644 .local/agent-secrets/worker.token
     compose up -d --build
     for _ in $(seq 1 90); do api localhost:18080/status >/dev/null 2>&1 && break; sleep 2; done
     api localhost:18080/status; echo

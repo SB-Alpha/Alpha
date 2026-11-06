@@ -71,7 +71,7 @@ def setup(monkeypatch, tmp_path: Path):
         job = Job(job_id="job01", request=JobRequest(**REQUEST), state="running", phase="cutover",
                   evidence={"cutover": {"steps": []}})
         settings = Settings("n1", "http://connect", "kafka", "_jobs", 1, tmp_path, tmp_path,
-                            "http://worker", None, 2, 10, 3)
+                            "http://worker", None, 2, 10, 3, agent_secrets_dir=tmp_path / "agent")
         runner = jobs.Runner(settings, FakeStore(job))
         runner.connect = FakeConnect(calls)
 
