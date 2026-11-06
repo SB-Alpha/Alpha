@@ -1,5 +1,5 @@
-import { recoveryStatus, type CheckStatus, type ReadinessCheck, type RecoveryTone } from "@/lib/cutover";
-import type { RunStatus } from "@/lib/workflows";
+import { recoveryStatus, type RecoveryTone } from "@/lib/cutover";
+import type { CheckStatus, ReadinessCheck, RunStatus } from "@/lib/workflows";
 
 const STATUS_TEXT: Record<CheckStatus, { label: string; className: string }> = {
   pass: { label: "통과", className: "text-emerald-700" },

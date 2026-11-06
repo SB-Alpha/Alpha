@@ -52,6 +52,23 @@ export interface RunStatus {
   message: string | null;
   created_at: string;
   updated_at: string;
+  cutover_readiness?: CutoverReadiness | null; // 승인 ② 대기 중일 때만 서버가 채웁니다
+}
+
+export type CheckStatus = "pass" | "fail" | "unknown";
+
+export type CutoverDecision = "go" | "needs_confirmation" | "no_go";
+
+export interface ReadinessCheck {
+  id: string;
+  title: string;
+  status: CheckStatus;
+  detail: string;
+}
+
+export interface CutoverReadiness {
+  decision: CutoverDecision;
+  checks: ReadinessCheck[];
 }
 
 export interface SelfHealingDiagnosis {
@@ -108,8 +125,12 @@ export const workflows = {
   list: () => call<RunStatus[]>(""),
   get: (runId: string) => call<RunStatus>(`/${encodeURIComponent(runId)}`),
   create: (req: MigrationRequest) => post<RunStatus>("", req),
-  approve: (runId: string, gate: Gate, comment?: string) =>
-    post<RunStatus>(`/${encodeURIComponent(runId)}/approve`, { gate, comment: comment || null }),
+  approve: (runId: string, gate: Gate, comment?: string, acknowledgeUnknown = false) =>
+    post<RunStatus>(`/${encodeURIComponent(runId)}/approve`, {
+      gate,
+      comment: comment || null,
+      acknowledge_unknown: acknowledgeUnknown,
+    }),
   abort: (runId: string, reason?: string) =>
     post<RunStatus>(`/${encodeURIComponent(runId)}/abort`, { reason: reason || null }),
   resume: (runId: string) => post<RunStatus>(`/${encodeURIComponent(runId)}/resume`),

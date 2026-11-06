@@ -53,6 +53,29 @@ def test_manual_inputs_reach_plan_approval_and_approve(client):
     assert run["current_stage"] == "provisioning"
 
 
+def test_cutover_approval_enforces_readiness_on_the_server(client):
+    run_id = client.post("/runs", json=BODY).json()["run_id"]
+    for stage in ("discovery", "planning"):
+        client.post(f"/runs/{run_id}/stages/{stage}/manual", json={"output": {"stage": stage}})
+    client.post(f"/runs/{run_id}/approve", json={"gate": "plan"})
+    for stage in ("provisioning", "db_migration", "app_deploy"):
+        client.post(f"/runs/{run_id}/stages/{stage}/manual", json={"output": {"stage": stage}})
+
+    run = client.get(f"/runs/{run_id}").json()
+    assert run["waiting_gate"] == "cutover"
+    readiness = run["cutover_readiness"]
+    assert readiness["decision"] == "needs_confirmation"
+    assert {c["id"] for c in readiness["checks"]} == {"cdc", "copy", "lag", "mismatch", "app_health"}
+
+    refused = client.post(f"/runs/{run_id}/approve", json={"gate": "cutover"})
+    assert refused.status_code == 409
+    assert "확인되지 않은" in refused.json()["detail"]
+
+    approved = client.post(f"/runs/{run_id}/approve", json={"gate": "cutover", "acknowledge_unknown": True})
+    assert approved.status_code == 200
+    assert client.get(f"/runs/{run_id}").json()["cutover_readiness"] is None
+
+
 def test_abort_then_commands_conflict(client):
     run_id = client.post("/runs", json=BODY).json()["run_id"]
 

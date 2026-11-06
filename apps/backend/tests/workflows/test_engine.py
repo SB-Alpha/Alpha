@@ -115,7 +115,7 @@ def test_full_flow_reaches_succeeded_after_two_approvals(db_path):
     assert engine.advance(run_id).waiting_gate == "plan"
     engine.approve(run_id, "plan")
     assert engine.advance(run_id).waiting_gate == "cutover"
-    engine.approve(run_id, "cutover")
+    engine.approve(run_id, "cutover", acknowledge_unknown=True)
     run = engine.advance(run_id)
 
     assert run.state == WorkflowState.SUCCEEDED

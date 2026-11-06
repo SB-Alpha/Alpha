@@ -1,76 +1,7 @@
-// 승인 ② 판정과 복귀 가능 범위. run 상태만으로 계산합니다. 값이 없으면 통과로 치지 않고 "unknown" 입니다.
+// 전환 중·후 복귀 가능 범위 표시. 승인 ② 판정은 서버(workflows/readiness.py)가 합니다.
 
 import { METRIC_KEYS, numberMetric } from "./dashboard";
 import type { RunStatus } from "./workflows";
-
-// 임시 기준값입니다. 팀 합의 후 바꿉니다.
-export const MAX_REPLICATION_LAG_BYTES = 1024 * 1024;
-
-export type CheckStatus = "pass" | "fail" | "unknown";
-
-export type ReadinessCheck = {
-  id: string;
-  title: string;
-  status: CheckStatus;
-  detail: string;
-};
-
-export type CutoverDecision = "go" | "needs_confirmation" | "no_go";
-
-function metricCheck(
-  id: string,
-  title: string,
-  value: number | null,
-  isPass: (v: number) => boolean,
-  describe: (v: number) => string,
-): ReadinessCheck {
-  if (value === null) return { id, title, status: "unknown", detail: "미제공" };
-  return { id, title, status: isPass(value) ? "pass" : "fail", detail: describe(value) };
-}
-
-function appHealthCheck(run: RunStatus): ReadinessCheck {
-  const base = { id: "app_health", title: "목적지 앱 상태" };
-  const stage = run.stages.find((s) => s.stage === "app_deploy");
-  // 수동 입력값은 실제 확인 결과가 아니므로 통과나 실패로 치지 않습니다.
-  if (stage?.manual) return { ...base, status: "unknown", detail: "수동 입력이라 확인 안 됨" };
-  const output = run.outputs.app_deploy as { healthy?: unknown } | undefined;
-  if (output?.healthy === true) return { ...base, status: "pass", detail: "/health/ready 200" };
-  if (output?.healthy === false) return { ...base, status: "fail", detail: "상태 확인 실패" };
-  return { ...base, status: "unknown", detail: "미제공" };
-}
-
-export function cutoverChecks(run: RunStatus): ReadinessCheck[] {
-  return [
-    metricCheck(
-      "copy",
-      "초기 복사",
-      numberMetric(run, METRIC_KEYS.copyPercent),
-      (v) => v >= 100,
-      (v) => `${v}%`,
-    ),
-    metricCheck(
-      "lag",
-      "복제 지연",
-      numberMetric(run, METRIC_KEYS.replicationLagBytes),
-      (v) => v <= MAX_REPLICATION_LAG_BYTES,
-      (v) => `${v.toLocaleString("ko-KR")} bytes (기준 ${MAX_REPLICATION_LAG_BYTES.toLocaleString("ko-KR")} 이하, 임시)`,
-    ),
-    metricCheck(
-      "mismatch",
-      "불일치 테이블",
-      numberMetric(run, METRIC_KEYS.mismatchTables),
-      (v) => v === 0,
-      (v) => `${v}개`,
-    ),
-    appHealthCheck(run),
-  ];
-}
-
-/** 실패가 하나라도 있으면 막습니다. 미제공만 있으면 운영자의 명시적 확인이 있어야 엽니다. */
-export function cutoverDecision(checks: ReadinessCheck[]): CutoverDecision {
-  if (checks.some((c) => c.status === "fail")) return "no_go";
-  return checks.some((c) => c.status === "unknown") ? "needs_confirmation" : "go";
-}
 
 export type RecoveryTone = "safe" | "active" | "warning";
 

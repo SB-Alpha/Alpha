@@ -19,6 +19,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from .context import RunAborted, StoreRunContext, now, with_stage
+from .readiness import cutover_readiness
 from .schemas import (
     GATE_BEFORE,
     STAGE_ORDER,
@@ -54,6 +55,20 @@ def next_stage(run: RunStatus) -> StageName | None:
     return next((s for s in STAGE_ORDER if run.stage(s).state != WorkflowState.SUCCEEDED), None)
 
 
+def _require_cutover_ready(run: RunStatus, acknowledge_unknown: bool) -> None:
+    readiness = cutover_readiness(run)
+
+    def titles(status: str) -> str:
+        return ", ".join(c.title for c in readiness.checks if c.status == status)
+
+    if readiness.decision == "no_go":
+        raise InvalidTransition(f"전환 조건을 통과하지 못했습니다: {titles('fail')}")
+    if readiness.decision == "needs_confirmation":
+        if not acknowledge_unknown:
+            raise InvalidTransition(f"확인되지 않은 항목이 있습니다: {titles('unknown')}. 확인 후 다시 승인하세요")
+        logger.warning("run %s: 미확인 항목을 확인하고 전환 승인: %s", run.run_id, titles("unknown"))
+
+
 class Engine:
     def __init__(self, store: RunStore, runners: Mapping[StageName, StageRunner] | None = None) -> None:
         self._store = store
@@ -82,10 +97,14 @@ class Engine:
         )
         return self._store.create(run)
 
-    def approve(self, run_id: str, gate: Gate, comment: str | None = None) -> RunStatus:
+    def approve(
+        self, run_id: str, gate: Gate, comment: str | None = None, *, acknowledge_unknown: bool = False
+    ) -> RunStatus:
         def change(run: RunStatus) -> RunStatus:
             if run.state != WorkflowState.WAITING_APPROVAL or run.waiting_gate != gate:
                 raise InvalidTransition(f"{GATE_LABEL[gate]} 대기 상태가 아닙니다 (현재 {run.state.value})")
+            if gate == "cutover":
+                _require_cutover_ready(run, acknowledge_unknown)
             note = f": {comment}" if comment else ""
             return run.model_copy(
                 update={

@@ -87,6 +87,8 @@ class MigrationRequest(BaseModel):
 class ApproveRequest(BaseModel):
     gate: Gate
     comment: str | None = None
+    # 승인 ② 에서 "미제공" 항목을 알고 진행한다는 운영자 확인. 실패 항목은 이 값으로 넘어가지 못합니다.
+    acknowledge_unknown: bool = False
 
 
 class AbortRequest(BaseModel):
@@ -130,3 +132,25 @@ class RunStatus(BaseModel):
 
     def stage(self, name: StageName) -> StageStatus:
         return next(s for s in self.stages if s.stage == name)
+
+
+CheckStatus = Literal["pass", "fail", "unknown"]
+CutoverDecision = Literal["go", "needs_confirmation", "no_go"]
+
+
+class ReadinessCheck(BaseModel):
+    id: str
+    title: str
+    status: CheckStatus
+    detail: str
+
+
+class CutoverReadiness(BaseModel):
+    decision: CutoverDecision
+    checks: list[ReadinessCheck]
+
+
+class RunDetail(RunStatus):
+    """단건 응답. 저장하지 않고 응답할 때 계산한 값을 더합니다."""
+
+    cutover_readiness: CutoverReadiness | None = None  # 승인 ② 대기 중일 때만 채웁니다

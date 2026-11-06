@@ -113,7 +113,9 @@ export function RunView() {
           <RunActions
             run={run}
             isBusy={isBusy}
-            onApproveCutover={(comment) => act(() => workflows.approve(run.run_id, "cutover", comment))}
+            onApproveCutover={(comment, acknowledgeUnknown) =>
+              act(() => workflows.approve(run.run_id, "cutover", comment, acknowledgeUnknown))
+            }
             onManual={(output, note) =>
               run.current_stage && act(() => workflows.submitManual(run.run_id, run.current_stage!, output, note))
             }

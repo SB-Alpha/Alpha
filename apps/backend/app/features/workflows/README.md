@@ -44,14 +44,22 @@ def run(inp: <Module>Input, ctx: RunContext) -> <Module>Output: ...
 | --- | --- | --- |
 | POST | `/runs` | 이전 요청(`MigrationRequest`)으로 run 생성 후 백그라운드로 진행 (201) |
 | GET | `/runs` | 최근 run 목록 (`limit` 1~200) |
-| GET | `/runs/{id}` | run 상태 (`RunStatus`) |
-| POST | `/runs/{id}/approve` | `{"gate": "plan" \| "cutover"}` 승인 후 진행 |
+| GET | `/runs/{id}` | run 상태 (`RunDetail`: `RunStatus` + 승인 ② 대기 중일 때 `cutover_readiness`) |
+| POST | `/runs/{id}/approve` | `{"gate": "plan" \| "cutover", "acknowledge_unknown": false}` 승인 후 진행. 승인 ②는 아래 판정을 통과해야 합니다 |
 | POST | `/runs/{id}/abort` | 중단 (`{"reason": ...}` 선택) |
 | POST | `/runs/{id}/resume` | 실패한 단계 재시도·끊긴 진행 재개 |
 | POST | `/runs/{id}/stages/{stage}/manual` | 다음 차례 단계 결과를 수동 입력 (`{"output": {...}}`) |
 | GET·POST | `/runs/{id}/diagnosis`, `/runs/{id}/diagnose` | 실패한 run 의 원인·복구 조치. 실패가 아니면 `409` |
 
 상태가 맞지 않는 명령은 `409`, 없는 run은 `404`, 잘못된 입력은 `422`입니다.
+
+## 승인 ② 판정
+`readiness.py` 가 복제 상태, 초기 복사, 복제 지연, 불일치 테이블, 목적지 앱 상태를 봅니다. 화면과 API 가 같은 판정을 씁니다.
+
+- 실패 항목이 있으면 `409` 로 거부합니다. `acknowledge_unknown` 으로도 넘어가지 못합니다.
+- 미제공 항목만 있으면 `acknowledge_unknown: true` 일 때만 승인합니다.
+- 복제 지연 기준값(1MiB)은 임시값입니다. 팀 합의 후 바꿉니다.
+- `cdc_error`: CDC 추적이 streaming 이후 끝나면 `db_migration` 단계 지표에 남아 승인을 막습니다. 끝난 단계는 다시 열지 않고 지표만 갱신합니다.
 
 ## 화면 지표와 시뮬레이션
 - `secret_encryption`: 요청의 자격 증명 참조가 모두 `secret://` 이고 암호화 저장소에 실제로 있을 때만 `ENCRYPTED`. 확인할 수 없으면 "미제공" 입니다.

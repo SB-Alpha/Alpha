@@ -11,11 +11,13 @@ from app.core.config import get_settings
 
 from .engine import Engine, InvalidTransition
 from .healer import SelfHealingDiagnosis, diagnose_run
+from .readiness import cutover_readiness
 from .schemas import (
     AbortRequest,
     ApproveRequest,
     ManualStageInput,
     MigrationRequest,
+    RunDetail,
     RunStatus,
     StageName,
     WorkflowState,
@@ -32,9 +34,15 @@ def get_engine() -> Engine:
     return Engine(RunStore(get_settings().workflows_db_path), RUNNERS)
 
 
-def _apply(run_id: str, action: Callable[[], RunStatus]) -> RunStatus:
+def _detail(run: RunStatus) -> RunDetail:
+    is_waiting_cutover = run.state == WorkflowState.WAITING_APPROVAL and run.waiting_gate == "cutover"
+    readiness = cutover_readiness(run) if is_waiting_cutover else None
+    return RunDetail(**run.model_dump(), cutover_readiness=readiness)
+
+
+def _apply(run_id: str, action: Callable[[], RunStatus]) -> RunDetail:
     try:
-        return action()
+        return _detail(action())
     except RunNotFound:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"run {run_id} 이(가) 없습니다") from None
     except InvalidTransition as exc:
@@ -57,46 +65,49 @@ def list_runs(
     return engine.list(limit)
 
 
-@router.get("/{run_id}", response_model=RunStatus)
-def get_run(run_id: str, engine: Engine = Depends(get_engine)) -> RunStatus:
+@router.get("/{run_id}", response_model=RunDetail)
+def get_run(run_id: str, engine: Engine = Depends(get_engine)) -> RunDetail:
     return _apply(run_id, lambda: engine.get(run_id))
 
 
-@router.post("/{run_id}/approve", response_model=RunStatus)
+@router.post("/{run_id}/approve", response_model=RunDetail)
 def approve_run(
     run_id: str,
     req: ApproveRequest,
     background: BackgroundTasks,
     engine: Engine = Depends(get_engine),
-) -> RunStatus:
-    run = _apply(run_id, lambda: engine.approve(run_id, req.gate, req.comment))
+) -> RunDetail:
+    run = _apply(
+        run_id,
+        lambda: engine.approve(run_id, req.gate, req.comment, acknowledge_unknown=req.acknowledge_unknown),
+    )
     background.add_task(engine.advance, run_id)
     return run
 
 
-@router.post("/{run_id}/abort", response_model=RunStatus)
+@router.post("/{run_id}/abort", response_model=RunDetail)
 def abort_run(
     run_id: str, req: AbortRequest | None = None, engine: Engine = Depends(get_engine)
-) -> RunStatus:
+) -> RunDetail:
     reason = req.reason if req else None
     return _apply(run_id, lambda: engine.abort(run_id, reason))
 
 
-@router.post("/{run_id}/resume", response_model=RunStatus)
-def resume_run(run_id: str, background: BackgroundTasks, engine: Engine = Depends(get_engine)) -> RunStatus:
+@router.post("/{run_id}/resume", response_model=RunDetail)
+def resume_run(run_id: str, background: BackgroundTasks, engine: Engine = Depends(get_engine)) -> RunDetail:
     run = _apply(run_id, lambda: engine.resume(run_id))
     background.add_task(engine.advance, run_id)
     return run
 
 
-@router.post("/{run_id}/stages/{stage}/manual", response_model=RunStatus)
+@router.post("/{run_id}/stages/{stage}/manual", response_model=RunDetail)
 def submit_manual(
     run_id: str,
     stage: StageName,
     req: ManualStageInput,
     background: BackgroundTasks,
     engine: Engine = Depends(get_engine),
-) -> RunStatus:
+) -> RunDetail:
     run = _apply(run_id, lambda: engine.submit_manual(run_id, stage, req))
     background.add_task(engine.advance, run_id)
     return run
