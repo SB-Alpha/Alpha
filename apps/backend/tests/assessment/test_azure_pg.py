@@ -71,6 +71,7 @@ PRIV = lambda: server(public="Disabled", subnet=f"{SUB}/virtualNetworks/v1/subne
 def env(monkeypatch):
     monkeypatch.setattr(azure_pg.shutil, "which", lambda n: None)
     monkeypatch.delenv("ALPHA_AZURE_BASTION", raising=False)
+    monkeypatch.delenv(azure_pg.BASTION_VM_ENV, raising=False)
     monkeypatch.setenv("ALPHA_AZURE_SUBSCRIPTION_ID", "sub")
     monkeypatch.setenv("ALPHA_ALLOW_ENV_REFS", "1")
     monkeypatch.setenv("AZ_USER", "u")
@@ -181,7 +182,8 @@ def test_private_no_bastion_gap(cf):
     assert r.tunnel is None and any("bastion" in g for g in r.gaps)
 
 
-def test_public_without_rules_falls_to_bastion():
+def test_public_without_rules_falls_to_bastion(monkeypatch):
+    monkeypatch.setenv(azure_pg.BASTION_VM_ENV, VM)
     r = run(factory(rules=()), cf=compute([("b1", TAG, "n1")]), nf=net({"n1": ("v1", "10.0.0.4", None)}))
     assert r.tunnel is not None and r.creds
 
@@ -207,8 +209,25 @@ def bhost(vnet, name="bh"):
 
 
 def test_find_bastion_returns_vm_id():
-    r = azure_pg.find_bastion(None, "s", None, compute([("b1", TAG, "n1")]), net({"n1": ("v1", "10.0.0.4", None)}))
+    sn = f"{SUB}/virtualNetworks/v1/subnets/db"
+    r = azure_pg.find_bastion(None, "s", sn, compute([("b1", TAG, "n1")]), net({"n1": ("v1", "10.0.0.4", None)}))
     assert r[:2] == ("10.0.0.4", VM)
+
+
+def test_other_vnet_rejected():
+    r = run(factory(srv=PRIV()), cf=compute([("b1", TAG, "n1")]), nf=net({"n1": ("other", "10.9.0.4", None)}))
+    assert r.tunnel is None and any("같은 VNet" in g for g in r.gaps)
+
+
+def test_unknown_vnet_needs_pin(monkeypatch):
+    cf, nf = compute([("b1", TAG, "n1")]), net({"n1": ("v1", "10.0.0.4", None)})
+    assert azure_pg.find_bastion(None, "s", None, cf, nf)[0] is None
+    monkeypatch.setenv(azure_pg.BASTION_VM_ENV, VM)
+    assert azure_pg.find_bastion(None, "s", None, cf, nf)[:2] == ("10.0.0.4", VM)
+    monkeypatch.setenv(azure_pg.BASTION_VM_ENV, VM.replace("b1", "b2"))
+    assert azure_pg.find_bastion(None, "s", None, cf, nf)[0] is None
+    monkeypatch.setenv(azure_pg.BASTION_VM_ENV, "bad;x")
+    assert "형식" in azure_pg.find_bastion(None, "s", None, cf, nf)[3]
 
 
 def test_azure_bastion_env_first(monkeypatch):

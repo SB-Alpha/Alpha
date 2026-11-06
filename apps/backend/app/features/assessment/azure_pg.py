@@ -25,6 +25,7 @@ SUBSCRIPTION_ENV = "ALPHA_AZURE_SUBSCRIPTION_ID"
 BASTION_ENV = "ALPHA_AZURE_BASTION"  # "<resource_group>/<name>"
 _ID = re.compile(r"^([\w.()-]{1,90})/([a-z0-9][a-z0-9-]{0,61})$")
 _BASTION_ID = re.compile(r"^([\w.()-]{1,90})/([\w][\w.-]{0,79})$")
+BASTION_VM_ENV = "ALPHA_BASTION_AZURE_VM_ID"  # 서버 VNet 미상일 때 운영자가 고정하는 중계 VM 리소스 ID
 _VM_ID = re.compile(r"^/subscriptions/[\w-]+/resourceGroups/[\w.()-]+/providers/Microsoft\.Compute/virtualMachines/[\w.-]+$", re.I)
 
 
@@ -76,8 +77,13 @@ def _vnet(subnet_id: str | None) -> str | None:
 
 
 def find_bastion(session: Any, sub: str, subnet_id: str | None, compute_factory, network_factory):
-    """(접속 주소, VM 리소스 ID, VNet ID, 실패 사유). 태그 Purpose=alpha-assessment-bastion + running VM, 서버와 같은 VNet 우선, 공용 IP 우선."""
+    """(접속 주소, VM 리소스 ID, VNet ID, 실패 사유). 태그 Purpose=alpha-assessment-bastion + running VM, 서버와 같은 VNet 우선, 공용 IP 우선. 서버 VNet 과 같은 VM 만, VNet 미상이면 BASTION_VM_ENV 로 고정된 VM 만."""
     tag_k, tag_v = ssh_tunnel.BASTION_TAG
+    pin = os.environ.get(BASTION_VM_ENV)
+    if pin and not _VM_ID.match(pin):
+        return None, None, None, f"{BASTION_VM_ENV} 형식 오류 — bastion 사용 불가"
+    if not subnet_id and not pin:
+        return None, None, None, f"서버 VNet 을 알 수 없어 bastion 자동 선택 안 함 ({BASTION_VM_ENV} 로 VM 고정 필요)"
     try:
         compute, network = compute_factory(session, sub), network_factory(session, sub)
         vms = [v for v in compute.virtual_machines.list_all() if (getattr(v, "tags", None) or {}).get(tag_k) == tag_v]
@@ -85,6 +91,8 @@ def find_bastion(session: Any, sub: str, subnet_id: str | None, compute_factory,
             return None, None, None, "bastion 없음 (태그 VM 미발견)"
         cands = []
         for v in vms:
+            if pin and v.id.lower() != pin.lower():
+                continue
             rg, n = _rg_name(v.id)
             codes = [st.code for st in compute.virtual_machines.instance_view(rg, n).statuses or []]
             if "PowerState/running" not in codes:
@@ -95,13 +103,12 @@ def find_bastion(session: Any, sub: str, subnet_id: str | None, compute_factory,
                     addr = ipc.private_ip_address
                     if ipc.public_ip_address is not None:
                         addr = network.public_ip_addresses.get(*_rg_name(ipc.public_ip_address.id)).ip_address or addr
-                    if addr:
-                        same = bool(subnet_id) and _vnet(getattr(ipc.subnet, "id", None)) == _vnet(subnet_id)
-                        cands.append((same, addr, v.id, _vnet(getattr(ipc.subnet, "id", None))))
+                    vn = _vnet(getattr(ipc.subnet, "id", None))
+                    if addr and (not subnet_id or vn == _vnet(subnet_id)):
+                        cands.append((addr, v.id, vn))
         if not cands:
-            return None, None, None, "bastion VM 이 running 아니거나 IP 없음"
-        best = max(cands, key=lambda c: c[0])
-        return best[1], best[2], best[3], ""
+            return None, None, None, "같은 VNet 의 running bastion VM 이 없거나 IP 없음"
+        return cands[0]+("",)
     except Exception as e:
         return None, None, None, f"bastion 조회 실패 ({_err(e)})"
 

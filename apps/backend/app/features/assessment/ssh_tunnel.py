@@ -1,4 +1,5 @@
-"""CSP 중립 SSH 포트포워딩. 환경변수: ALPHA_BASTION_SSH_USER(기본 alpha), ALPHA_BASTION_SSH_KEY, ALPHA_BASTION_PROXY_COMMAND(선택, %h/%p)."""
+"""CSP 중립 SSH 포트포워딩. 환경변수: ALPHA_BASTION_SSH_USER(기본 alpha), ALPHA_BASTION_SSH_KEY, ALPHA_BASTION_PROXY_COMMAND(선택, %h/%p),
+ALPHA_BASTION_KNOWN_HOSTS(known_hosts 파일, 운영 시 설정 권장: 없으면 accept-new 로 첫 접속 키를 신뢰)."""
 
 from __future__ import annotations
 
@@ -68,11 +69,12 @@ def forward(
     cmd = [
         "ssh", "-N", "-L", f"127.0.0.1:{port}:{target_host}:{target_port}",
         "-p", str(ssh_port),
-        "-o", "StrictHostKeyChecking=accept-new",
         "-o", "BatchMode=yes",
         "-o", "ExitOnForwardFailure=yes",
         "-o", "ServerAliveInterval=30",
     ]
+    kh = os.environ.get("ALPHA_BASTION_KNOWN_HOSTS")
+    cmd += ["-o", f"UserKnownHostsFile={kh}", "-o", "StrictHostKeyChecking=yes"] if kh else ["-o", "StrictHostKeyChecking=accept-new"]
     if key_path:
         cmd += ["-i", key_path, "-o", "IdentitiesOnly=yes"]
     if proxy_command:

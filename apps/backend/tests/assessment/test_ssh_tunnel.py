@@ -52,6 +52,7 @@ def popen(monkeypatch):
 
 
 def test_command_and_wait(popen, monkeypatch):
+    monkeypatch.delenv("ALPHA_BASTION_KNOWN_HOSTS", raising=False)
     monkeypatch.setenv("ALPHA_BASTION_SSH_USER", "bob")
     made = popen()
     with st.forward("10.0.0.5", "db.internal", 5432, key_path="/k", proxy_command="nc %h %p") as (h, port):
@@ -64,6 +65,15 @@ def test_command_and_wait(popen, monkeypatch):
         assert any(c.startswith("ServerAliveInterval") for c in cmd)
         assert cmd[-1] == "bob@10.0.0.5"
     assert made[0].waited
+
+
+def test_known_hosts_strict(popen, monkeypatch):
+    monkeypatch.setenv("ALPHA_BASTION_KNOWN_HOSTS", "/etc/kh")
+    made = popen()
+    with st.forward("10.0.0.5", "db.internal", 5432):
+        cmd = made[0].cmd
+        assert "UserKnownHostsFile=/etc/kh" in cmd and "StrictHostKeyChecking=yes" in cmd
+        assert "StrictHostKeyChecking=accept-new" not in cmd
 
 
 def test_no_ssh(monkeypatch):

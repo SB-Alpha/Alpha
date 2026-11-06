@@ -21,6 +21,7 @@ PROJECT_ENV = "ALPHA_GCP_PROJECT"
 PROXY_BIN = "cloud-sql-proxy"
 PROXY_ENV = "ALPHA_BASTION_PROXY_COMMAND_GCP"
 _SAFE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+BASTION_NAME_ENV = "ALPHA_BASTION_GCP_NAME"  # privateNetwork 미상일 때 운영자가 고정하는 중계 VM 이름
 BASTION_LABEL = (ssh_tunnel.BASTION_TAG[0].lower(), ssh_tunnel.BASTION_TAG[1].lower())
 
 
@@ -35,7 +36,12 @@ def _net(url: str | None) -> str:
 
 
 def find_bastion(compute: Any, project: str, vpc: str | None) -> dict | None:
-    """라벨 purpose=alpha-assessment-bastion 인 RUNNING VM 의 {name, zone, project}. 같은 VPC 우선."""
+    """라벨 purpose=alpha-assessment-bastion 인 RUNNING VM 중 같은 VPC 의 것만. VPC 미상이면 BASTION_NAME_ENV 로 고정된 VM 만."""
+    pin = os.environ.get(BASTION_NAME_ENV)
+    if pin and not _SAFE.match(pin):
+        return None
+    if not vpc and not pin:
+        return None
     k, v = BASTION_LABEL
     found, token = [], None
     while True:
@@ -43,21 +49,16 @@ def find_bastion(compute: Any, project: str, vpc: str | None) -> dict | None:
             project=project, filter=f"labels.{k}={v} AND status=RUNNING", pageToken=token).execute()
         for scoped in (r.get("items") or {}).values():
             for i in scoped.get("instances") or []:
-                if (i.get("labels") or {}).get(k) == v and i.get("status") == "RUNNING" and i.get("networkInterfaces"):
-                    found.append(i)
+                if (i.get("labels") or {}).get(k) == v and i.get("status") == "RUNNING" and i.get("networkInterfaces") and i.get("name"):
+                    if (not vpc or _net(i["networkInterfaces"][0].get("network")) == _net(vpc)) and (not pin or i["name"] == pin):
+                        found.append(i)
         token = r.get("nextPageToken")
         if not token:
             break
-
-    def rank(i):
-        n = i["networkInterfaces"][0]
-        return _net(n.get("network")) != _net(vpc) if vpc else 0, -(i.get("id") and int(i["id"]) or 0)
-
-    for i in sorted(found, key=rank):
-        n = i["networkInterfaces"][0]
-        if i.get("name"):
-            return {"name": i["name"], "zone": (i.get("zone") or "").rsplit("/", 1)[-1], "project": project}
-    return None
+    if not found:
+        return None
+    i = max(found, key=lambda i: int(i.get("id") or 0))
+    return {"name": i["name"], "zone": (i.get("zone") or "").rsplit("/", 1)[-1], "project": project}
 
 
 def iap_command(b: dict) -> str:
@@ -176,7 +177,8 @@ def collect(
         except Exception as e:
             src.gaps.append(f"중계 VM 조회 실패 ({_err(e)})")
         if bastion is None and not any("중계 VM 조회" in g for g in src.gaps):
-            src.gaps.append("라벨 purpose=alpha-assessment-bastion 인 RUNNING 중계 VM 을 찾지 못함")
+            src.gaps.append("라벨 purpose=alpha-assessment-bastion 인 RUNNING 중계 VM 을 같은 VPC 에서 찾지 못함" if ip.get("privateNetwork")
+                            else f"서버 VPC 를 알 수 없어 중계 VM 자동 선택 안 함: {BASTION_NAME_ENV} 로 VM 이름을 고정하세요")
     cmd = None
     if bastion:
         try:

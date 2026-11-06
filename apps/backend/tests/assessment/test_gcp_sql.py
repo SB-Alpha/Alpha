@@ -45,6 +45,7 @@ def inst(flag=None, **over):
 
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
+    monkeypatch.delenv(gcp_sql.BASTION_NAME_ENV, raising=False)
     monkeypatch.setenv("ALPHA_GCP_PROJECT", "p1")
     monkeypatch.setenv("ALPHA_ALLOW_ENV_REFS", "1")
     monkeypatch.setenv("X_USER", "u")
@@ -141,6 +142,7 @@ IAP = "gcloud compute start-iap-tunnel vm-2 22 --listen-on-stdin --project p1 --
 
 @pytest.fixture
 def gcloud(monkeypatch):
+    monkeypatch.delenv(gcp_sql.BASTION_NAME_ENV, raising=False)
     monkeypatch.setattr(gcp_sql.shutil, "which", lambda b: "/x")
     monkeypatch.delenv(gcp_sql.PROXY_ENV, raising=False)
 
@@ -151,8 +153,28 @@ def test_bastion_iap_same_vpc_preferred(gcloud):
     assert s.tunnel() == ("ssh", "vm-2", "10.0.0.5", IAP) and s.gaps == []
 
 
-def test_other_vpc_fallback_used(gcloud):
-    assert run(fake(inst()), compute=fake_compute(vm("1", net="other"))).tunnel()[1] == "vm-1"
+def test_other_vpc_rejected(gcloud):
+    s = run(fake(inst()), compute=fake_compute(vm("1", net="other")))
+    assert s.tunnel() == ("p1:r:pg1", True) and any("같은 VPC" in g for g in s.gaps)
+
+
+def test_unknown_vpc_needs_pin(gcloud, monkeypatch):
+    monkeypatch.delenv(gcp_sql.BASTION_NAME_ENV, raising=False)
+    d = inst()
+    d["settings"]["ipConfiguration"] = {"ipv4Enabled": True}
+    s = run(fake(d), compute=fake_compute(vm("1", net="other")))
+    assert s.tunnel() == ("p1:r:pg1", False) and any(gcp_sql.BASTION_NAME_ENV in g for g in s.gaps)
+    monkeypatch.setenv(gcp_sql.BASTION_NAME_ENV, "vm-2")
+    assert run(fake(d), compute=fake_compute(vm("1"), vm("2", net="other"))).tunnel()[1] == "vm-2"
+    monkeypatch.setenv(gcp_sql.BASTION_NAME_ENV, "bad;x")
+    assert gcp_sql.find_bastion(fake_compute(vm("1"))(None), "p1", None) is None
+
+
+def test_pin_also_required_in_known_vpc(gcloud, monkeypatch):
+    monkeypatch.setenv(gcp_sql.BASTION_NAME_ENV, "vm-2")
+    assert run(fake(inst()), compute=fake_compute(vm("1"), vm("2"))).tunnel()[1] == "vm-2"
+    monkeypatch.setenv(gcp_sql.BASTION_NAME_ENV, "vm-9")
+    assert any("같은 VPC" in g for g in run(fake(inst()), compute=fake_compute(vm("1"))).gaps)
 
 
 def test_override_env_wins(gcloud, monkeypatch):
