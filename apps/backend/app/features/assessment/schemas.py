@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # 입력
@@ -55,6 +55,9 @@ class DbInfo(BaseModel):
     tables: list[TableInfo] = Field(default_factory=list)
     logical_replication: bool | None = None  # rds.logical_replication = 1 여부
     wal_level: str | None = None
+    # 클라우드 중립 DB 크기. 직접 입력처럼 인스턴스 클래스가 없는 원본에서 채웁니다. 없으면 클래스 표로 계산
+    memory_gib: float | None = None
+    vcpu: int | None = None
 
 
 class InventoryForPlanning(BaseModel):
@@ -163,19 +166,73 @@ class MigrationPlan(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class ManualApp(BaseModel):
+    """직접 입력한 원본 앱. 모르는 값은 비워 두면 기본값·gaps 로 처리합니다."""
+
+    service_name: str
+    image_uri: str | None = None
+    container_port: int | None = None
+    vcpu: float | None = None
+    memory_mib: int | None = None
+    health_check_path: str | None = None
+    env_vars: dict[str, str] = Field(default_factory=dict)  # 비밀 아닌 값만. 비밀처럼 보이면 버리고 gaps 에 남김
+    db_user: str | None = None  # 앱이 쓰는 DB 사용자 이름 (비밀번호 아님)
+
+
+class ManualDb(BaseModel):
+    """직접 입력한 원본 PostgreSQL. 모르는 값은 비워 두면 '확인 안 됨' 으로 판정합니다."""
+
+    engine_version: str | None = None  # 예: "16.4"
+    host: str | None = None
+    port: int | None = None
+    database_name: str | None = None
+    memory_gib: float | None = None
+    vcpu: int | None = None
+    storage_gb: int | None = None
+    publicly_accessible: bool | None = None
+    logical_replication: bool | None = None
+    tables: list[TableInfo] = Field(default_factory=list)
+
+
+class ManualSource(BaseModel):
+    """source_kind="manual" 일 때의 원본 정보. AWS 가 아닌 원본(GCP·Azure·온프레미스 등)용."""
+
+    cloud: str  # 원본이 있는 곳. 예: "gcp", "azure", "onprem"
+    region: str | None = None
+    app: ManualApp
+    db: ManualDb = Field(default_factory=ManualDb)
+
+
 class AssessmentInput(BaseModel):
-    """workflows → assessment. 비밀은 원문이 아니라 이름표(secret://...)만 받습니다."""
+    """workflows → assessment. 비밀은 원문이 아니라 이름표(secret://...)만 받습니다.
+
+    source_kind 로 원본을 읽는 방법을 고릅니다. 어느 쪽이든 결과(AssessmentOutput)는 같은 형식입니다.
+    - "aws"(기본): AWS 계정을 조회합니다. aws_credentials_ref · aws_region 이 필요합니다.
+    - "manual": 사람이 입력한 manual 값으로 만듭니다. 원본에서 확인한 값이 아니라 gaps 에 남깁니다.
+    """
 
     run_id: str | None = None
+    source_kind: Literal["aws", "manual"] = "aws"
     github_repo_url: str | None = None
-    aws_credentials_ref: str  # 원본 AWS 키 이름표
+    aws_credentials_ref: str | None = None  # 원본 AWS 키 이름표. source_kind="aws" 면 필수
     db_admin_ref: str | None = None  # 원본 DB 관리자 계정 이름표 (db.py 가 PG 카탈로그 조회에 씀)
-    aws_region: str  # 원본 AWS 리전. 예: "ap-northeast-2"
-    target_region: str  # 목적지 GCP 리전. 예: "asia-northeast3"
+    aws_region: str | None = None  # 원본 AWS 리전. 예: "ap-northeast-2". source_kind="aws" 면 필수
+    target_region: str  # 목적지 리전. 예: "asia-northeast3"
+    manual: ManualSource | None = None  # source_kind="manual" 이면 필수
     # 원본 계정에 후보가 여러 개일 때만 지정. 비우면 하나뿐일 때 자동으로 고릅니다.
     ecs_cluster: str | None = None
     ecs_service: str | None = None
     rds_instance_id: str | None = None
+
+    @model_validator(mode="after")
+    def _needs_values_for_kind(self) -> AssessmentInput:
+        if self.source_kind == "aws":
+            missing = [n for n in ("aws_credentials_ref", "aws_region") if not getattr(self, n)]
+            if missing:
+                raise ValueError(f"source_kind=aws 에는 {', '.join(missing)} 가 필요합니다")
+        elif self.manual is None:
+            raise ValueError("source_kind=manual 에는 manual 이 필요합니다")
+        return self
 
 
 class SourceDb(BaseModel):
