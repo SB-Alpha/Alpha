@@ -116,13 +116,14 @@ export function RunView() {
           <RunActions
             run={run}
             isBusy={isBusy}
-            onApproveCutover={(comment, approver, preflight) =>
-              act(() => workflows.approve(run.run_id, "cutover", comment, approver, preflight))
+            onApproveCutover={(comment, approver, preflight, acknowledgeUnknown) =>
+              act(() => workflows.approve(run.run_id, "cutover", comment, approver, preflight, acknowledgeUnknown))
             }
             onManual={(output, note) =>
               run.current_stage && act(() => workflows.submitManual(run.run_id, run.current_stage!, output, note))
             }
             onResume={() => act(() => workflows.resume(run.run_id))}
+            onRetryCleanup={() => act(() => workflows.retryCleanup(run.run_id))}
             onAbort={(reason) => act(() => workflows.abort(run.run_id, reason))}
           />
         </>

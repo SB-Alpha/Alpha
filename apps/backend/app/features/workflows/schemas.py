@@ -45,9 +45,12 @@ class StageName(str, Enum):
 STAGE_ORDER: tuple[StageName, ...] = tuple(StageName)
 
 Gate = Literal["plan", "cutover"]
+CleanupState = Literal["running", "done", "failed"]
 
 PreflightStatus = Literal["pass", "fail", "unknown", "info"]
 PreflightVerdict = Literal["go", "no_go", "unverified"]
+CheckStatus = Literal["pass", "fail", "unknown"]
+CutoverDecision = Literal["go", "needs_confirmation", "no_go"]
 
 # 이 단계를 시작하기 전에 사람의 승인이 필요합니다. ① 계획 승인 ② 전환 승인
 GATE_BEFORE: dict[StageName, Gate] = {
@@ -100,6 +103,8 @@ class ApproveRequest(BaseModel):
     def _blank_approver_is_none(cls, value: Any) -> Any:
         # 공백만 있으면 승인자를 모르는 것으로 둡니다.
         return (value.strip() or None) if isinstance(value, str) else value
+    # 승인 ② 에서 "미제공" 항목을 알고 진행한다는 운영자 확인. 실패 항목은 이 값으로 넘어가지 못합니다.
+    acknowledge_unknown: bool = False
 
 
 class AbortRequest(BaseModel):
@@ -156,6 +161,7 @@ class ApprovalRecord(BaseModel):
     comment: str | None = None
     preflight_verdict: PreflightVerdict | None = None  # 클라이언트가 보고한 값. 승인 ② 만 저장합니다
     preflight_measured_at: datetime | None = None
+    readiness_decision: CutoverDecision | None = None  # 서버가 승인 시점에 계산한 승인 조건 판정. 승인 ② 만 저장합니다
     at: datetime
 
 
@@ -172,6 +178,27 @@ class RunStatus(BaseModel):
     message: str | None = None
     created_at: datetime
     updated_at: datetime
+    # 중단 뒤 외부 자원(복제 슬롯 등) 정리 상태. 정리할 것이 없으면 None 입니다.
+    cleanup_state: CleanupState | None = None
+    cleanup_message: str | None = None
 
     def stage(self, name: StageName) -> StageStatus:
         return next(s for s in self.stages if s.stage == name)
+
+
+class ReadinessCheck(BaseModel):
+    id: str
+    title: str
+    status: CheckStatus
+    detail: str
+
+
+class CutoverReadiness(BaseModel):
+    decision: CutoverDecision
+    checks: list[ReadinessCheck]
+
+
+class RunDetail(RunStatus):
+    """단건 응답. 저장하지 않고 응답할 때 계산한 값을 더합니다."""
+
+    cutover_readiness: CutoverReadiness | None = None  # 승인 ② 대기 중일 때만 채웁니다

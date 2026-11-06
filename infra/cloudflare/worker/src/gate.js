@@ -19,6 +19,9 @@ const initialState = () => ({
   target_url: null, // 제어 명령(target)으로 정한 GCP 쪽 원본 주소. null 이면 설정값 UPSTREAM_TARGET 을 쓴다
 });
 
+// 요청 집계. 저장하지 않으므로 객체가 다시 뜨면 since 가 새 시각이 되어 호출 쪽이 알아챌 수 있다.
+const newCounts = (since = iso()) => ({ since, write_total: 0, write_failed: 0, read_total: 0, read_failed: 0 });
+
 const ok = (body) => ({ status: 200, body });
 const conflict = (message) => ({ status: 409, body: { error: message } }); 
 
@@ -29,6 +32,7 @@ export class Gate extends DurableObject {
     this.waiters = [];
     this.tickets = new Map();
     this.seq = 0;
+    this.counts = newCounts();
 
   
     ctx.blockConcurrencyWhile(async () => {
@@ -54,7 +58,7 @@ export class Gate extends DurableObject {
     for (const ticket of this.tickets.values()) if (ticket.origin === "SOURCE") inflightSource++;
     // max_hold_ms, target_url 은 내부용이라 상태 객체(규격)에는 넣지 않는다
     const { max_hold_ms: _internal, target_url: _target, ...visible } = this.state;
-    return { ...visible, inflight_source: inflightSource };
+    return { ...visible, inflight_source: inflightSource, request_counts: { ...this.counts } };
   }
 
   // doRelease: 보류를 푼다. 붙잡혀 있던 요청이 next_origin 으로 감.
@@ -99,9 +103,12 @@ export class Gate extends DurableObject {
     return { origin, ticket, target: this.state.target_url ?? null };
   }
 
-  // exit: 요청이 원본에서 응답을 받아 끝났을 때 부른다. "처리 중" 명단에서 번호표를 지운다.
-  exit(ticket) {
+  // exit: 요청이 원본에서 응답을 받아 끝났을 때 부른다. "처리 중" 명단에서 번호표를 지우고 결과를 센다.
+  exit(ticket, { isWrite, isFailure }) {
     this.tickets.delete(ticket);
+    const kind = isWrite ? "write" : "read";
+    this.counts[`${kind}_total`] += 1;
+    if (isFailure) this.counts[`${kind}_failed`] += 1;
   }
 
 
@@ -125,6 +132,7 @@ export class Gate extends DurableObject {
       updated_at: now,
       max_hold_ms,
     });
+    this.counts = newCounts(now);
     await this.save();
     return ok(this.view());
   }
@@ -171,6 +179,7 @@ export class Gate extends DurableObject {
   async reset() {
     this.state = initialState();
     this.tickets.clear();
+    this.counts = newCounts();
     await this.save();
     for (const wake of this.waiters.splice(0)) wake();
     return ok(this.view());

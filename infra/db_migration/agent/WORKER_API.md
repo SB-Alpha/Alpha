@@ -33,7 +33,14 @@ CDC 에이전트(`cdc_agent/worker.py`)가 쓰기 전환 때 부르는 Cloudflar
   "released_at": null,
   "held_count": 3,
   "inflight_source": 0,
-  "updated_at": "2026-11-04T23:10:00.410Z"
+  "updated_at": "2026-11-04T23:10:00.410Z",
+  "request_counts": {
+    "since": "2026-11-04T23:10:00.120Z",
+    "write_total": 12,
+    "write_failed": 0,
+    "read_total": 40,
+    "read_failed": 0
+  }
 }
 ```
 
@@ -42,6 +49,8 @@ CDC 에이전트(`cdc_agent/worker.py`)가 쓰기 전환 때 부르는 Cloudflar
 | `held_count` | 이번 보류 동안 붙잡은 요청 수 (보류 시작 때 0) |
 | `inflight_source` | AWS로 이미 넘겼는데 아직 응답이 안 온 요청 수 (모드와 상관없이 항상 집계) |
 | `hold_started_at`, `released_at` | 에이전트가 T0·T1로 기록 |
+| `request_counts` | 전환 관측용 집계 (에이전트는 쓰지 않는다). GET·HEAD·OPTIONS는 읽기, 그 밖은 쓰기. 끝난 요청을 세고, 원본 응답 5xx와 원본 연결 실패를 실패로 본다. 새 보류 때 0으로 시작한다 |
+| `request_counts.since` | 집계 시작 시각. 새 보류면 `hold_started_at`과 같다. 저장하지 않으므로 Worker 객체가 다시 뜨면 달라지고, 이때 호출 쪽은 이 값을 믿지 않는다 |
 
 ## API
 

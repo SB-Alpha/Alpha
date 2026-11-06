@@ -18,8 +18,10 @@ from datetime import datetime
 from typing import Any
 
 from .engine import CUTOVER_ON_SOURCE, CUTOVER_OUTCOME, StageRunner
+from .context import RunAborted
+from .engine import StageRunner
 from .prober import ProbedContext, prober_from_env
-from .schemas import RunContext, RunStatus, StageName
+from .schemas import RunContext, RunStatus, StageName, WorkflowState
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +31,7 @@ _STEP_NUMBER_KEYS = ("elapsed_ms", "waited_ms", "mismatch")
 _MAX_AGENT_TEXT = 300
 _MAX_AGENT_TEXT_SCANNED = 4000  # 아주 긴 값에 정규식이 오래 걸리지 않게 먼저 자릅니다
 _DEFAULT_CUTOVER_PROGRESS = 75
+_PAST_CUTOVER_PHASES = {"cutover", "stabilizing", "closed"}
 
 PROBE_SETTLE_S = 3.0
 
@@ -380,6 +383,58 @@ def run_provisioning(run: RunStatus, ctx: RunContext) -> Any:
     return res
 
 
+def clean_up_cdc(run: RunStatus) -> bool:
+    """중단된 run 의 복제 자원(커넥터, 복제 슬롯, VPN)을 service.stop 으로 정리합니다. 정리할 것이 없으면 False 입니다.
+
+    CDC 추적이 이미 끝났거나 서버가 재시작되면 run 을 중단해도 정리할 주체가 없어 슬롯이 남고 원본에 WAL 이 쌓입니다.
+    """
+    stage = run.stage(StageName.DB_MIGRATION)
+    if stage.manual or stage.state == WorkflowState.PENDING:
+        return False
+
+    from app.features.db_migration import service as db_migration_service
+    from app.features.db_migration.client import AgentError, AgentSettings, CdcAgentClient
+    from app.features.db_migration.guide_workflow import to_job_id
+
+    try:
+        settings = AgentSettings.from_env()
+    except KeyError:
+        log.warning("CDC_AGENT_URL 이 없어 run %s 의 복제 자원을 정리하지 않습니다", run.run_id)
+        return False
+
+    agent = CdcAgentClient(settings)
+    try:
+        job = agent.get_job(to_job_id(run.run_id))
+    except AgentError as exc:
+        if exc.status_code != 404:
+            raise
+        job = None  # 작업 등록 전이어도 VPN 은 만들어졌을 수 있습니다.
+    # 에이전트는 전환 이후의 정리를 거부합니다. 그 상태로 stop 하면 VPN 만 지워져 원본 슬롯을 지울 길이 끊깁니다.
+    if job is not None and job.get("phase") in _PAST_CUTOVER_PHASES:
+        raise RuntimeError("전환을 시작한 작업은 자동으로 정리하지 않습니다. 트래픽과 데이터를 확인한 뒤 처리하세요")
+
+    db_migration_service.stop(run.run_id, agent=agent)
+    return True
+
+
+def _cdc_end_reason(result: Any) -> str:
+    """db_migration 이 끝난 이유. streaming 이후의 종료는 정상 흐름이 아니므로 항상 사유를 만듭니다."""
+    is_mapping = isinstance(result, Mapping)
+    state = result.get("state") if is_mapping else getattr(result, "state", None)
+    message = result.get("message") if is_mapping else getattr(result, "message", None)
+    return message or f"CDC 복제 작업이 끝났습니다 (상태: {state})"
+
+
+def _report_cdc_ended(ctx: RunContext, reason: str) -> None:
+    reason = _scrub_agent_text(reason) or "상세 불명"
+    try:
+        ctx.report("running", 100, {"cdc_error": reason}, f"CDC 복제 중단: {reason}")
+    except RunAborted:
+        pass  # run 이 이미 중단됐으면 남길 것이 없습니다.
+    except Exception:
+        log.exception("CDC 종료를 기록하지 못했습니다")
+
+
 def run_db_migration(
     run: RunStatus,
     ctx: RunContext,
@@ -454,14 +509,27 @@ def run_db_migration(
                 if state in ("running", "waiting_approval", "paused"):
                     ctx.report(state, progress, forwarded, message)
 
+    # runner 가 streaming 으로 먼저 반환한 뒤의 종료는 runner 가 처리할 수 없어 지표로 남깁니다.
+    handoff_lock = threading.Lock()
+    worker_done = [False]
+    runner_returned = [False]
+
     def _worker() -> None:
+        ended_with: str
         try:
             res = db_migration_service.run(inp, _ReportingProxy())
             result_holder.append(res)
+            ended_with = _cdc_end_reason(res)
         except Exception as exc:
             error_holder.append(exc)
+            ended_with = str(exc) or type(exc).__name__
         finally:
             ready_event.set()
+        with handoff_lock:
+            worker_done[0] = True
+            is_background = runner_returned[0]
+        if is_background and ctx is not None:
+            _report_cdc_ended(ctx, ended_with)
 
     thread = threading.Thread(target=_worker, daemon=True, name=f"cdc-runner-{job_id}")
     thread.start()
@@ -480,6 +548,10 @@ def run_db_migration(
             return res
 
         if ready_event.is_set():
+            with handoff_lock:
+                if worker_done[0]:
+                    continue  # 방금 끝났으면 위의 결과 처리로 돌아갑니다.
+                runner_returned[0] = True
             phase = latest_phase[0]
             if ctx is not None:
                 ctx.report("running", 100, latest_metrics, f"CDC 스트리밍 복제 중 ({phase})")
@@ -527,22 +599,66 @@ def run_cutover(
     timeout_s: float = 60.0,
     probe_settle_s: float = PROBE_SETTLE_S,
 ) -> Any:
-    """전환을 실행합니다. ALPHA_PROBE_URL 이 있으면 전환 내내 외부 프로버로 실패 수와 대기 시간을 잽니다.
+    """전환을 실행하고 실측값을 남깁니다.
 
-    시뮬레이션에서는 실제 전환이 없어 잴 대상이 없으므로 프로버를 켜지 않습니다.
+    ALPHA_PROBE_URL 이 있으면 외부 프로버로 읽기 실패 수와 대기 시간을, WORKER_URL 이 있으면 Worker 집계로
+    쓰기 실패 수를 잽니다. 시뮬레이션에서는 실제 전환이 없어 잴 대상이 없으므로 둘 다 켜지 않습니다.
     """
-    prober = None if _agent_is_simulated() else prober_from_env()
-    if prober is None:
+    is_simulated = _agent_is_simulated()
+    prober = None if is_simulated else prober_from_env()
+    worker = None if is_simulated else _cutover_worker()
+    if prober is None and worker is None:
         return _request_cutover(run, ctx, poll_interval_s, timeout_s)
 
-    prober.start()
-    probed = ProbedContext(ctx, prober)
+    if prober is not None:
+        prober.start()
+    measured = ProbedContext(ctx, prober)
     try:
-        job = _request_cutover(run, probed, poll_interval_s, timeout_s)
+        job = _request_cutover(run, measured, poll_interval_s, timeout_s)
         time.sleep(probe_settle_s)  # 전환 직후 요청까지 측정에 포함합니다.
         return job
     finally:
-        probed.finish()
+        measured.finish(_write_request_metrics(worker, _cutover_job_id(run)) if worker is not None else None)
+
+
+def _cutover_job_id(run: RunStatus) -> str:
+    from app.features.db_migration.guide_workflow import to_job_id
+
+    return to_job_id(run.run_id)
+
+
+def _cutover_worker() -> Any:
+    """Worker 집계를 읽을 클라이언트. 설정이 없거나 쓸 수 없으면 None 이고, 화면은 '미제공' 입니다."""
+    from app.features.provisioning.terraform import ProvisioningError
+    from app.features.provisioning.worker_client import WorkerClient
+
+    try:
+        return WorkerClient.from_env()
+    except (ProvisioningError, OSError) as exc:
+        log.warning("Worker 집계를 읽을 수 없어 쓰기 실패 수를 생략합니다 (%s)", type(exc).__name__)
+        return None
+
+
+def _write_request_metrics(worker: Any, job_id: str) -> dict[str, Any]:
+    """보류 시작부터 Worker 가 센 쓰기 요청. 이번 보류의 집계라고 확인되지 않으면 보고하지 않습니다."""
+    from app.features.provisioning.terraform import ProvisioningError
+
+    try:
+        status = worker.status()
+    except ProvisioningError as exc:
+        log.warning("Worker 상태를 읽지 못해 쓰기 실패 수를 생략합니다 (%s)", exc)
+        return {}
+    counts = status.get("request_counts")
+    hold_started_at = status.get("hold_started_at")
+    is_this_hold = (
+        isinstance(counts, Mapping)
+        and status.get("run_id") == job_id
+        and hold_started_at is not None
+        and counts.get("since") == hold_started_at
+    )
+    if not is_this_hold:
+        return {}
+    return {"write_requests": counts["write_total"], "write_failed_requests": counts["write_failed"]}
 
 
 def _request_cutover(

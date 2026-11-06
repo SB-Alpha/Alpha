@@ -10,13 +10,19 @@ import { ManualInputForm } from "./ManualInputForm";
 type Props = {
   run: RunStatus;
   isBusy: boolean;
-  onApproveCutover: (comment: string, approver: string, preflight: DisplayedPreflight) => void;
+  onApproveCutover: (
+    comment: string,
+    approver: string,
+    preflight: DisplayedPreflight,
+    acknowledgeUnknown: boolean,
+  ) => void;
   onManual: (output: Record<string, unknown>, note: string) => void;
   onResume: () => void;
+  onRetryCleanup: () => void;
   onAbort: (reason: string) => void;
 };
 
-export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, onAbort }: Props) {
+export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, onRetryCleanup, onAbort }: Props) {
   const isFinished = run.state === "succeeded" || run.state === "aborted";
   const requiredGate = run.current_stage ? GATE_BEFORE[run.current_stage] : undefined;
   // 승인이 없는 단계의 수동 입력은 백엔드가 항상 거절합니다. 승인이 남아 있으면 결과 불명 전환을 완료로 기록하는 길입니다.
@@ -44,10 +50,29 @@ export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, 
         <CutoverApprovalPanel
           key={run.run_id}
           runId={run.run_id}
+          readiness={run.cutover_readiness ?? null}
           isBusy={isBusy}
           isTrafficUncertain={isTrafficUncertain}
           onApprove={onApproveCutover}
         />
+      )}
+
+      {run.cleanup_message && (
+        <div
+          role={run.cleanup_state === "failed" ? "alert" : "status"}
+          className={`rounded-lg border p-3 text-sm ${
+            run.cleanup_state === "failed"
+              ? "border-rose-300 bg-rose-50 text-rose-900"
+              : "border-ink/15 bg-stone-50 text-ink/70"
+          }`}
+        >
+          <p>{run.cleanup_message}</p>
+          {run.cleanup_state === "failed" && (
+            <button type="button" disabled={isBusy} onClick={onRetryCleanup} className={`${BUTTON_SECONDARY} mt-2`}>
+              정리 다시 시도
+            </button>
+          )}
+        </div>
       )}
 
       {canManual && run.current_stage && (

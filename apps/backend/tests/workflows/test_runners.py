@@ -1,15 +1,22 @@
 import sqlite3
 import sys
 from datetime import datetime, timezone
+import threading
+import time
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from app.features.db_migration.client import AgentError
+from app.features.provisioning.terraform import ProvisioningError
+from app.features.workflows.context import with_stage
 from app.features.workflows.engine import Engine
 from app.features.workflows.runners import (
     _private_ip_metric,
     _scrub_agent_text,
+    _write_request_metrics,
+    clean_up_cdc,
     DISCOVERY_MERGED_MESSAGE,
     RUNNERS,
     MissingStageOutput,
@@ -382,7 +389,7 @@ def test_cutover_runner_with_simulation_fallback(engine, monkeypatch):
     assert last_report[2]["serving"] == "gcp"
 
 
-def _run_cutover_with_agent_metrics(engine, monkeypatch, metrics):
+def _run_cutover_with_agent_metrics(engine, monkeypatch, metrics, **cutover_options):
     monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
 
     class FakeAgent:
@@ -402,7 +409,7 @@ def _run_cutover_with_agent_metrics(engine, monkeypatch, metrics):
         def report(self, state, progress, metrics=None, message=None):
             reports.append(metrics)
 
-    run_cutover(engine.create_run(REQUEST), ctx=FakeCtx(), poll_interval_s=0.01)  # type: ignore[arg-type]
+    run_cutover(engine.create_run(REQUEST), ctx=FakeCtx(), poll_interval_s=0.01, **cutover_options)  # type: ignore[arg-type]
     return reports[-1]
 
 
@@ -575,7 +582,7 @@ def _cutover_engine(tmp_path: Path) -> tuple[Engine, str]:
 def test_approver_reaches_agent_through_real_engine(tmp_path, approver_agent):
     engine, run_id = _cutover_engine(tmp_path)
 
-    engine.approve(run_id, "cutover", approver="박준서")
+    engine.approve(run_id, "cutover", approver="박준서", acknowledge_unknown=True)
     run = engine.advance(run_id)
 
     assert approver_agent.approvers == ["박준서"]
@@ -585,7 +592,7 @@ def test_approver_reaches_agent_through_real_engine(tmp_path, approver_agent):
 def test_comment_is_not_used_as_approver(tmp_path, approver_agent):
     engine, run_id = _cutover_engine(tmp_path)
 
-    engine.approve(run_id, "cutover", "데이터 확인: 이상 없음")
+    engine.approve(run_id, "cutover", "데이터 확인: 이상 없음", acknowledge_unknown=True)
     engine.advance(run_id)
 
     assert approver_agent.approvers == ["workflows"]
@@ -1130,3 +1137,295 @@ def test_abort_during_failure_report_still_propagates(engine, monkeypatch):
 
     with pytest.raises(RunAborted):
         run_cutover(engine.create_run(REQUEST), ctx=AbortingCtx(), poll_interval_s=0.001)  # type: ignore[arg-type]
+def _run_with_cdc_stage(engine, *, state=WorkflowState.SUCCEEDED, manual=False):
+    run = engine.create_run(REQUEST)
+    return with_stage(run, StageName.DB_MIGRATION, state=state, manual=manual)
+
+
+class _FakeCleanupAgent:
+    def __init__(self, job=None, error=None):
+        self._job = job
+        self._error = error
+
+    def get_job(self, job_id):
+        if self._error:
+            raise self._error
+        return self._job
+
+
+def _patch_cleanup(monkeypatch, agent):
+    stopped = []
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+    monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", lambda settings: agent)
+    monkeypatch.setattr(
+        "app.features.db_migration.service.stop",
+        lambda run_id, *, agent: stopped.append(run_id) or {"run_id": run_id},
+    )
+    return stopped
+
+
+@pytest.mark.parametrize("state", [WorkflowState.SUCCEEDED, WorkflowState.FAILED, WorkflowState.ABORTED])
+def test_clean_up_cdc_stops_a_job_that_is_still_before_the_cutover(engine, monkeypatch, state):
+    stopped = _patch_cleanup(monkeypatch, _FakeCleanupAgent({"phase": "cutover_ready", "state": "failed"}))
+    run = _run_with_cdc_stage(engine, state=state)
+
+    assert clean_up_cdc(run) is True
+    assert stopped == [run.run_id]
+
+
+def test_clean_up_cdc_still_stops_when_the_agent_has_no_job(engine, monkeypatch):
+    # 작업 등록 전에 중단돼도 VPN 은 만들어졌을 수 있습니다.
+    stopped = _patch_cleanup(monkeypatch, _FakeCleanupAgent(error=AgentError(404, "not found")))
+    run = _run_with_cdc_stage(engine, state=WorkflowState.ABORTED)
+
+    assert clean_up_cdc(run) is True
+    assert stopped == [run.run_id]
+
+
+@pytest.mark.parametrize("change", [{"state": WorkflowState.PENDING}, {"manual": True}])
+def test_clean_up_cdc_does_nothing_when_cdc_never_ran(engine, monkeypatch, change):
+    stopped = _patch_cleanup(monkeypatch, _FakeCleanupAgent({"phase": "streaming", "state": "running"}))
+
+    assert clean_up_cdc(_run_with_cdc_stage(engine, **change)) is False
+    assert stopped == []
+
+
+def test_clean_up_cdc_does_nothing_without_an_agent(engine, monkeypatch):
+    stopped = _patch_cleanup(monkeypatch, _FakeCleanupAgent())
+    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
+    monkeypatch.delenv("ALPHA_CDC_SIMULATION", raising=False)
+
+    assert clean_up_cdc(_run_with_cdc_stage(engine)) is False
+    assert stopped == []
+
+
+@pytest.mark.parametrize("phase", ["cutover", "stabilizing", "closed"])
+@pytest.mark.parametrize("job_state", ["running", "failed"])
+def test_clean_up_cdc_refuses_a_job_past_the_cutover(engine, monkeypatch, phase, job_state):
+    # 실패한 전환 뒤 작업을 stop 하면 VPN 이 지워져 원본 복제 슬롯을 지울 길이 끊깁니다.
+    stopped = _patch_cleanup(monkeypatch, _FakeCleanupAgent({"phase": phase, "state": job_state}))
+
+    with pytest.raises(RuntimeError, match="전환"):
+        clean_up_cdc(_run_with_cdc_stage(engine))
+    assert stopped == []
+
+
+def test_clean_up_cdc_passes_on_an_agent_read_failure(engine, monkeypatch):
+    stopped = _patch_cleanup(monkeypatch, _FakeCleanupAgent(error=AgentError(502, "unavailable")))
+
+    with pytest.raises(AgentError):
+        clean_up_cdc(_run_with_cdc_stage(engine))
+    assert stopped == []
+
+
+COUNTS = {"since": "t0", "write_total": 5, "write_failed": 1, "read_total": 9, "read_failed": 0}
+
+
+class _FakeWorkerStatus:
+    def __init__(self, status=None, error=None):
+        self._status = status
+        self._error = error
+
+    def status(self):
+        if self._error:
+            raise self._error
+        return self._status
+
+
+def test_write_metrics_come_from_this_runs_hold():
+    worker = _FakeWorkerStatus({"run_id": "job", "hold_started_at": "t0", "request_counts": COUNTS})
+    assert _write_request_metrics(worker, "job") == {"write_requests": 5, "write_failed_requests": 1}
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        {"run_id": "job", "hold_started_at": "t0"},
+        {"run_id": "job", "hold_started_at": "t0", "request_counts": {**COUNTS, "since": "after-restart"}},
+        {"run_id": "other", "hold_started_at": "t0", "request_counts": COUNTS},
+        {"run_id": "job", "hold_started_at": None, "request_counts": COUNTS},
+    ],
+)
+def test_write_metrics_are_omitted_when_they_may_not_cover_this_hold(status):
+    assert _write_request_metrics(_FakeWorkerStatus(status), "job") == {}
+
+
+def test_write_metrics_are_omitted_when_the_worker_is_unreachable():
+    assert _write_request_metrics(_FakeWorkerStatus(error=ProvisioningError("연결 실패")), "job") == {}
+
+
+def test_cutover_reports_write_counts_when_worker_is_configured(engine, monkeypatch):
+    monkeypatch.setattr("app.features.workflows.runners._cutover_worker", lambda: object())
+    monkeypatch.setattr(
+        "app.features.workflows.runners._write_request_metrics",
+        lambda worker, job_id: {"write_requests": 5, "write_failed_requests": 1},
+    )
+    m = _run_cutover_with_agent_metrics(engine, monkeypatch, {}, probe_settle_s=0)
+    assert m == {"write_requests": 5, "write_failed_requests": 1}
+
+
+def test_failed_cutover_still_reports_write_counts(engine, monkeypatch):
+    def fail(*args):
+        raise RuntimeError("전환 실패")
+
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+    monkeypatch.setattr("app.features.workflows.runners._cutover_worker", lambda: object())
+    monkeypatch.setattr(
+        "app.features.workflows.runners._write_request_metrics", lambda worker, job_id: {"write_requests": 2}
+    )
+    monkeypatch.setattr("app.features.workflows.runners._request_cutover", fail)
+    reports = []
+
+    class FakeCtx:
+        def report(self, state, progress, metrics=None, message=None):
+            reports.append(metrics)
+
+    with pytest.raises(RuntimeError, match="전환 실패"):
+        run_cutover(engine.create_run(REQUEST), ctx=FakeCtx())  # type: ignore[arg-type]
+
+    assert reports[-1] == {"write_requests": 2}
+
+
+def test_simulated_cutover_does_not_read_the_worker(monkeypatch):
+    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
+    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+    monkeypatch.setenv("WORKER_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("WORKER_TOKEN", "token")
+    monkeypatch.setattr("app.features.workflows.runners._request_cutover", lambda *a: {"phase": "stabilizing"})
+    assert run_cutover(None, ctx=None)["phase"] == "stabilizing"  # type: ignore[arg-type]
+
+
+WAIT_S = 5
+
+
+def _engine_through_cdc(tmp_path: Path, monkeypatch, cdc, app_deploy) -> Engine:
+    """실제 Engine 과 run_db_migration 을 쓰고, 클라우드에 닿는 단계만 바꿉니다."""
+    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
+    monkeypatch.delenv("ALPHA_CDC_SIMULATION", raising=False)
+    monkeypatch.setattr("app.features.db_migration.service.run", cdc, raising=False)
+    return Engine(
+        RunStore(tmp_path / "pipeline.sqlite3"),
+        {
+            StageName.DISCOVERY: lambda run, ctx: {},
+            StageName.PLANNING: lambda run, ctx: {"source": {"tables": ["public.users"]}, "plan": {}},
+            StageName.PROVISIONING: lambda run, ctx: {"target": {"project_id": "p-1"}},
+            StageName.DB_MIGRATION: lambda run, ctx: run_db_migration(run, ctx, poll_interval_s=0.01),
+            StageName.APP_DEPLOY: app_deploy,
+            StageName.CUTOVER: lambda run, ctx: {},
+        },
+    )
+
+
+def _advance_past_plan_approval(engine: Engine) -> str:
+    run_id = engine.create_run(REQUEST).run_id
+    engine.advance(run_id)
+    engine.approve(run_id, "plan")
+    return run_id
+
+
+def test_pipeline_reaches_cutover_gate_while_cdc_keeps_reporting(tmp_path, monkeypatch):
+    next_stage_started = threading.Event()
+    reported_after_finish = threading.Event()
+    run_finished = threading.Event()
+
+    def cdc(inp, proxy):
+        proxy.report("running", 50, {"phase": "streaming", "replication_lag_bytes": 10}, "복제 중")
+        assert next_stage_started.wait(WAIT_S)
+        proxy.report("running", 60, {"phase": "streaming", "replication_lag_bytes": 3}, "복제 중")
+        reported_after_finish.set()
+        run_finished.wait(WAIT_S)
+        return {"state": "stopped"}
+
+    def app_deploy(run, ctx):
+        next_stage_started.set()
+        assert reported_after_finish.wait(WAIT_S)
+        return {"healthy": True}
+
+    engine = _engine_through_cdc(tmp_path, monkeypatch, cdc, app_deploy)
+    run_id = _advance_past_plan_approval(engine)
+
+    final = engine.advance(run_id)
+    run_finished.set()
+
+    assert final.state == WorkflowState.WAITING_APPROVAL
+    assert final.waiting_gate == "cutover"
+    stage = final.stage(StageName.DB_MIGRATION)
+    assert stage.state == WorkflowState.SUCCEEDED
+    assert stage.metrics["replication_lag_bytes"] == 3
+
+
+def _ends_with_failed_result():
+    return SimpleNamespace(state="failed", message="커넥터 실패")
+
+
+def _ends_with_stopped_result():
+    return SimpleNamespace(state="stopped", message=None)
+
+
+def _ends_with_exception():
+    raise RuntimeError("커넥터 실패")
+
+
+@pytest.mark.parametrize(
+    "end_cdc",
+    [_ends_with_failed_result, _ends_with_stopped_result, _ends_with_exception],
+)
+def test_cdc_ending_after_stage_finished_is_reported_without_changing_run(tmp_path, monkeypatch, end_cdc):
+    next_stage_started = threading.Event()
+
+    def cdc(inp, proxy):
+        proxy.report("running", 50, {"phase": "streaming"}, "복제 중")
+        assert next_stage_started.wait(WAIT_S)
+        return end_cdc()
+
+    def app_deploy(run, ctx):
+        next_stage_started.set()
+        return {"healthy": True}
+
+    engine = _engine_through_cdc(tmp_path, monkeypatch, cdc, app_deploy)
+    run_id = _advance_past_plan_approval(engine)
+    final = engine.advance(run_id)
+
+    deadline = time.monotonic() + WAIT_S
+    stage = final.stage(StageName.DB_MIGRATION)
+    while "cdc_error" not in stage.metrics and time.monotonic() < deadline:
+        time.sleep(0.01)
+        stage = engine.get(run_id).stage(StageName.DB_MIGRATION)
+
+    assert stage.metrics["cdc_error"]
+    assert stage.state == WorkflowState.SUCCEEDED
+    assert engine.get(run_id).state == WorkflowState.WAITING_APPROVAL
+
+
+def test_cdc_failure_before_streaming_fails_the_stage_without_cdc_error(tmp_path, monkeypatch):
+    def cdc(inp, proxy):
+        return SimpleNamespace(state="failed", message="접속 실패")
+
+    engine = _engine_through_cdc(tmp_path, monkeypatch, cdc, lambda run, ctx: {})
+    run_id = _advance_past_plan_approval(engine)
+
+    final = engine.advance(run_id)
+
+    assert final.state == WorkflowState.FAILED
+    stage = final.stage(StageName.DB_MIGRATION)
+    assert "접속 실패" in stage.message
+    assert "cdc_error" not in stage.metrics
+
+
+def test_cdc_end_report_hides_connection_details():
+    from app.features.workflows.runners import _report_cdc_ended
+
+    reports = []
+
+    class Ctx:
+        def report(self, state, progress, metrics=None, message=None):
+            reports.append((metrics, message))
+
+    _report_cdc_ended(Ctx(), 'connection to server at "10.31.0.5", port 5432 failed: password authentication failed for user "alpha_admin"')
+
+    metrics, message = reports[0]
+    for text in (metrics["cdc_error"], message):
+        assert "10.31.0.5" not in text
+        assert "alpha_admin" not in text
+        assert "password authentication failed" in text
+

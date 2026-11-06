@@ -9,7 +9,7 @@ import {
   type CutoverStep,
 } from "@/lib/dashboard";
 import { CUTOVER_SECONDS_SOURCE_LABEL, PREFLIGHT_VERDICT_LABEL, formatTime } from "@/lib/labels";
-import type { ApprovalRecord, RunStatus } from "@/lib/workflows";
+import type { ApprovalRecord, CutoverDecision, RunStatus } from "@/lib/workflows";
 
 type Props = { run: RunStatus };
 
@@ -24,6 +24,13 @@ function displayedPreflightText(record: ApprovalRecord): string {
   return `승인 화면에 표시된 판정: ${PREFLIGHT_VERDICT_LABEL[record.preflight_verdict]}${measuredAt}`;
 }
 
+// 서버가 승인 시점에 계산한 값입니다. 옛 기록에는 없습니다.
+const READINESS_DECISION_TEXT: Record<CutoverDecision, string> = {
+  go: "승인 조건: 모두 통과",
+  needs_confirmation: "승인 조건: 미확인 항목을 확인하고 승인",
+  no_go: "승인 조건: 실패 항목 있음",
+};
+
 function ApprovalRow({ record }: { record: ApprovalRecord }) {
   return (
     <li className="py-2 text-sm">
@@ -31,6 +38,9 @@ function ApprovalRow({ record }: { record: ApprovalRecord }) {
         <span className="font-medium">{record.approver ? `${record.approver} (직접 입력)` : "이름 미기재"}</span>
         <span className="text-ink/55"> · {formatTime(record.at)}</span>
       </p>
+      {record.readiness_decision && (
+        <p className="mt-0.5 text-xs text-ink/70">{READINESS_DECISION_TEXT[record.readiness_decision]}</p>
+      )}
       <p className="mt-0.5 text-xs text-ink/70">{displayedPreflightText(record)}</p>
       {record.comment && <p className="mt-0.5 break-words text-xs text-ink/55">메모: {record.comment}</p>}
     </li>

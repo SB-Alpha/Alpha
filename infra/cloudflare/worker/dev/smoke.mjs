@@ -239,6 +239,54 @@ await check("target: {\"url\": null} 은 설정값으로 되돌린다", async ()
   assert.equal(await targetUrl(), null);
 });
 
+// ---- request_counts: hold 부터 끝난 요청을 쓰기·읽기로 나눠 센다 ----
+const write = async (path = "/") => {
+  const res = await fetch(BASE + path, { method: "POST", body: "{}" });
+  await res.arrayBuffer();
+  return res.status;
+};
+
+await check("request_counts: 쓰기·읽기와 5xx 를 나눠 세고, 4xx 는 실패가 아니다", async () => {
+  await control("reset", {});
+  assert.equal(await write(), 200);
+  assert.equal(await write("/?status=503"), 503);
+  assert.equal(await write("/?status=404"), 404);
+  assert.equal((await hit()).status, 200);
+  assert.equal((await hit("/?status=500")).status, 500);
+  const { since, ...counts } = (await control("status")).body.request_counts;
+  assert.match(since, ISO_MS);
+  assert.deepEqual(counts, { write_total: 3, write_failed: 1, read_total: 2, read_failed: 1 });
+});
+
+await check("request_counts: 새 hold 에서 0 으로 시작하고 since 가 hold_started_at 과 같다", async () => {
+  const first = await control("hold", { run_id: "job07", max_hold_ms: 5000 });
+  assert.equal(first.body.request_counts.since, first.body.hold_started_at);
+  assert.equal(first.body.request_counts.write_total, 0);
+  const retry = await control("hold", { run_id: "job07", max_hold_ms: 5000 });
+  assert.equal(retry.body.request_counts.since, first.body.hold_started_at); // 재시도는 다시 세지 않는다
+});
+
+await check("request_counts: 보류 중 들어온 쓰기는 풀린 뒤 끝날 때 센다", async () => {
+  const held = write();
+  await sleep(300);
+  assert.equal((await control("status")).body.request_counts.write_total, 0);
+  await control("release", { run_id: "job07" });
+  assert.equal(await held, 200);
+  assert.equal((await control("status")).body.request_counts.write_total, 1);
+});
+
+await check("request_counts: 원본에 닿지 못하면 실패로 센다", async () => {
+  await control("reset", {});
+  await control("target", { url: "http://127.0.0.1:9" }); // 아무도 듣지 않는 포트
+  await control("hold", { run_id: "job08", max_hold_ms: 5000 });
+  await control("switch", { run_id: "job08", to: "TARGET" });
+  await control("release", { run_id: "job08" });
+  assert.equal(await write(), 502);
+  const { request_counts: counts } = (await control("status")).body;
+  assert.equal(counts.write_total, 1);
+  assert.equal(counts.write_failed, 1);
+});
+
 await control("reset", {});
 
 console.log(failed === 0 ? "\n모두 통과" : `\n실패 ${failed}건`);

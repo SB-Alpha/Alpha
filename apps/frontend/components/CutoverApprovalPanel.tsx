@@ -4,14 +4,16 @@ import { useEffect, useState } from "react";
 import { preflightVerdict } from "@/lib/dashboard";
 import { GATE_LABEL } from "@/lib/labels";
 import { BUTTON_PRIMARY, BUTTON_SECONDARY, INPUT } from "@/lib/ui";
-import { workflows, type DisplayedPreflight, type PreflightReport } from "@/lib/workflows";
+import { workflows, type CutoverReadiness, type DisplayedPreflight, type PreflightReport } from "@/lib/workflows";
+import { ReadinessTable } from "./CutoverSafety";
 import { PreflightChecklist } from "./PreflightChecklist";
 
 type Props = {
   runId: string;
+  readiness: CutoverReadiness | null;
   isBusy: boolean;
   isTrafficUncertain: boolean;
-  onApprove: (comment: string, approver: string, preflight: DisplayedPreflight) => void;
+  onApprove: (comment: string, approver: string, preflight: DisplayedPreflight, acknowledgeUnknown: boolean) => void;
 };
 
 /** 어느 요청의 응답인지 key 로 남깁니다. key 가 다르면 지난 점검이므로 보여주지 않습니다. */
@@ -37,9 +39,10 @@ function preflightWarning(isLoading: boolean, report: PreflightReport | null): W
   return null;
 }
 
-export function CutoverApprovalPanel({ runId, isBusy, isTrafficUncertain, onApprove }: Props) {
+export function CutoverApprovalPanel({ runId, readiness, isBusy, isTrafficUncertain, onApprove }: Props) {
   const [approver, setApprover] = useState("");
   const [comment, setComment] = useState("");
+  const [isUnknownConfirmed, setIsUnknownConfirmed] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [result, setResult] = useState<PreflightResult | null>(null);
 
@@ -73,6 +76,11 @@ export function CutoverApprovalPanel({ runId, isBusy, isTrafficUncertain, onAppr
   // 지금 화면에 보이는 값을 그대로 보냅니다. 점검 중이거나 실패했으면 report 가 null 입니다.
   const displayed: DisplayedPreflight = report && { verdict: preflightVerdict(report), measured_at: report.measured_at };
 
+  // 승인 가능 여부는 서버 판정이 정합니다. 승인 API 도 같은 규칙으로 다시 검사합니다.
+  const decision = readiness?.decision ?? null;
+  const isUnknownAcknowledged = decision === "needs_confirmation" && isUnknownConfirmed;
+  const canApprove = hasApprover && (decision === "go" || isUnknownAcknowledged);
+
   return (
     <div className="rounded-xl border-2 border-amber-400 bg-white p-5">
       <h3 className="text-lg font-semibold">{GATE_LABEL.cutover}</h3>
@@ -83,10 +91,36 @@ export function CutoverApprovalPanel({ runId, isBusy, isTrafficUncertain, onAppr
       </p>
 
       <div className="mt-4">
+        <h4 className="text-sm font-semibold">승인 조건</h4>
+        <p className="text-xs text-ink/60">서버가 저장된 지표로 판정합니다. 실패 항목이 있으면 승인할 수 없습니다.</p>
+        {readiness ? (
+          <ReadinessTable checks={readiness.checks} />
+        ) : (
+          <p className="mt-2 text-sm text-ink/50">판정을 불러오는 중입니다.</p>
+        )}
+        {decision === "no_go" && (
+          <p role="alert" className="mt-2 text-sm font-medium text-rose-700">
+            실패한 항목이 있어 전환을 승인할 수 없습니다.
+          </p>
+        )}
+        {decision === "needs_confirmation" && (
+          <label className="mt-2 flex items-start gap-2 text-sm text-amber-900">
+            <input
+              type="checkbox"
+              checked={isUnknownConfirmed}
+              onChange={(e) => setIsUnknownConfirmed(e.target.checked)}
+              className="mt-0.5"
+            />
+            확인되지 않은 항목이 있음을 알고 진행합니다.
+          </label>
+        )}
+      </div>
+
+      <div className="mt-4 border-t border-ink/10 pt-4">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
-            <h4 className="text-sm font-semibold">전환 전 점검</h4>
-            <p className="text-xs text-ink/60">참고용입니다. 결과와 상관없이 승인을 막지 않습니다.</p>
+            <h4 className="text-sm font-semibold">실시간 점검 (참고)</h4>
+            <p className="text-xs text-ink/60">지금 상태를 직접 재서 보여줍니다. 이 결과로는 승인을 막지 않습니다.</p>
           </div>
           <button
             type="button"
@@ -139,8 +173,8 @@ export function CutoverApprovalPanel({ runId, isBusy, isTrafficUncertain, onAppr
         </div>
         <button
           type="button"
-          disabled={isBusy || !hasApprover}
-          onClick={() => onApprove(comment, approver, displayed)}
+          disabled={isBusy || !canApprove}
+          onClick={() => onApprove(comment, approver, displayed, isUnknownAcknowledged)}
           className={`${BUTTON_PRIMARY} mt-3 w-full sm:w-auto`}
         >
           {warning ? "경고 확인 후 전환 승인" : "전환 승인"}

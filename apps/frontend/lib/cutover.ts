@@ -1,4 +1,4 @@
-// 전환 결과와 복귀 가능 범위. run 상태만으로 계산합니다. 전환 전 점검은 백엔드 GET /preflight 가 맡습니다.
+// 전환 결과와 복귀 가능 범위. run 상태만으로 계산합니다. 승인 ② 판정은 서버(workflows/readiness.py)가 합니다.
 
 import { METRIC_KEYS, numberMetric } from "./dashboard";
 import type { RunStatus } from "./workflows";

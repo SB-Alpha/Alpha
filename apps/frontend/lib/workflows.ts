@@ -53,6 +53,25 @@ export interface RunStatus {
   created_at: string;
   updated_at: string;
   approval_records: ApprovalRecord[];
+  cutover_readiness?: CutoverReadiness | null; // 승인 ② 대기 중일 때만 서버가 채웁니다
+  cleanup_state?: "running" | "done" | "failed" | null; // 중단 뒤 복제 자원 정리 상태
+  cleanup_message?: string | null;
+}
+
+export type CheckStatus = "pass" | "fail" | "unknown";
+
+export type CutoverDecision = "go" | "needs_confirmation" | "no_go";
+
+export interface ReadinessCheck {
+  id: string;
+  title: string;
+  status: CheckStatus;
+  detail: string;
+}
+
+export interface CutoverReadiness {
+  decision: CutoverDecision;
+  checks: ReadinessCheck[];
 }
 
 export type PreflightStatus = "pass" | "fail" | "unknown" | "info";
@@ -83,6 +102,7 @@ export interface ApprovalRecord {
   comment?: string | null;
   preflight_verdict?: PreflightVerdict | null;
   preflight_measured_at?: string | null;
+  readiness_decision?: CutoverDecision | null;
   at: string;
 }
 
@@ -143,17 +163,26 @@ export const workflows = {
   list: () => call<RunStatus[]>(""),
   get: (runId: string) => call<RunStatus>(`/${encodeURIComponent(runId)}`),
   create: (req: MigrationRequest) => post<RunStatus>("", req),
-  approve: (runId: string, gate: Gate, comment?: string, approver?: string, preflight?: DisplayedPreflight) =>
+  approve: (
+    runId: string,
+    gate: Gate,
+    comment?: string,
+    approver?: string,
+    preflight?: DisplayedPreflight,
+    acknowledgeUnknown = false,
+  ) =>
     post<RunStatus>(`/${encodeURIComponent(runId)}/approve`, {
       gate,
       comment: comment || null,
       approver: approver?.trim() || null,
       preflight_verdict: preflight?.verdict ?? null,
       preflight_measured_at: preflight?.measured_at ?? null,
+      acknowledge_unknown: acknowledgeUnknown,
     }),
   abort: (runId: string, reason?: string) =>
     post<RunStatus>(`/${encodeURIComponent(runId)}/abort`, { reason: reason || null }),
   resume: (runId: string) => post<RunStatus>(`/${encodeURIComponent(runId)}/resume`),
+  retryCleanup: (runId: string) => post<RunStatus>(`/${encodeURIComponent(runId)}/cleanup`),
   submitManual: (runId: string, stage: StageName, output: Record<string, unknown>, note?: string) =>
     post<RunStatus>(`/${encodeURIComponent(runId)}/stages/${stage}/manual`, { output, note: note || null }),
   getDiagnosis: (runId: string) => call<SelfHealingDiagnosis>(`/${encodeURIComponent(runId)}/diagnosis`),

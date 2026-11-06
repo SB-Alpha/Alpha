@@ -20,10 +20,13 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from .context import RunAborted, StoreRunContext, now, with_stage
+from .readiness import cutover_readiness
 from .schemas import (
     GATE_BEFORE,
     STAGE_ORDER,
     ApprovalRecord,
+    CleanupState,
+    CutoverDecision,
     Gate,
     ManualStageInput,
     MigrationRequest,
@@ -39,6 +42,8 @@ from .store import RunStore
 logger = logging.getLogger(__name__)
 
 StageRunner = Callable[[RunStatus, RunContext], BaseModel | dict[str, Any]]
+# 중단된 run 이 남긴 외부 자원을 정리합니다. 정리할 것이 없으면 False, 실패하면 예외입니다. 다시 불러도 안전해야 합니다.
+AbortCleanup = Callable[[RunStatus], bool]
 
 GATE_LABEL: dict[Gate, str] = {"plan": "계획 승인 ①", "cutover": "전환 승인 ②"}
 
@@ -54,6 +59,7 @@ _CUTOVER_MANUAL_NOTE = "수동 확인 필요: 트래픽이 이미 목적지로 �
 # unknown·post_switch_failed·switched 는 트래픽이 넘어갔을 수 있는 결과입니다.
 CUTOVER_OUTCOME = "cutover_outcome"
 CUTOVER_ON_SOURCE = {"rolled_back", "not_started"}
+_CLEANUP_STARTED: dict[str, Any] = {"cleanup_state": "running", "cleanup_message": "복제 자원 정리 중"}
 
 
 class InvalidTransition(Exception):
@@ -64,10 +70,32 @@ def next_stage(run: RunStatus) -> StageName | None:
     return next((s for s in STAGE_ORDER if run.stage(s).state != WorkflowState.SUCCEEDED), None)
 
 
+def _require_cutover_ready(run: RunStatus, acknowledge_unknown: bool) -> CutoverDecision:
+    """승인 조건을 검사합니다. 통과하지 못하면 예외이고, 통과하면 그때의 판정을 돌려줍니다."""
+    readiness = cutover_readiness(run)
+
+    def titles(status: str) -> str:
+        return ", ".join(c.title for c in readiness.checks if c.status == status)
+
+    if readiness.decision == "no_go":
+        raise InvalidTransition(f"전환 조건을 통과하지 못했습니다: {titles('fail')}")
+    if readiness.decision == "needs_confirmation":
+        if not acknowledge_unknown:
+            raise InvalidTransition(f"확인되지 않은 항목이 있습니다: {titles('unknown')}. 확인 후 다시 승인하세요")
+        logger.warning("run %s: 미확인 항목을 확인하고 전환 승인: %s", run.run_id, titles("unknown"))
+    return readiness.decision
+
+
 class Engine:
-    def __init__(self, store: RunStore, runners: Mapping[StageName, StageRunner] | None = None) -> None:
+    def __init__(
+        self,
+        store: RunStore,
+        runners: Mapping[StageName, StageRunner] | None = None,
+        abort_cleanup: AbortCleanup | None = None,
+    ) -> None:
         self._store = store
         self._runners = dict(runners or {})
+        self._abort_cleanup = abort_cleanup
 
     # -- 조회 ---------------------------------------------------------------
 
@@ -100,6 +128,8 @@ class Engine:
         approver: str | None = None,
         preflight_verdict: PreflightVerdict | None = None,
         preflight_measured_at: datetime | None = None,
+        *,
+        acknowledge_unknown: bool = False,
     ) -> RunStatus:
         # 점검 결과는 승인 ② 에만 있습니다. 다른 승인에 함께 와도 저장하지 않습니다.
         is_cutover = gate == "cutover"
@@ -107,6 +137,7 @@ class Engine:
         def change(run: RunStatus) -> RunStatus:
             if run.state != WorkflowState.WAITING_APPROVAL or run.waiting_gate != gate:
                 raise InvalidTransition(f"{GATE_LABEL[gate]} 대기 상태가 아닙니다 (현재 {run.state.value})")
+            decision = _require_cutover_ready(run, acknowledge_unknown) if is_cutover else None
             note = f": {comment}" if comment else ""
             ts = now()
             record = ApprovalRecord(
@@ -115,6 +146,7 @@ class Engine:
                 comment=comment,
                 preflight_verdict=preflight_verdict if is_cutover else None,
                 preflight_measured_at=preflight_measured_at if is_cutover else None,
+                readiness_decision=decision,
                 at=ts,
             )
             return run.model_copy(
@@ -149,10 +181,46 @@ class Engine:
                     "stages": stages,
                     "message": f"중단됨{note}",
                     "updated_at": ts,
+                    **(_CLEANUP_STARTED if self._abort_cleanup else {}),
                 }
             )
 
         return self._store.update(run_id, change)
+
+    def retry_cleanup(self, run_id: str) -> RunStatus:
+        """실패한 중단 정리를 다시 시도하도록 표시합니다. 이어서 run_abort_cleanup() 을 부릅니다."""
+
+        def change(run: RunStatus) -> RunStatus:
+            if run.state != WorkflowState.ABORTED or run.cleanup_state != "failed":
+                raise InvalidTransition("다시 정리할 수 있는 상태가 아닙니다")
+            return run.model_copy(update=_CLEANUP_STARTED)
+
+        return self._store.update(run_id, change)
+
+    def run_abort_cleanup(self, run_id: str) -> None:
+        """중단된 run 이 남긴 외부 자원을 정리합니다. 백그라운드 작업으로 부릅니다. 실패는 기록하고 다시 시도하게 둡니다."""
+        if self._abort_cleanup is None:
+            return
+        run = self._store.get(run_id)
+        if run.state != WorkflowState.ABORTED or run.cleanup_state != "running":
+            return
+        try:
+            has_cleaned = self._abort_cleanup(run)
+        except Exception as exc:
+            logger.exception("abort cleanup failed for run %s", run_id)
+            self._finish_cleanup(run_id, "failed", f"복제 자원 정리 실패: {exc}"[:_MAX_ERROR_MESSAGE])
+            return
+        if has_cleaned:
+            self._finish_cleanup(run_id, "done", "복제 자원 정리 완료")
+        else:
+            self._finish_cleanup(run_id, None, None)
+
+    def _finish_cleanup(self, run_id: str, state: CleanupState | None, message: str | None) -> None:
+        # run.updated_at 은 상태가 바뀐 시각이므로 건드리지 않습니다.
+        self._store.update(
+            run_id,
+            lambda run: run.model_copy(update={"cleanup_state": state, "cleanup_message": message}),
+        )
 
     def submit_manual(self, run_id: str, stage: StageName, payload: ManualStageInput) -> RunStatus:
         """다음 차례 단계의 결과를 사람이 직접 넣습니다 (모듈 미연결·실패 시 fallback)."""

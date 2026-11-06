@@ -156,7 +156,7 @@ def _check_replication_lag(metrics: Mapping[str, Any], max_lag_bytes: Any) -> Pr
     except ValueError:
         return _result("replication_lag", "unknown", f"{MAX_LAG_ENV} 값이 잘못되었습니다", lag)
     if limit is None:
-        return _result("replication_lag", "info", "합의된 기준이 없어 참고용으로만 표시합니다", lag)
+        return _result("replication_lag", "info", "참고값입니다. 승인 기준은 승인 조건의 복제 지연 항목이 정합니다", lag)
     if lag > limit:
         return _result("replication_lag", "fail", f"기준 {limit} 바이트를 넘었습니다", lag)
     return _result("replication_lag", "pass", f"기준 {limit} 바이트 이내입니다", lag)

@@ -192,7 +192,7 @@ def test_cdc_ready_phase_starts_app_deploy_and_stops_at_cutover_gate(engine, wor
 def test_approving_cutover_sends_the_approver_to_the_agent(engine, world):
     run_id = _to_cutover_gate(engine)
 
-    engine.approve(run_id, "cutover", "확인: 이상 없음", approver="박준서")
+    engine.approve(run_id, "cutover", "확인: 이상 없음", approver="박준서", acknowledge_unknown=True)
     run = engine.advance(run_id)
 
     assert world.cutover_calls == [(to_job_id(run_id), "박준서")]
@@ -209,7 +209,7 @@ def test_rollback_then_resume_needs_fresh_approval_then_succeeds(engine, world):
     run_id = _to_cutover_gate(engine)
     world.jobs = [ROLLED_BACK]
 
-    engine.approve(run_id, "cutover", approver="박준서")
+    engine.approve(run_id, "cutover", approver="박준서", acknowledge_unknown=True)
     failed = engine.advance(run_id)
 
     assert failed.state == WorkflowState.FAILED
@@ -227,7 +227,7 @@ def test_rollback_then_resume_needs_fresh_approval_then_succeeds(engine, world):
     assert len(world.cutover_calls) == 1
 
     world.jobs = [STABILIZED]
-    engine.approve(run_id, "cutover", approver="이주호")
+    engine.approve(run_id, "cutover", approver="이주호", acknowledge_unknown=True)
     done = engine.advance(run_id)
 
     assert done.state == WorkflowState.SUCCEEDED
@@ -263,7 +263,7 @@ def fast(tmp_path: Path) -> Engine:
 def _approve_cutover(engine: Engine, jobs: list, world, approver: str = "박준서"):
     run_id = _to_cutover_gate(engine)
     world.jobs = jobs
-    engine.approve(run_id, "cutover", approver=approver)
+    engine.approve(run_id, "cutover", approver=approver, acknowledge_unknown=True)
     return run_id, engine.advance(run_id)
 
 
@@ -312,7 +312,7 @@ def test_retry_after_lost_contact_verifies_instead_of_switching_again(fast, worl
 
     world.cutover_error = ALREADY_RUNNING
     world.jobs = [STABILIZED]
-    fast.approve(run_id, "cutover", approver="이주호")
+    fast.approve(run_id, "cutover", approver="이주호", acknowledge_unknown=True)
     done = fast.advance(run_id)
 
     assert done.state == WorkflowState.SUCCEEDED
@@ -333,7 +333,7 @@ def test_post_switch_failure_never_offers_retry_and_stays_recoverable(fast, worl
     fast.resume(run_id)
     fast.advance(run_id)
     world.cutover_error = AgentError(409, "job is failed/cutover, not waiting for cutover approval")
-    fast.approve(run_id, "cutover", approver="이주호")
+    fast.approve(run_id, "cutover", approver="이주호", acknowledge_unknown=True)
     again = fast.advance(run_id)
 
     assert _outcome(again) == "post_switch_failed"
@@ -360,7 +360,7 @@ def test_refused_retry_does_not_erase_that_traffic_may_have_moved(fast, world, f
 
     world.cutover_error = refusal
     world.jobs = [NOT_READY]
-    fast.approve(run_id, "cutover", approver="이주호")
+    fast.approve(run_id, "cutover", approver="이주호", acknowledge_unknown=True)
     run = fast.advance(run_id)
 
     assert _outcome(run) == expected
@@ -375,7 +375,7 @@ def test_retry_without_agent_url_does_not_erase_that_traffic_may_have_moved(fast
     run_id = _fail_then_retry(fast, first_job, world)
 
     monkeypatch.delenv("CDC_AGENT_URL")
-    fast.approve(run_id, "cutover", approver="이주호")
+    fast.approve(run_id, "cutover", approver="이주호", acknowledge_unknown=True)
     run = fast.advance(run_id)
 
     assert _outcome(run) == expected
@@ -386,7 +386,7 @@ def test_refused_retry_after_a_confirmed_rollback_is_still_not_started(fast, wor
     run_id = _fail_then_retry(fast, ROLLED_BACK, world)
 
     world.cutover_error = AgentError(403, "Access denied")
-    fast.approve(run_id, "cutover", approver="이주호")
+    fast.approve(run_id, "cutover", approver="이주호", acknowledge_unknown=True)
     run = fast.advance(run_id)
 
     assert _outcome(run) == "not_started"
@@ -403,7 +403,7 @@ def test_rollback_is_recorded_and_a_stale_outcome_does_not_survive_the_next_atte
     assert _outcome(waiting) == "rolled_back"
 
     world.jobs = [LOST]
-    fast.approve(run_id, "cutover", approver="이주호")
+    fast.approve(run_id, "cutover", approver="이주호", acknowledge_unknown=True)
     lost = fast.advance(run_id)
 
     assert _outcome(lost) == "unknown"
@@ -456,7 +456,7 @@ def test_lost_post_response_with_no_later_contact_stays_unknown(fast, world):
 def test_missing_agent_url_is_not_started(fast, world, monkeypatch):
     run_id = _to_cutover_gate(fast)
     monkeypatch.delenv("CDC_AGENT_URL")
-    fast.approve(run_id, "cutover")
+    fast.approve(run_id, "cutover", acknowledge_unknown=True)
 
     run = fast.advance(run_id)
 
@@ -503,7 +503,7 @@ def test_evidence_processing_failure_degrades_instead_of_failing_the_switch(fast
 
     monkeypatch.setattr(f"app.features.workflows.runners.{broken}", explode)
     world.jobs = [STABILIZED]
-    fast.approve(run_id, "cutover", approver="박준서")
+    fast.approve(run_id, "cutover", approver="박준서", acknowledge_unknown=True)
 
     run = fast.advance(run_id)
 
@@ -653,6 +653,7 @@ def test_approve_succeeds_with_no_go_and_records_the_verdict(api):
         f"/runs/{run_id}/approve",
         json={
             "gate": "cutover",
+            "acknowledge_unknown": True,
             "comment": "감수함",
             "approver": " 박준서 ",
             "preflight_verdict": "no_go",
@@ -674,7 +675,7 @@ def test_cutover_approve_never_calls_the_evaluator_even_if_it_would_raise(api, c
     api.evaluator.error = RuntimeError("db.internal.example password=hunter2")
 
     with caplog.at_level(logging.DEBUG):
-        res = api.client.post(f"/runs/{run_id}/approve", json={"gate": "cutover"})
+        res = api.client.post(f"/runs/{run_id}/approve", json={"gate": "cutover", "acknowledge_unknown": True})
 
     assert res.status_code == 200
     assert api.evaluator.calls == 0
@@ -689,7 +690,7 @@ def test_cutover_approve_makes_no_network_call(api, monkeypatch):
     monkeypatch.setattr("socket.socket.connect", lambda *a, **k: calls.append("connect"))
     run_id = _api_to_cutover_gate(api.client)
 
-    assert api.client.post(f"/runs/{run_id}/approve", json={"gate": "cutover"}).status_code == 200
+    assert api.client.post(f"/runs/{run_id}/approve", json={"gate": "cutover", "acknowledge_unknown": True}).status_code == 200
     assert calls == []
 
 
@@ -699,7 +700,7 @@ def test_cutover_approve_records_exactly_what_the_client_sent(api, verdict):
 
     res = api.client.post(
         f"/runs/{run_id}/approve",
-        json={"gate": "cutover", "preflight_verdict": verdict, "preflight_measured_at": MEASURED_AT},
+        json={"gate": "cutover", "acknowledge_unknown": True, "preflight_verdict": verdict, "preflight_measured_at": MEASURED_AT},
     )
 
     record = res.json()["approval_records"][-1]
@@ -712,7 +713,7 @@ def test_cutover_approve_without_a_report_records_nulls(api):
 
     res = api.client.post(
         f"/runs/{run_id}/approve",
-        json={"gate": "cutover", "preflight_verdict": None, "preflight_measured_at": None},
+        json={"gate": "cutover", "acknowledge_unknown": True, "preflight_verdict": None, "preflight_measured_at": None},
     )
 
     record = res.json()["approval_records"][-1]
@@ -725,7 +726,7 @@ def test_cutover_approve_without_a_report_records_nulls(api):
 def test_approve_rejects_malformed_preflight_values(api, fields):
     run_id = _api_to_cutover_gate(api.client)
 
-    assert api.client.post(f"/runs/{run_id}/approve", json={"gate": "cutover", **fields}).status_code == 422
+    assert api.client.post(f"/runs/{run_id}/approve", json={"gate": "cutover", "acknowledge_unknown": True, **fields}).status_code == 422
     assert api.client.get(f"/runs/{run_id}").json()["waiting_gate"] == "cutover"
 
 
@@ -756,15 +757,15 @@ def test_plan_approval_does_not_run_the_evaluator(api):
 def test_cutover_approval_when_not_waiting_conflicts_without_evaluating(api):
     run_id = _api_to_plan_gate(api.client)
 
-    assert api.client.post(f"/runs/{run_id}/approve", json={"gate": "cutover"}).status_code == 409
+    assert api.client.post(f"/runs/{run_id}/approve", json={"gate": "cutover", "acknowledge_unknown": True}).status_code == 409
     assert api.evaluator.calls == 0
-    assert api.client.post("/runs/mig-missing/approve", json={"gate": "cutover"}).status_code == 404
+    assert api.client.post("/runs/mig-missing/approve", json={"gate": "cutover", "acknowledge_unknown": True}).status_code == 404
 
 
 def test_approve_validates_approver_length(api):
     run_id = _api_to_cutover_gate(api.client)
 
-    res = api.client.post(f"/runs/{run_id}/approve", json={"gate": "cutover", "approver": "x" * 101})
+    res = api.client.post(f"/runs/{run_id}/approve", json={"gate": "cutover", "acknowledge_unknown": True, "approver": "x" * 101})
 
     assert res.status_code == 422
     assert api.client.get(f"/runs/{run_id}").json()["waiting_gate"] == "cutover"
@@ -772,7 +773,7 @@ def test_approve_validates_approver_length(api):
 
 def test_blank_approver_is_recorded_as_none(api):
     run_id = _api_to_cutover_gate(api.client)
-    res = api.client.post(f"/runs/{run_id}/approve", json={"gate": "cutover", "approver": "   "})
+    res = api.client.post(f"/runs/{run_id}/approve", json={"gate": "cutover", "acknowledge_unknown": True, "approver": "   "})
     assert res.json()["approval_records"][-1]["approver"] is None
 
 
@@ -800,6 +801,7 @@ def test_full_flow_over_http_with_real_runners(tmp_path, world):
             f"/runs/{run_id}/approve",
             json={
                 "gate": "cutover",
+                "acknowledge_unknown": True,
                 "approver": "박준서",
                 "preflight_verdict": shown["verdict"],
                 "preflight_measured_at": shown["measured_at"],
@@ -812,3 +814,89 @@ def test_full_flow_over_http_with_real_runners(tmp_path, world):
         assert run["approval_records"][-1]["preflight_verdict"] == "go"
     finally:
         app.dependency_overrides.clear()
+
+
+# -- 승인 조건(서버 차단)과 실시간 점검(참고)을 함께 쓰는 경우 ---------------------------------
+
+
+READY_METRICS = {"phase": "cutover_ready", "copy_percent": 100, "replication_lag_bytes": 0, "mismatch": 0}
+
+
+def _set_gate_inputs(api, run_id, metrics, *, is_app_healthy=None):
+    """승인 조건이 읽는 저장값을 정합니다. is_app_healthy 를 주면 수동 입력이 아닌 실제 배포 결과처럼 둡니다."""
+    from app.features.workflows.context import with_stage
+
+    def change(run):
+        updated = with_stage(run, StageName.DB_MIGRATION, metrics=metrics)
+        if is_app_healthy is None:
+            return updated
+        updated = with_stage(updated, StageName.APP_DEPLOY, manual=False)
+        return updated.model_copy(
+            update={"outputs": {**updated.outputs, "app_deploy": {"healthy": is_app_healthy}}}
+        )
+
+    api.engine._store.update(run_id, change)
+
+
+def _approve(api, run_id, **body):
+    return api.client.post(f"/runs/{run_id}/approve", json={"gate": "cutover", **body})
+
+
+def test_failed_condition_blocks_even_with_acknowledgement_and_a_go_screen(api):
+    run_id = _api_to_cutover_gate(api.client)
+    _set_gate_inputs(api, run_id, {**READY_METRICS, "replication_lag_bytes": 2 * 1024 * 1024}, is_app_healthy=True)
+
+    res = _approve(api, run_id, acknowledge_unknown=True, approver="박준서", preflight_verdict="go")
+
+    assert res.status_code == 409
+    run = api.engine.get(run_id)
+    assert run.state == WorkflowState.WAITING_APPROVAL
+    assert "cutover" not in run.approvals
+    assert [r for r in run.approval_records if r.gate == "cutover"] == []
+
+
+def test_unknown_condition_needs_acknowledgement(api):
+    run_id = _api_to_cutover_gate(api.client)
+
+    assert _approve(api, run_id, approver="박준서").status_code == 409
+
+    res = _approve(api, run_id, approver="박준서", acknowledge_unknown=True)
+    assert res.status_code == 200
+    assert res.json()["approval_records"][-1]["readiness_decision"] == "needs_confirmation"
+
+
+def test_live_preflight_no_go_does_not_block_when_conditions_pass(api):
+    run_id = _api_to_cutover_gate(api.client)
+    _set_gate_inputs(api, run_id, READY_METRICS, is_app_healthy=True)
+
+    res = _approve(api, run_id, approver="박준서", preflight_verdict="no_go", preflight_measured_at=MEASURED_AT)
+
+    assert res.status_code == 200
+    record = res.json()["approval_records"][-1]
+    assert record["readiness_decision"] == "go"
+    assert record["preflight_verdict"] == "no_go"
+    assert api.evaluator.calls == 0
+
+
+def test_run_detail_and_preflight_report_their_own_verdicts(api):
+    run_id = _api_to_cutover_gate(api.client)
+    _set_gate_inputs(api, run_id, READY_METRICS, is_app_healthy=True)
+
+    assert api.client.get(f"/runs/{run_id}").json()["cutover_readiness"]["decision"] == "go"
+    assert api.client.get(f"/runs/{run_id}/preflight").json()["verdict"] == "no_go"
+
+
+def test_plan_approval_records_no_condition_decision(api):
+    run_id = _api_to_plan_gate(api.client)
+
+    res = api.client.post(f"/runs/{run_id}/approve", json={"gate": "plan"})
+
+    assert res.json()["approval_records"][-1]["readiness_decision"] is None
+
+
+def test_old_approval_rows_load_without_a_condition_decision():
+    from app.features.workflows.schemas import ApprovalRecord
+
+    record = ApprovalRecord.model_validate({"gate": "cutover", "at": MEASURED_AT})
+
+    assert record.readiness_decision is None
