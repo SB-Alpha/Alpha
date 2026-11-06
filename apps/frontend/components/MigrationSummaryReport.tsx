@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useState } from "react";
 import { StateBadge } from "@/components/StateBadge";
+import { FinOpsGreenOpsCard } from "@/components/FinOpsGreenOpsCard";
 import { formatBytes } from "@/lib/dashboard";
 import { formatTime } from "@/lib/labels";
 import {
@@ -207,6 +208,10 @@ export function MigrationSummaryReport({ run, standalone = false }: Props) {
                 </li>
               ))}
             </ol>
+          </div>
+
+          <div className="md:col-span-2">
+            <FinOpsGreenOpsCard run={run} />
           </div>
         </div>
       )}

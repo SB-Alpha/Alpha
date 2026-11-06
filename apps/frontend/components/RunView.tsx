@@ -8,6 +8,7 @@ import { CdcJobControls } from "@/components/CdcJobControls";
 import { RecoveryBanner } from "@/components/CutoverSafety";
 import { CutoverTimeline } from "@/components/CutoverTimeline";
 import { DashboardPanel } from "@/components/DashboardPanel";
+import { FinOpsGreenOpsCard } from "@/components/FinOpsGreenOpsCard";
 import { MigrationSummaryReport } from "@/components/MigrationSummaryReport";
 import { PlanApproval } from "@/components/PlanApproval";
 import { RunActions } from "@/components/RunActions";
@@ -117,6 +118,9 @@ export function RunView() {
           <DynamicCanvas run={run} onNavigateSection={handleNavigateSection} />
 
           <DashboardPanel run={run} />
+
+          {/* Nexus FinOps & GreenOps 계량경제학 및 ESG 의사결정 위젯 */}
+          <FinOpsGreenOpsCard run={run} />
 
           <div id="stage-stepper-section">
             <StageStepper run={run} />
