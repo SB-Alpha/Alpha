@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -22,9 +23,11 @@ from .context import RunAborted, StoreRunContext, now, with_stage
 from .schemas import (
     GATE_BEFORE,
     STAGE_ORDER,
+    ApprovalRecord,
     Gate,
     ManualStageInput,
     MigrationRequest,
+    PreflightVerdict,
     RunContext,
     RunStatus,
     StageName,
@@ -44,6 +47,13 @@ _FINISHED = {WorkflowState.SUCCEEDED, WorkflowState.ABORTED}
 _MANUAL_ALLOWED = {WorkflowState.PAUSED, WorkflowState.FAILED}
 _RESUMABLE = {WorkflowState.FAILED, WorkflowState.RUNNING, WorkflowState.PENDING}
 _MAX_ERROR_MESSAGE = 500
+_CUTOVER_RETRY_NOTE = "재시도하려면 전환 승인 ② 를 다시 받아야 합니다"
+_CUTOVER_MANUAL_NOTE = "수동 확인 필요: 트래픽이 이미 목적지로 넘어갔을 수 있습니다"
+
+# 전환 단계 지표입니다. rolled_back·not_started 는 원본이 처리 중임이 확인된 결과이고,
+# unknown·post_switch_failed·switched 는 트래픽이 넘어갔을 수 있는 결과입니다.
+CUTOVER_OUTCOME = "cutover_outcome"
+CUTOVER_ON_SOURCE = {"rolled_back", "not_started"}
 
 
 class InvalidTransition(Exception):
@@ -82,18 +92,39 @@ class Engine:
         )
         return self._store.create(run)
 
-    def approve(self, run_id: str, gate: Gate, comment: str | None = None) -> RunStatus:
+    def approve(
+        self,
+        run_id: str,
+        gate: Gate,
+        comment: str | None = None,
+        approver: str | None = None,
+        preflight_verdict: PreflightVerdict | None = None,
+        preflight_measured_at: datetime | None = None,
+    ) -> RunStatus:
+        # 점검 결과는 승인 ② 에만 있습니다. 다른 승인에 함께 와도 저장하지 않습니다.
+        is_cutover = gate == "cutover"
+
         def change(run: RunStatus) -> RunStatus:
             if run.state != WorkflowState.WAITING_APPROVAL or run.waiting_gate != gate:
                 raise InvalidTransition(f"{GATE_LABEL[gate]} 대기 상태가 아닙니다 (현재 {run.state.value})")
             note = f": {comment}" if comment else ""
+            ts = now()
+            record = ApprovalRecord(
+                gate=gate,
+                approver=approver,
+                comment=comment,
+                preflight_verdict=preflight_verdict if is_cutover else None,
+                preflight_measured_at=preflight_measured_at if is_cutover else None,
+                at=ts,
+            )
             return run.model_copy(
                 update={
                     "state": WorkflowState.RUNNING,
                     "waiting_gate": None,
                     "approvals": [*run.approvals, gate],
+                    "approval_records": [*run.approval_records, record],
                     "message": f"{GATE_LABEL[gate]} 완료{note}",
-                    "updated_at": now(),
+                    "updated_at": ts,
                 }
             )
 
@@ -172,9 +203,16 @@ class Engine:
                 else s
                 for s in run.stages
             ]
-            return run.model_copy(
+            resumed = run.model_copy(
                 update={"state": WorkflowState.RUNNING, "stages": stages, "message": "재개", "updated_at": ts}
             )
+            cutover = run.stage(StageName.CUTOVER)
+            if cutover.state != WorkflowState.FAILED:
+                return resumed
+            # 실패한 전환은 어떤 경우든 새 승인 ② 를 받습니다. 결과 기록이 없는 옛 row 는 어느 쪽인지 모르는 것으로 둡니다.
+            approvals = [g for g in run.approvals if g != "cutover"]
+            metrics = {CUTOVER_OUTCOME: "unknown", **cutover.metrics}
+            return with_stage(resumed, StageName.CUTOVER, metrics=metrics).model_copy(update={"approvals": approvals})
 
         return self._store.update(run_id, change)
 
@@ -266,19 +304,31 @@ class Engine:
         self._store.update(run.run_id, done)
 
     def _mark_failed(self, run_id: str, stage: StageName | None, detail: str) -> None:
-        """run(과 단계)을 failed 로 남깁니다. 이미 abort 됐으면 그대로 둡니다. 기록마저 실패하면 로그만 남깁니다."""
+        """run(과 단계)을 failed 로 남깁니다. 이미 abort 됐으면 그대로 둡니다. 기록마저 실패하면 로그만 남깁니다.
+
+        cutover 가 원본에 머문 채 실패하면 승인 ② 를 취소합니다. 다시 시도하려면 새 점검을 보고 다시 승인해야 합니다.
+        트래픽이 넘어갔을 수 있으면 승인을 남겨, 사람이 확인한 뒤 수동 입력으로 완료를 기록할 수 있게 합니다.
+        """
 
         def fail(r: RunStatus) -> RunStatus:
             if r.state in _FINISHED:
                 return r
-            if stage is None:
-                stuck = [s.stage for s in r.stages if s.state == WorkflowState.RUNNING]
-                updated = r
-                for name in stuck:
-                    updated = with_stage(updated, name, state=WorkflowState.FAILED, message=detail)
-                return updated.model_copy(update={"state": WorkflowState.FAILED, "message": detail, "updated_at": now()})
-            updated = with_stage(r, stage, state=WorkflowState.FAILED, message=detail)
-            return updated.model_copy(update={"state": WorkflowState.FAILED, "message": f"{stage.value} 실패"})
+            failed = [stage] if stage else [s.stage for s in r.stages if s.state == WorkflowState.RUNNING]
+            updated = r
+            for name in failed:
+                updated = with_stage(updated, name, state=WorkflowState.FAILED, message=detail)
+            message = f"{stage.value} 실패" if stage else detail
+            approvals = r.approvals
+            if StageName.CUTOVER in failed:
+                outcome = r.stage(StageName.CUTOVER).metrics.get(CUTOVER_OUTCOME)
+                if outcome is None or outcome in CUTOVER_ON_SOURCE:
+                    approvals = [g for g in r.approvals if g != "cutover"]
+                    message = f"{message} — {_CUTOVER_RETRY_NOTE}"
+                else:
+                    message = f"{message} — {_CUTOVER_MANUAL_NOTE}"
+            return updated.model_copy(
+                update={"state": WorkflowState.FAILED, "approvals": approvals, "message": message, "updated_at": now()}
+            )
 
         try:
             self._store.update(run_id, fail)

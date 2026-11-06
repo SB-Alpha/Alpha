@@ -1,76 +1,7 @@
-// 승인 ② 판정과 복귀 가능 범위. run 상태만으로 계산합니다. 값이 없으면 통과로 치지 않고 "unknown" 입니다.
+// 전환 결과와 복귀 가능 범위. run 상태만으로 계산합니다. 전환 전 점검은 백엔드 GET /preflight 가 맡습니다.
 
 import { METRIC_KEYS, numberMetric } from "./dashboard";
 import type { RunStatus } from "./workflows";
-
-// 임시 기준값입니다. 팀 합의 후 바꿉니다.
-export const MAX_REPLICATION_LAG_BYTES = 1024 * 1024;
-
-export type CheckStatus = "pass" | "fail" | "unknown";
-
-export type ReadinessCheck = {
-  id: string;
-  title: string;
-  status: CheckStatus;
-  detail: string;
-};
-
-export type CutoverDecision = "go" | "needs_confirmation" | "no_go";
-
-function metricCheck(
-  id: string,
-  title: string,
-  value: number | null,
-  isPass: (v: number) => boolean,
-  describe: (v: number) => string,
-): ReadinessCheck {
-  if (value === null) return { id, title, status: "unknown", detail: "미제공" };
-  return { id, title, status: isPass(value) ? "pass" : "fail", detail: describe(value) };
-}
-
-function appHealthCheck(run: RunStatus): ReadinessCheck {
-  const base = { id: "app_health", title: "목적지 앱 상태" };
-  const stage = run.stages.find((s) => s.stage === "app_deploy");
-  // 수동 입력값은 실제 확인 결과가 아니므로 통과나 실패로 치지 않습니다.
-  if (stage?.manual) return { ...base, status: "unknown", detail: "수동 입력이라 확인 안 됨" };
-  const output = run.outputs.app_deploy as { healthy?: unknown } | undefined;
-  if (output?.healthy === true) return { ...base, status: "pass", detail: "/health/ready 200" };
-  if (output?.healthy === false) return { ...base, status: "fail", detail: "상태 확인 실패" };
-  return { ...base, status: "unknown", detail: "미제공" };
-}
-
-export function cutoverChecks(run: RunStatus): ReadinessCheck[] {
-  return [
-    metricCheck(
-      "copy",
-      "초기 복사",
-      numberMetric(run, METRIC_KEYS.copyPercent),
-      (v) => v >= 100,
-      (v) => `${v}%`,
-    ),
-    metricCheck(
-      "lag",
-      "복제 지연",
-      numberMetric(run, METRIC_KEYS.replicationLagBytes),
-      (v) => v <= MAX_REPLICATION_LAG_BYTES,
-      (v) => `${v.toLocaleString("ko-KR")} bytes (기준 ${MAX_REPLICATION_LAG_BYTES.toLocaleString("ko-KR")} 이하, 임시)`,
-    ),
-    metricCheck(
-      "mismatch",
-      "불일치 테이블",
-      numberMetric(run, METRIC_KEYS.mismatchTables),
-      (v) => v === 0,
-      (v) => `${v}개`,
-    ),
-    appHealthCheck(run),
-  ];
-}
-
-/** 실패가 하나라도 있으면 막습니다. 미제공만 있으면 운영자의 명시적 확인이 있어야 엽니다. */
-export function cutoverDecision(checks: ReadinessCheck[]): CutoverDecision {
-  if (checks.some((c) => c.status === "fail")) return "no_go";
-  return checks.some((c) => c.status === "unknown") ? "needs_confirmation" : "go";
-}
 
 export type RecoveryTone = "safe" | "active" | "warning";
 
@@ -80,19 +11,42 @@ export type RecoveryStatus = {
   tone: RecoveryTone;
 };
 
+const MANUAL_CHECK: RecoveryStatus = {
+  title: "수동 확인 필요",
+  detail: "트래픽이 이미 목적지로 넘어갔을 수 있고 자동으로 복귀하지 않습니다. 목적지에 새 쓰기가 있는지 먼저 확인하세요.",
+  tone: "warning",
+};
+
+/** 백엔드가 기록한 전환 결과입니다. 메시지 문구로 추측하지 않습니다. */
+export function cutoverOutcome(run: RunStatus): unknown {
+  return run.stages.find((s) => s.stage === "cutover")?.metrics[METRIC_KEYS.cutoverOutcome];
+}
+
+/** 트래픽이 원본에 있다고 확인하지 못한 전환이면 true 입니다. 결과 기록이 없으면 전환을 시도한 적 없는 대기 상태만 안전으로 봅니다. */
+export function needsManualCheck(run: RunStatus): boolean {
+  const stage = run.stages.find((s) => s.stage === "cutover");
+  const outcome = cutoverOutcome(run);
+  const isOnSource = outcome === "rolled_back" || outcome === "not_started";
+  if (stage?.state === "failed") return !isOnSource;
+  const isWaiting = run.state === "waiting_approval" && run.waiting_gate === "cutover";
+  return isWaiting && outcome !== undefined && !isOnSource;
+}
+
 // 문구는 cdc_agent/jobs.py 의 전환 동작과 맞춥니다. 경로를 바꾸기 전 실패만 자동으로 원본에 돌아갑니다.
 export function recoveryStatus(run: RunStatus): RecoveryStatus | null {
   const stage = run.stages.find((s) => s.stage === "cutover");
   const isWaiting = run.state === "waiting_approval" && run.waiting_gate === "cutover";
-  if (!stage || (!isWaiting && !run.approvals.includes("cutover"))) return null;
+  // 전환이 원본에서 실패하면 workflows 가 승인 ② 를 취소하므로, 실패는 승인 여부와 상관없이 보여줍니다.
+  if (!stage || (!isWaiting && stage.state !== "failed" && !run.approvals.includes("cutover"))) return null;
 
+  if (needsManualCheck(run)) return MANUAL_CHECK;
   if (isWaiting) {
     return { title: "전환 전", detail: "트래픽은 아직 원본이 처리합니다. 이전을 중단할 수 있습니다.", tone: "safe" };
   }
   if (stage.state === "failed") {
-    return stage.message?.includes("롤백")
+    return cutoverOutcome(run) === "rolled_back"
       ? { title: "원본으로 복귀함", detail: "경로를 바꾸기 전에 실패해 원본이 쓰기를 다시 처리합니다.", tone: "safe" }
-      : { title: "수동 확인 필요", detail: "자동으로 복귀하지 않습니다. 목적지에 새 쓰기가 있는지 먼저 확인하세요.", tone: "warning" };
+      : { title: "전환 시작 안 함", detail: "전환 요청이 시작되지 않아 원본이 계속 처리합니다.", tone: "safe" };
   }
   if (stage.state === "succeeded" || numberMetric(run, METRIC_KEYS.cutoverSeconds) !== null) {
     return {

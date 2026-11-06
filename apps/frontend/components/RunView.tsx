@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { RecoveryBanner } from "@/components/CutoverSafety";
+import { CutoverTimeline } from "@/components/CutoverTimeline";
 import { DashboardPanel } from "@/components/DashboardPanel";
 import { PlanApproval } from "@/components/PlanApproval";
 import { RunActions } from "@/components/RunActions";
@@ -102,6 +103,8 @@ export function RunView() {
             onApprove={(comment) => act(() => workflows.approve(run.run_id, "plan", comment))}
           />
 
+          <CutoverTimeline run={run} />
+
           <SelfHealingCard
             run={run}
             isBusy={isBusy}
@@ -113,7 +116,9 @@ export function RunView() {
           <RunActions
             run={run}
             isBusy={isBusy}
-            onApproveCutover={(comment) => act(() => workflows.approve(run.run_id, "cutover", comment))}
+            onApproveCutover={(comment, approver, preflight) =>
+              act(() => workflows.approve(run.run_id, "cutover", comment, approver, preflight))
+            }
             onManual={(output, note) =>
               run.current_stage && act(() => workflows.submitManual(run.run_id, run.current_stage!, output, note))
             }

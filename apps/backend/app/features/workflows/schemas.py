@@ -16,7 +16,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # 상태·단계
@@ -45,6 +45,9 @@ class StageName(str, Enum):
 STAGE_ORDER: tuple[StageName, ...] = tuple(StageName)
 
 Gate = Literal["plan", "cutover"]
+
+PreflightStatus = Literal["pass", "fail", "unknown", "info"]
+PreflightVerdict = Literal["go", "no_go", "unverified"]
 
 # 이 단계를 시작하기 전에 사람의 승인이 필요합니다. ① 계획 승인 ② 전환 승인
 GATE_BEFORE: dict[StageName, Gate] = {
@@ -87,6 +90,16 @@ class MigrationRequest(BaseModel):
 class ApproveRequest(BaseModel):
     gate: Gate
     comment: str | None = None
+    approver: str | None = Field(default=None, max_length=100)
+    # 승인 화면에 표시된 점검 결과입니다. 승인자 이름처럼 클라이언트가 보고한 값이며 서버가 검증하지 않습니다.
+    preflight_verdict: PreflightVerdict | None = None
+    preflight_measured_at: datetime | None = None
+
+    @field_validator("approver", mode="before")
+    @classmethod
+    def _blank_approver_is_none(cls, value: Any) -> Any:
+        # 공백만 있으면 승인자를 모르는 것으로 둡니다.
+        return (value.strip() or None) if isinstance(value, str) else value
 
 
 class AbortRequest(BaseModel):
@@ -115,12 +128,44 @@ class StageStatus(BaseModel):
     updated_at: datetime | None = None
 
 
+class PreflightCheck(BaseModel):
+    id: str
+    label: str
+    status: PreflightStatus
+    detail: str | None = None
+    value: int | str | None = None
+
+
+class PreflightReport(BaseModel):
+    """전환 승인 ② 전 점검 결과. 참고용(advisory)이며 승인을 막지 않습니다."""
+
+    run_id: str
+    gate: Gate = "cutover"
+    verdict: PreflightVerdict
+    advisory: bool = True
+    simulated: bool = False
+    checks: list[PreflightCheck]
+    measured_at: datetime
+
+
+class ApprovalRecord(BaseModel):
+    """승인 이력. 실패로 승인이 취소돼도 지우지 않습니다."""
+
+    gate: Gate
+    approver: str | None = None
+    comment: str | None = None
+    preflight_verdict: PreflightVerdict | None = None  # 클라이언트가 보고한 값. 승인 ② 만 저장합니다
+    preflight_measured_at: datetime | None = None
+    at: datetime
+
+
 class RunStatus(BaseModel):
     run_id: str
     state: WorkflowState
     current_stage: StageName | None  # 다음에 실행할(또는 실행 중인) 단계. 모두 끝나면 None
     waiting_gate: Gate | None = None
     approvals: list[Gate] = Field(default_factory=list)
+    approval_records: list[ApprovalRecord] = Field(default_factory=list)
     request: MigrationRequest
     stages: list[StageStatus]
     outputs: dict[str, Any] = Field(default_factory=dict)  # 단계 이름 → 그 단계 Output (JSON)

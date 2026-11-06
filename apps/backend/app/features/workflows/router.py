@@ -11,11 +11,13 @@ from app.core.config import get_settings
 
 from .engine import Engine, InvalidTransition
 from .healer import SelfHealingDiagnosis, diagnose_run
+from .preflight import evaluate_cutover
 from .schemas import (
     AbortRequest,
     ApproveRequest,
     ManualStageInput,
     MigrationRequest,
+    PreflightReport,
     RunStatus,
     StageName,
     WorkflowState,
@@ -25,11 +27,21 @@ from .store import RunNotFound, RunStore
 
 router = APIRouter(prefix="/runs", tags=["workflows"])
 
+PreflightEvaluator = Callable[[RunStatus], PreflightReport]
+
 
 @lru_cache
 def get_engine() -> Engine:
     # 연결된 모듈은 runners.RUNNERS 에 단계별로 등록합니다. 없는 단계는 수동 입력 대기입니다.
     return Engine(RunStore(get_settings().workflows_db_path), RUNNERS)
+
+
+def get_preflight() -> PreflightEvaluator:
+    return evaluate_cutover
+
+
+def _waiting_at_cutover(run: RunStatus) -> bool:
+    return run.state == WorkflowState.WAITING_APPROVAL and run.waiting_gate == "cutover"
 
 
 def _apply(run_id: str, action: Callable[[], RunStatus]) -> RunStatus:
@@ -69,7 +81,18 @@ def approve_run(
     background: BackgroundTasks,
     engine: Engine = Depends(get_engine),
 ) -> RunStatus:
-    run = _apply(run_id, lambda: engine.approve(run_id, req.gate, req.comment))
+    # 점검은 GET /preflight 에서만 합니다. 승인 요청은 프록시 제한(30초) 안에 끝나도록 네트워크를 부르지 않습니다.
+    run = _apply(
+        run_id,
+        lambda: engine.approve(
+            run_id,
+            req.gate,
+            req.comment,
+            approver=req.approver,
+            preflight_verdict=req.preflight_verdict,
+            preflight_measured_at=req.preflight_measured_at,
+        ),
+    )
     background.add_task(engine.advance, run_id)
     return run
 
@@ -100,6 +123,19 @@ def submit_manual(
     run = _apply(run_id, lambda: engine.submit_manual(run_id, stage, req))
     background.add_task(engine.advance, run_id)
     return run
+
+
+@router.get("/{run_id}/preflight", response_model=PreflightReport)
+def get_preflight_report(
+    run_id: str,
+    engine: Engine = Depends(get_engine),
+    preflight: PreflightEvaluator = Depends(get_preflight),
+) -> PreflightReport:
+    """전환 승인 ② 대기 중인 run 의 전환 전 점검 결과를 돌려줍니다. 참고용이며 승인을 막지 않습니다."""
+    run = _apply(run_id, lambda: engine.get(run_id))
+    if not _waiting_at_cutover(run):
+        raise HTTPException(status.HTTP_409_CONFLICT, f"전환 승인 ② 대기 중인 run 만 점검합니다 (현재 {run.state.value})")
+    return preflight(run)
 
 
 @router.get("/{run_id}/diagnosis", response_model=SelfHealingDiagnosis)

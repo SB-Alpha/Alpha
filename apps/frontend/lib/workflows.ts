@@ -52,7 +52,42 @@ export interface RunStatus {
   message: string | null;
   created_at: string;
   updated_at: string;
+  approval_records: ApprovalRecord[];
 }
+
+export type PreflightStatus = "pass" | "fail" | "unknown" | "info";
+
+export type PreflightVerdict = "go" | "no_go" | "unverified";
+
+export interface PreflightCheck {
+  id: string;
+  label: string;
+  status: PreflightStatus;
+  detail?: string | null;
+  value?: number | string | null;
+}
+
+export interface PreflightReport {
+  run_id: string;
+  gate: Gate;
+  verdict: PreflightVerdict;
+  advisory: boolean;
+  simulated: boolean;
+  checks: PreflightCheck[];
+  measured_at: string;
+}
+
+export interface ApprovalRecord {
+  gate: Gate;
+  approver?: string | null;
+  comment?: string | null;
+  preflight_verdict?: PreflightVerdict | null;
+  preflight_measured_at?: string | null;
+  at: string;
+}
+
+/** 승인 버튼을 누를 때 화면에 표시된 점검 결과입니다. 없으면 null 입니다. */
+export type DisplayedPreflight = { verdict: PreflightVerdict; measured_at: string } | null;
 
 export interface SelfHealingDiagnosis {
   category: string;
@@ -108,12 +143,19 @@ export const workflows = {
   list: () => call<RunStatus[]>(""),
   get: (runId: string) => call<RunStatus>(`/${encodeURIComponent(runId)}`),
   create: (req: MigrationRequest) => post<RunStatus>("", req),
-  approve: (runId: string, gate: Gate, comment?: string) =>
-    post<RunStatus>(`/${encodeURIComponent(runId)}/approve`, { gate, comment: comment || null }),
+  approve: (runId: string, gate: Gate, comment?: string, approver?: string, preflight?: DisplayedPreflight) =>
+    post<RunStatus>(`/${encodeURIComponent(runId)}/approve`, {
+      gate,
+      comment: comment || null,
+      approver: approver?.trim() || null,
+      preflight_verdict: preflight?.verdict ?? null,
+      preflight_measured_at: preflight?.measured_at ?? null,
+    }),
   abort: (runId: string, reason?: string) =>
     post<RunStatus>(`/${encodeURIComponent(runId)}/abort`, { reason: reason || null }),
   resume: (runId: string) => post<RunStatus>(`/${encodeURIComponent(runId)}/resume`),
   submitManual: (runId: string, stage: StageName, output: Record<string, unknown>, note?: string) =>
     post<RunStatus>(`/${encodeURIComponent(runId)}/stages/${stage}/manual`, { output, note: note || null }),
   getDiagnosis: (runId: string) => call<SelfHealingDiagnosis>(`/${encodeURIComponent(runId)}/diagnosis`),
+  getPreflight: (runId: string) => call<PreflightReport>(`/${encodeURIComponent(runId)}/preflight`),
 };

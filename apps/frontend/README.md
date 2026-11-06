@@ -24,7 +24,7 @@ pnpm dev            # http://localhost:3000
 
 - 모듈이 값을 주지 않으면 "미제공"으로 표시합니다. 0이나 성공으로 채우지 않습니다.
 - 수동으로 넘긴 단계는 `수동` 표시가 붙습니다.
-- 승인 ① 버튼: planning이 `approvable=false`를 주면 막고, 값이 없으면 경고와 함께 엽니다 (`lib/plan.ts`의 `canApprovePlan`, 팀 합의 전 기본값).
+- 승인 ① 버튼: planning이 `approvable=false`를 줘도 막지 않고 경고와 함께 엽니다. 값이 없을 때도 경고와 함께 엽니다 (`lib/plan.ts`의 `canApprovePlan`, PR #45 팀 합의).
 
 ## 구조
 
