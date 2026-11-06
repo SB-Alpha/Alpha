@@ -294,3 +294,42 @@ def test_report_after_abort_raises(db_path):
     engine.abort(run_id)
     with pytest.raises(RunAborted):
         StoreRunContext(store, run_id, StageName.DISCOVERY).report("running", 1)
+
+
+def test_report_after_success_updates_metrics_without_reopening_the_stage(db_path):
+    store = RunStore(db_path)
+    engine = Engine(store, {StageName.DISCOVERY: discovery_runner})
+    run_id = engine.create_run(REQUEST).run_id
+    before = engine.advance(run_id)
+
+    StoreRunContext(store, run_id, StageName.DISCOVERY).report("running", 7, {"lag": 3}, "복제 중")
+
+    after = engine.get(run_id)
+    stage = after.stage(StageName.DISCOVERY)
+    assert stage.state == WorkflowState.SUCCEEDED
+    assert stage.progress == 100
+    assert stage.metrics == {"tables": 1, "lag": 3}
+    assert stage.message == "복제 중"
+    assert after.state == before.state
+    assert after.updated_at == before.updated_at
+
+
+def test_report_after_failure_keeps_the_error_and_allows_resume(db_path):
+    def fails(run: RunStatus, ctx: RunContext) -> dict:
+        raise RuntimeError("원래 오류")
+
+    store = RunStore(db_path)
+    engine = Engine(store, {StageName.DISCOVERY: fails})
+    run_id = engine.create_run(REQUEST).run_id
+    before = engine.advance(run_id)
+    failed_message = before.stage(StageName.DISCOVERY).message
+
+    StoreRunContext(store, run_id, StageName.DISCOVERY).report("running", 7, {"lag": 3}, "복제 중")
+
+    after = engine.get(run_id)
+    stage = after.stage(StageName.DISCOVERY)
+    assert stage.state == WorkflowState.FAILED
+    assert stage.message == failed_message
+    assert stage.metrics == {"lag": 3}
+    assert after.updated_at == before.updated_at
+    assert engine.resume(run_id).state == WorkflowState.RUNNING

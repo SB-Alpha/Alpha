@@ -13,6 +13,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from .context import RunAborted
 from .engine import StageRunner
 from .prober import ProbedContext, prober_from_env
 from .schemas import RunContext, RunStatus, StageName
@@ -154,6 +155,23 @@ def run_provisioning(run: RunStatus, ctx: RunContext) -> Any:
     return res
 
 
+def _cdc_end_reason(result: Any) -> str:
+    """db_migration 이 끝난 이유. streaming 이후의 종료는 정상 흐름이 아니므로 항상 사유를 만듭니다."""
+    is_mapping = isinstance(result, Mapping)
+    state = result.get("state") if is_mapping else getattr(result, "state", None)
+    message = result.get("message") if is_mapping else getattr(result, "message", None)
+    return message or f"CDC 복제 작업이 끝났습니다 (상태: {state})"
+
+
+def _report_cdc_ended(ctx: RunContext, reason: str) -> None:
+    try:
+        ctx.report("running", 100, {"cdc_error": reason}, f"CDC 복제 중단: {reason}")
+    except RunAborted:
+        pass  # run 이 이미 중단됐으면 남길 것이 없습니다.
+    except Exception:
+        log.exception("CDC 종료를 기록하지 못했습니다")
+
+
 def run_db_migration(
     run: RunStatus,
     ctx: RunContext,
@@ -227,14 +245,27 @@ def run_db_migration(
                 if state in ("running", "waiting_approval", "paused"):
                     ctx.report(state, progress, metrics, message)
 
+    # runner 가 streaming 으로 먼저 반환한 뒤의 종료는 runner 가 처리할 수 없어 지표로 남깁니다.
+    handoff_lock = threading.Lock()
+    worker_done = [False]
+    runner_returned = [False]
+
     def _worker() -> None:
+        ended_with: str
         try:
             res = db_migration_service.run(inp, _ReportingProxy())
             result_holder.append(res)
+            ended_with = _cdc_end_reason(res)
         except Exception as exc:
             error_holder.append(exc)
+            ended_with = str(exc) or type(exc).__name__
         finally:
             ready_event.set()
+        with handoff_lock:
+            worker_done[0] = True
+            is_background = runner_returned[0]
+        if is_background and ctx is not None:
+            _report_cdc_ended(ctx, ended_with)
 
     thread = threading.Thread(target=_worker, daemon=True, name=f"cdc-runner-{job_id}")
     thread.start()
@@ -253,6 +284,10 @@ def run_db_migration(
             return res
 
         if ready_event.is_set():
+            with handoff_lock:
+                if worker_done[0]:
+                    continue  # 방금 끝났으면 위의 결과 처리로 돌아갑니다.
+                runner_returned[0] = True
             phase = latest_phase[0]
             if ctx is not None:
                 ctx.report("running", 100, latest_metrics, f"CDC 스트리밍 복제 중 ({phase})")

@@ -1,5 +1,7 @@
 import sqlite3
 import sys
+import threading
+import time
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -519,3 +521,120 @@ def test_simulated_cutover_does_not_probe(monkeypatch):
     monkeypatch.setattr("app.features.workflows.runners.prober_from_env", lambda: pytest.fail("프로버를 켜면 안 됩니다"))
     monkeypatch.setattr("app.features.workflows.runners._request_cutover", lambda *a: {"phase": "stabilizing"})
     assert run_cutover(None, ctx=None)["phase"] == "stabilizing"  # type: ignore[arg-type]
+
+
+WAIT_S = 5
+
+
+def _engine_through_cdc(tmp_path: Path, monkeypatch, cdc, app_deploy) -> Engine:
+    """실제 Engine 과 run_db_migration 을 쓰고, 클라우드에 닿는 단계만 바꿉니다."""
+    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
+    monkeypatch.delenv("ALPHA_CDC_SIMULATION", raising=False)
+    monkeypatch.setattr("app.features.db_migration.service.run", cdc, raising=False)
+    return Engine(
+        RunStore(tmp_path / "pipeline.sqlite3"),
+        {
+            StageName.DISCOVERY: lambda run, ctx: {},
+            StageName.PLANNING: lambda run, ctx: {"source": {"tables": ["public.users"]}, "plan": {}},
+            StageName.PROVISIONING: lambda run, ctx: {"target": {"project_id": "p-1"}},
+            StageName.DB_MIGRATION: lambda run, ctx: run_db_migration(run, ctx, poll_interval_s=0.01),
+            StageName.APP_DEPLOY: app_deploy,
+            StageName.CUTOVER: lambda run, ctx: {},
+        },
+    )
+
+
+def _advance_past_plan_approval(engine: Engine) -> str:
+    run_id = engine.create_run(REQUEST).run_id
+    engine.advance(run_id)
+    engine.approve(run_id, "plan")
+    return run_id
+
+
+def test_pipeline_reaches_cutover_gate_while_cdc_keeps_reporting(tmp_path, monkeypatch):
+    next_stage_started = threading.Event()
+    reported_after_finish = threading.Event()
+    run_finished = threading.Event()
+
+    def cdc(inp, proxy):
+        proxy.report("running", 50, {"phase": "streaming", "replication_lag_bytes": 10}, "복제 중")
+        assert next_stage_started.wait(WAIT_S)
+        proxy.report("running", 60, {"phase": "streaming", "replication_lag_bytes": 3}, "복제 중")
+        reported_after_finish.set()
+        run_finished.wait(WAIT_S)
+        return {"state": "stopped"}
+
+    def app_deploy(run, ctx):
+        next_stage_started.set()
+        assert reported_after_finish.wait(WAIT_S)
+        return {"healthy": True}
+
+    engine = _engine_through_cdc(tmp_path, monkeypatch, cdc, app_deploy)
+    run_id = _advance_past_plan_approval(engine)
+
+    final = engine.advance(run_id)
+    run_finished.set()
+
+    assert final.state == WorkflowState.WAITING_APPROVAL
+    assert final.waiting_gate == "cutover"
+    stage = final.stage(StageName.DB_MIGRATION)
+    assert stage.state == WorkflowState.SUCCEEDED
+    assert stage.metrics["replication_lag_bytes"] == 3
+
+
+def _ends_with_failed_result():
+    return SimpleNamespace(state="failed", message="커넥터 실패")
+
+
+def _ends_with_stopped_result():
+    return SimpleNamespace(state="stopped", message=None)
+
+
+def _ends_with_exception():
+    raise RuntimeError("커넥터 실패")
+
+
+@pytest.mark.parametrize(
+    "end_cdc",
+    [_ends_with_failed_result, _ends_with_stopped_result, _ends_with_exception],
+)
+def test_cdc_ending_after_stage_finished_is_reported_without_changing_run(tmp_path, monkeypatch, end_cdc):
+    next_stage_started = threading.Event()
+
+    def cdc(inp, proxy):
+        proxy.report("running", 50, {"phase": "streaming"}, "복제 중")
+        assert next_stage_started.wait(WAIT_S)
+        return end_cdc()
+
+    def app_deploy(run, ctx):
+        next_stage_started.set()
+        return {"healthy": True}
+
+    engine = _engine_through_cdc(tmp_path, monkeypatch, cdc, app_deploy)
+    run_id = _advance_past_plan_approval(engine)
+    final = engine.advance(run_id)
+
+    deadline = time.monotonic() + WAIT_S
+    stage = final.stage(StageName.DB_MIGRATION)
+    while "cdc_error" not in stage.metrics and time.monotonic() < deadline:
+        time.sleep(0.01)
+        stage = engine.get(run_id).stage(StageName.DB_MIGRATION)
+
+    assert stage.metrics["cdc_error"]
+    assert stage.state == WorkflowState.SUCCEEDED
+    assert engine.get(run_id).state == WorkflowState.WAITING_APPROVAL
+
+
+def test_cdc_failure_before_streaming_fails_the_stage_without_cdc_error(tmp_path, monkeypatch):
+    def cdc(inp, proxy):
+        return SimpleNamespace(state="failed", message="접속 실패")
+
+    engine = _engine_through_cdc(tmp_path, monkeypatch, cdc, lambda run, ctx: {})
+    run_id = _advance_past_plan_approval(engine)
+
+    final = engine.advance(run_id)
+
+    assert final.state == WorkflowState.FAILED
+    stage = final.stage(StageName.DB_MIGRATION)
+    assert "접속 실패" in stage.message
+    assert "cdc_error" not in stage.metrics
