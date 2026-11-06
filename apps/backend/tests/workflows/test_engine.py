@@ -294,3 +294,44 @@ def test_report_after_abort_raises(db_path):
     engine.abort(run_id)
     with pytest.raises(RunAborted):
         StoreRunContext(store, run_id, StageName.DISCOVERY).report("running", 1)
+
+
+def test_late_report_after_stage_succeeded_does_not_block_cutover(db_path):
+    # db_migration 은 CDC 스트리밍에 들어가면 성공으로 끝나지만, 뒤에서 스레드가 지표를 계속 보고합니다
+    store = RunStore(db_path)
+    engine = Engine(store, {
+        StageName.DISCOVERY: discovery_runner,
+        StageName.PLANNING: planning_runner,
+        StageName.PROVISIONING: ok_runner,
+        StageName.DB_MIGRATION: ok_runner,
+        StageName.APP_DEPLOY: ok_runner,
+        StageName.CUTOVER: ok_runner,
+    })
+    run_id = engine.create_run(REQUEST).run_id
+    engine.advance(run_id)
+    engine.approve(run_id, "plan")
+    assert engine.advance(run_id).waiting_gate == "cutover"
+
+    StoreRunContext(store, run_id, StageName.DB_MIGRATION).report("running", 40, {"lag_ms": 12}, "늦은 보고")
+
+    stage = engine.get(run_id).stage(StageName.DB_MIGRATION)
+    assert stage.state == WorkflowState.SUCCEEDED
+    assert stage.progress == 100
+    assert stage.message != "늦은 보고"
+    assert stage.metrics["lag_ms"] == 12  # 지표는 계속 화면에 보이게 합침
+    engine.approve(run_id, "cutover")
+    assert engine.advance(run_id).state == WorkflowState.SUCCEEDED
+
+
+def test_late_report_after_stage_failed_keeps_it_resumable(db_path):
+    def times_out(run: RunStatus, ctx: RunContext) -> dict:
+        raise TimeoutError("대기 시간 초과")
+
+    store = RunStore(db_path)
+    engine = Engine(store, {StageName.DISCOVERY: times_out})
+    run_id = engine.advance(engine.create_run(REQUEST).run_id).run_id
+
+    StoreRunContext(store, run_id, StageName.DISCOVERY).report("running", 70)  # 남아 있던 스레드
+
+    assert engine.get(run_id).stage(StageName.DISCOVERY).state == WorkflowState.FAILED
+    assert engine.resume(run_id).stage(StageName.DISCOVERY).state == WorkflowState.PENDING

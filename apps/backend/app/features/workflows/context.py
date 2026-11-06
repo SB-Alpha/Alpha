@@ -20,6 +20,10 @@ class RunAborted(BaseException):
 # 모듈이 보고할 수 있는 건 진행 중 상태뿐이며, 저장되는 단계 state 는 계속 running 입니다.
 _REPORTABLE = {WorkflowState.RUNNING, WorkflowState.WAITING_APPROVAL, WorkflowState.PAUSED}
 
+# 이미 끝난 단계. 단계가 끝난 뒤에도 보고를 계속 보내는 작업(예: db_migration 의 CDC 스레드)이 있어
+# 이 상태에서는 지표만 합치고 state·progress·message 는 그대로 둡니다.
+_FINISHED = {WorkflowState.SUCCEEDED, WorkflowState.FAILED, WorkflowState.ABORTED}
+
 
 def now() -> datetime:
     return datetime.now(timezone.utc)
@@ -65,6 +69,9 @@ class StoreRunContext:
             if run.state == WorkflowState.ABORTED:
                 raise RunAborted(self._run_id)
             current = run.stage(self._stage)
+            if current.state in _FINISHED:
+                # 끝난 단계를 running 으로 되돌리면 engine 이 다음 단계로 못 넘어가고 resume 도 막힙니다
+                return with_stage(run, self._stage, metrics={**current.metrics, **(metrics or {})})
             return with_stage(
                 run,
                 self._stage,
