@@ -170,3 +170,20 @@ def test_resume_steps_run_even_if_one_fails(setup, monkeypatch):
 
     assert "source_writes_unblocked_failed" in steps
     assert calls[-2:] == [("resume", "job01-sink"), ("worker", "release")]
+
+
+def test_cutover_errors_do_not_carry_the_password(setup, tmp_path, monkeypatch):
+    runner, calls = setup()
+    runner.settings.agent_secrets_dir.mkdir(exist_ok=True)
+    (tmp_path / "job01.properties").write_text("source.password=plain-pw-marker\n")
+    (runner.settings.agent_secrets_dir / "job01.properties").write_text("source.admin.password=admin-pw-marker\n")
+
+    def connect(ep):
+        raise RuntimeError("connection failed for plain-pw-marker and admin-pw-marker")
+
+    monkeypatch.setattr(jobs.db, "connect", connect)
+    runner._cutover("job01")
+    job = runner.store.get("job01")
+    shown = job.message + str(job.evidence["cutover"]["steps"])
+
+    assert "marker" not in shown and "connection failed" in shown

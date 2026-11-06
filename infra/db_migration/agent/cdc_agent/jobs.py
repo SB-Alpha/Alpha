@@ -14,7 +14,7 @@ from contextlib import contextmanager
 import httpx
 import psycopg
 
-from cdc_agent import db
+from cdc_agent import db, redact
 from cdc_agent.config import Settings, read_properties
 from cdc_agent.connect import ConnectClient, connector_error, connector_running, render
 from cdc_agent.models import TERMINAL_STATES, Job, now
@@ -74,6 +74,15 @@ class Runner:
         self.connect = ConnectClient(settings.connect_url)
         self._stop = threading.Event()
 
+    def error_text(self, job_id: str, exc: Exception) -> str:
+        """Error text that may leave this node: no password of this job, no known secret form."""
+        values: list[str] = []
+        for path in _secret_files(self.settings, job_id):
+            try:
+                values += [v for k, v in read_properties(path).items() if k.endswith(".password")]
+            except OSError:
+                continue
+        return redact.clean(str(exc), values)
 
     def start(self) -> None:
         threading.Thread(target=self._loop, name="reconcile", daemon=True).start()
@@ -139,9 +148,9 @@ class Runner:
             if latest is not None and latest.state not in TERMINAL_STATES:
                 if isinstance(exc, TEMPORARY_ERRORS) and latest.phase in WATCH_PHASES:
                     # Short VPN or Connect outage: the next tick retries.
-                    latest.metrics["measure_error"] = str(exc)
+                    latest.metrics["measure_error"] = self.error_text(job_id, exc)
                 else:
-                    latest.report(state="failed", message=f"{latest.phase}: {exc}")
+                    latest.report(state="failed", message=f"{latest.phase}: {self.error_text(job_id, exc)}")
                 self.store.put(latest)
 
     def _step(self, job: Job, creds: Credentials) -> None:
@@ -251,7 +260,7 @@ class Runner:
             job.metrics.update(self._metrics(job, creds, check))
             job.metrics.pop("measure_error", None)
         except Exception as exc:
-            job.metrics["measure_error"] = str(exc)
+            job.metrics["measure_error"] = self.error_text(job.job_id, exc)
         return job
 
 
@@ -320,15 +329,16 @@ class Runner:
                        message=f"전환 완료 ({ev['hold_ms']}ms), 안정화 관찰 중")
         except Exception as exc:
             log.exception("cutover %s failed", job_id)
-            step("failed", error=str(exc))
+            error = self.error_text(job_id, exc)
+            step("failed", error=error)
             if not switched:
                 # No write has reached the target yet: give writes back to the source.
                 self._resume_source(job, creds, worker, blocked, step)
                 job.report(state="waiting_approval", phase="cutover_ready", progress=70,
-                           message=f"전환 실패, 원본으로 재개: {exc}")
+                           message=f"전환 실패, 원본으로 재개: {error}")
             else:
                 # Target may already have writes: never go back automatically.
-                job.report(state="failed", message=f"목적지로 전환 후 오류, 수동 확인 필요: {exc}")
+                job.report(state="failed", message=f"목적지로 전환 후 오류, 수동 확인 필요: {error}")
         self.store.put(job)
 
     def _resume_source(self, job: Job, creds: Credentials, worker: WorkerClient, blocked: bool, step) -> None:
@@ -341,7 +351,7 @@ class Runner:
                 action()
                 step(name)
             except Exception as exc:
-                step(f"{name}_failed", error=str(exc))
+                step(f"{name}_failed", error=self.error_text(job.job_id, exc))
 
     def close(self, job: Job) -> None:
         creds = Credentials(self.settings, job)

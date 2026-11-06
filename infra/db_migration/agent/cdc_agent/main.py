@@ -120,7 +120,7 @@ def retry(job_id: str) -> Job:
     try:
         runner.restart_failed_connectors(job)
     except httpx.HTTPError as exc:
-        raise HTTPException(502, f"could not restart the connectors: {exc}") from exc
+        raise HTTPException(502, f"could not restart the connectors: {runner.error_text(job_id, exc)}") from exc
     job.report(state="running", message="재시도")
     store.put(job)
     return job
@@ -148,9 +148,10 @@ def abort(job_id: str) -> Job:
     except Exception as exc:
         log.exception("abort %s failed", job_id)
         job = load(job_id)
-        job.report(message=f"정리 실패, 다시 중단하세요: {exc}")
+        error = runner.error_text(job_id, exc)
+        job.report(message=f"정리 실패, 다시 중단하세요: {error}")
         store.put(job)
-        raise HTTPException(502, f"cleanup failed: {exc}") from exc
+        raise HTTPException(502, f"cleanup failed: {error}") from exc
 
 
 @app.put("/jobs/{job_id}/secrets")
