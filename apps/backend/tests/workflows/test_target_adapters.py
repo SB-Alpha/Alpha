@@ -191,3 +191,20 @@ def test_registering_an_adapter_routes_provisioning_without_runner_changes(tmp_p
     result = runners.run_provisioning(run, RecordingContext())
 
     assert result == {"run_id": run.run_id, "extra": {"sku": "Standard_B1ms"}}
+
+
+def test_target_infra_extra_params_rejects_nested_raw_secrets():
+    with pytest.raises(ValidationError) as exc:
+        TargetInfraConfig(provider="gcp", extra_params={"azure": {"client_secret": "plain-text-secret"}})
+    assert "extra_params.azure.client_secret" in str(exc.value)
+
+    with pytest.raises(ValidationError) as exc:
+        TargetInfraConfig(provider="gcp", extra_params={"items": [{"db_password": "plain"}]})
+    assert "extra_params.items[0].db_password" in str(exc.value)
+
+    # secret:// reference passes
+    cfg = TargetInfraConfig(
+        provider="gcp",
+        extra_params={"azure": {"client_secret": "secret://azure/cred"}, "items": [{"token": "secret://tok"}]},
+    )
+    assert cfg.extra_params["azure"]["client_secret"] == "secret://azure/cred"

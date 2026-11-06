@@ -216,7 +216,9 @@ class Engine:
             has_cleaned = self._abort_cleanup(run)
         except Exception as exc:
             logger.exception("abort cleanup failed for run %s", run_id)
-            self._finish_cleanup(run_id, "failed", f"복제 자원 정리 실패: {exc}"[:_MAX_ERROR_MESSAGE])
+            from .runners import scrub_sensitive_text
+            cleaned_err = scrub_sensitive_text(str(exc), fallback=type(exc).__name__)
+            self._finish_cleanup(run_id, "failed", f"복제 자원 정리 실패: {cleaned_err}"[:_MAX_ERROR_MESSAGE])
             return
         if has_cleaned:
             self._finish_cleanup(run_id, "done", "복제 자원 정리 완료")

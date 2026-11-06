@@ -41,6 +41,8 @@ def main() -> None:
     print(f"[*] Registering secrets with prefix: secret://{run_id}/...")
 
     # 1. AWS Cloud Credentials
+    if not (args.aws_key and args.aws_secret):
+        print("  [!] 안내: AWS 자격증명 미입력 상태입니다. 로컬 테스트용 더미 자격증명(AKIA_DUMMY_...)을 등록합니다.")
     aws_key = args.aws_key or "AKIA_DUMMY_KEY_FOR_LOCAL_TEST"
     aws_secret = args.aws_secret or "DUMMY_SECRET_KEY_FOR_LOCAL_TEST"
     put_secret(f"{run_id}/source-cloud", {
@@ -62,6 +64,7 @@ def main() -> None:
         with open(sa_path, encoding="utf-8") as f:
             sa_json = f.read()
     else:
+        print(f"  [!] 안내: GCP 서비스 계정 키 파일({sa_path})이 없어 로컬 테스트용 더미 계정으로 등록합니다.")
         sa_json = json.dumps({"type": "service_account", "project_id": os.getenv("GCP_PROJECT_ID", "local-test")})
     put_secret(f"{run_id}/target-cloud", {"credentials_json": sa_json})
     print(f"  [+] Registered: secret://{run_id}/target-cloud")

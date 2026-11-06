@@ -687,6 +687,19 @@ def test_failed_abort_cleanup_is_recorded_and_can_be_retried(db_path):
     assert len(attempts) == 2
 
 
+def test_cleanup_failure_scrubs_sensitive_details(db_path):
+    def cleanup(run: RunStatus) -> bool:
+        raise RuntimeError("failed to connect postgres://admin:supersecret@10.0.1.2:5432/db")
+
+    engine, run_id, _ = _aborted_run_with_cleanup(db_path, cleanup)
+    engine.run_abort_cleanup(run_id)
+    failed = engine.get(run_id)
+    assert failed.cleanup_state == "failed"
+    assert "supersecret" not in failed.cleanup_message
+    assert "10.0.1.2" not in failed.cleanup_message
+    assert "[숨김]" in failed.cleanup_message
+
+
 def test_cleanup_retry_is_refused_unless_it_failed(db_path):
     engine, run_id, _ = _aborted_run_with_cleanup(db_path, lambda run: True)
     with pytest.raises(InvalidTransition):

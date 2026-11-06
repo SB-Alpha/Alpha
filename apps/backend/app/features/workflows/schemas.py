@@ -92,10 +92,20 @@ class TargetInfraConfig(BaseModel):
     @field_validator("extra_params")
     @classmethod
     def _no_raw_secrets(cls, params: dict[str, Any]) -> dict[str, Any]:
-        for key, value in params.items():
-            is_reference = isinstance(value, str) and value.startswith("secret://")
-            if _SECRET_LIKE_PARAM.search(key) and not is_reference:
-                raise ValueError(f"extra_params.{key} 에는 원문 대신 secret:// 참조를 넣으세요")
+        def _check(val: Any, path: str) -> None:
+            if isinstance(val, Mapping):
+                for k, v in val.items():
+                    subpath = f"{path}.{k}"
+                    if _SECRET_LIKE_PARAM.search(str(k)):
+                        is_reference = isinstance(v, str) and v.startswith("secret://")
+                        if not is_reference:
+                            raise ValueError(f"{subpath} 에는 원문 대신 secret:// 참조를 넣으세요")
+                    _check(v, subpath)
+            elif isinstance(val, (list, tuple)):
+                for idx, item in enumerate(val):
+                    _check(item, f"{path}[{idx}]")
+
+        _check(params, "extra_params")
         return params
 
 

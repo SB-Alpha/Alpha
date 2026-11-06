@@ -163,11 +163,21 @@ def _ask_claude_healer(run: RunStatus, stage: StageName, error_msg: str) -> Self
 
     client = anthropic.Anthropic(timeout=TIMEOUT_SECONDS, max_retries=1)
 
+    from .runners import scrub_sensitive_text
+
     # 자격 증명 참조·호스트가 든 요청과 단계 출력은 외부 API 로 보내지 않습니다.
+    # 에러 및 단계 메시지의 URL, 패스워드, 호스트 등 민감 정보도 살균(scrub) 후 전송합니다.
     payload = {
         "failed_stage": stage.value,
-        "error_message": error_msg,
-        "stages": [{"stage": s.stage.value, "state": s.state.value, "message": s.message} for s in run.stages],
+        "error_message": scrub_sensitive_text(error_msg, fallback="오류 발생"),
+        "stages": [
+            {
+                "stage": s.stage.value,
+                "state": s.state.value,
+                "message": scrub_sensitive_text(s.message) if s.message else None,
+            }
+            for s in run.stages
+        ],
     }
 
     response = client.messages.parse(

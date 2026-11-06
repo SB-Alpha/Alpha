@@ -152,6 +152,28 @@ def test_ai_call_is_parsed_and_payload_has_no_request_or_outputs(monkeypatch):
     assert json.loads(content)["failed_stage"] == "provisioning"
 
 
+def test_ai_call_payload_scrubs_credentials_and_urls(monkeypatch):
+    monkeypatch.setenv("ALPHA_AI_ENABLED", "1")
+    seen = {}
+
+    def parse(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(parsed_output=AiDiagnosis(category="unknown", root_cause="원인", action_plan=["a", "b", "c"]))
+
+    fake = ModuleType("anthropic")
+    fake.Anthropic = lambda **_: SimpleNamespace(messages=SimpleNamespace(parse=parse))
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+
+    run = _sample_run(message="connection error postgresql://admin:secretpass@10.0.1.5:5432/mydb")
+    diag = diagnose_run(run)
+
+    assert diag.diagnosed_by == "ai"
+    content = json.loads(seen["messages"][0]["content"])
+    assert "secretpass" not in content["error_message"]
+    assert "10.0.1.5" not in content["error_message"]
+    assert "[숨김]" in content["error_message"]
+
+
 def test_diagnosis_endpoint_returns_report_for_failed_run(no_simulation, monkeypatch):
     monkeypatch.delenv("ALPHA_AI_ENABLED", raising=False)
     engine = SimpleNamespace(get=lambda run_id: _sample_run())

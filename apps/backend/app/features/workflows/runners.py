@@ -172,6 +172,12 @@ def _scrub_agent_text(value: Any) -> str | None:
     return text[:_MAX_AGENT_TEXT]
 
 
+def scrub_sensitive_text(value: Any, fallback: str = "상세 불명") -> str:
+    """오류 문구에서 URL, 패스워드, 토큰, IP 등 민감 접속 정보를 지웁니다."""
+    scrubbed = _scrub_agent_text(value)
+    return scrubbed if scrubbed else fallback
+
+
 def _without_raw_errors(metrics: Mapping[str, Any]) -> dict[str, Any]:
     """measure_error 는 예외 원문이고 화면이 쓰지 않으므로 넘기지 않습니다. 전환 전 점검은 에이전트에서 직접 읽습니다."""
     return {key: value for key, value in metrics.items() if key != "measure_error"}

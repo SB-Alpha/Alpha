@@ -111,11 +111,13 @@ flowchart LR
       "Sid": "AllowSTSAssumeRole",
       "Effect": "Allow",
       "Action": "sts:AssumeRole",
-      "Resource": "*"
+      "Resource": "arn:aws:iam::*:role/cloudmorph-*"
     }
   ]
 }
 ```
+> [!NOTE]
+> IAM Role 위임을 사용하지 않는 환경이라면 위의 `AllowSTSAssumeRole` 블록은 생략하셔도 무방합니다.
 
 6. 우측 하단 **[다음]** ➔ 정책 이름에 `CloudmorphAssessmentPolicy` 입력 ➔ **[정책 생성]** 클릭.
 7. 이전 브라우저 탭(사용자 생성 창)으로 돌아와서 검색창 옆 **새로고침 아이콘(↻)**을 누릅니다.
@@ -203,7 +205,7 @@ GCP에서는 모든 서버, DB, 설정이 **'프로젝트'**라는 하나의 울
 4. **2단계: 이 서비스 계정에 프로젝트 액세스 권한 부여 (역할)**:
    - 드롭다운에서 **[기본]** ➔ **[편집자 (Editor)]**를 선택합니다.
    > [!NOTE]
-   > 실습 환경에서는 '편집자(Editor)' 역할을 부여하면 마이그레이션에 필요한 VPC, Cloud SQL, Cloud Run을 모두 제어할 수 있어 가장 편리합니다.
+   > 빠른 실습 환경을 위해 '편집자(Editor)' 역할을 안내하고 있습니다. 프로덕션 환경에서는 Cloud Run 관리자, Cloud SQL 관리자, Secret Manager 접근자, 서비스 네트워킹 관리자 등 최소 권한 역할을 분리 부여하는 것을 권장합니다.
    - **[계속]** ➔ **[완료]** 클릭.
 
 ---
@@ -252,10 +254,10 @@ Cloudmorph 플랫폼은 보안을 위해 원본 AWS 비밀번호나 GCP 키를 �
 
 여러분을 위해 **원클릭 등록 스크립트**가 이미 준비되어 있습니다.
 
-터미널에서 아래 명령어를 한 번만 실행하시면 끝납니다:
+터미널에서 아래 명령어를 한 번만 실행하시면 끝납니다 (저장소 루트 기준):
 
 ```bash
-cd /Users/pj/dev/softbank-cloudmorph-next/apps/backend
+cd apps/backend
 uv run python scripts/register_secrets.py
 ```
 

@@ -49,7 +49,7 @@ function errorText(err: unknown): string {
     if (err.status === 404) return "에이전트에 이 작업이 없습니다. 복제가 아직 시작되지 않았을 수 있습니다.";
     if (err.status === 0 || err.status >= 500) return "CDC 에이전트에서 응답을 받지 못했습니다. 작업이 진행 중일 수 있으니 상태를 확인하세요.";
   }
-  return err instanceof Error ? err.message : String(err);
+  return "CDC 조작 중 오류가 발생했습니다. 잠시 후 다시 시도하거나 서버 로그를 확인하세요.";
 }
 
 /** run 상태 머신이 처리하지 못하는 경우를 위한 비상 조작입니다. 평소에는 접어 둡니다. */
