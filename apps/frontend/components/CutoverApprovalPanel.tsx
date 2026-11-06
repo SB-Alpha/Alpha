@@ -86,7 +86,7 @@ export function CutoverApprovalPanel({ runId, readiness, isBusy, isTrafficUncert
       <h3 className="text-lg font-semibold">{GATE_LABEL.cutover}</h3>
       <p className="mt-1 text-sm text-ink/70">
         {isTrafficUncertain
-          ? "지난 전환 결과를 확인하지 못했습니다. 승인하면 전환을 다시 요청합니다. 이미 시작된 전환이면 에이전트가 거절하고 결과만 확인합니다."
+          ? "지난 전환 결과를 확인하지 못했습니다. 승인하면 전환을 다시 요청합니다. 이미 시작된 전환이면 에이전트가 거절하고 결과만 확인합니다. 전환이 끝난 것을 확인했다면 승인 대신 아래 수동 입력에 확인 내용을 메모로 남겨 기록하세요."
           : "DB 동기화가 끝났습니다. 승인하면 요청 보류 → 최종 반영 확인 → 경로 변경 → 보류 해제 순서로 전환합니다."}
       </p>
 

@@ -17,9 +17,12 @@ _NOT_PROVIDED = "미제공"
 
 
 def _find_metric(run: RunStatus, key: str) -> Any:
-    """뒤 단계부터 찾습니다. 같은 키를 여러 단계가 보고하면 가장 최근 단계 값을 씁니다."""
+    """뒤 단계부터 찾습니다. 같은 키를 여러 단계가 보고하면 가장 최근 단계 값을 씁니다.
+
+    전환 단계 지표는 보지 않습니다. 지난 시도의 마지막 값이라 갱신되지 않아, 지금 값을 가리면 판정이 굳습니다.
+    """
     for stage in reversed(run.stages):
-        if key in stage.metrics:
+        if stage.stage != StageName.CUTOVER and key in stage.metrics:
             return stage.metrics[key]
     return None
 

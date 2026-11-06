@@ -85,6 +85,9 @@ def run(inp: <Module>Input, ctx: RunContext) -> <Module>Output: ...
 - `cutover_steps`: 에이전트 `evidence.cutover.steps` 의 `step`·`elapsed_ms`·`waited_ms`·`mismatch`·`error`(접속 정보를 가린 뒤 300자까지)만 옮깁니다. 진행 중과 실패 직전에도 보고합니다.
 - `cutover_sequence`·`cutover_sequence_missing`: 성공 시 순서 검증 결과(`VERIFIED`/`INCOMPLETE`)와 빠진 단계입니다. 증적이 없으면(시뮬레이터 포함) 단계 지표는 모두 "미제공" 입니다.
 - `cutover_outcome`: 처음 계약에 없던 값으로, 실패 직후 동작과 화면의 복귀 안내를 정하려고 workflows 가 추가했습니다. `not_started`(전환이 시작되지 않음), `rolled_back`(원본으로 복귀함), `unknown`(결과 불명), `post_switch_failed`(경로를 바꾼 뒤 오류), `switched`(전환 완료) 중 하나입니다.
+  - `rolled_back` 은 에이전트 보고만으로 쓰지 않습니다. 복귀 단계에 실패가 없고, Worker 상태가 `mode`·`next_origin` 모두 `SOURCE` 일 때만 씁니다. `WORKER_URL` 이 없거나 읽지 못하면 `unknown` 입니다. 전환 요청 응답을 잃은 경우도 `unknown` 입니다.
+  - 결과를 모르는데 트래픽이 원본이라고 확인되지 않으면 중단 뒤 복제 자원을 자동으로 정리하지 않습니다.
+  - 불확실한 결과로 승인 ② 대기에 돌아오면, 승인 조건이 막아도 메모를 남겨 `cutover` 를 수동 입력으로 기록할 수 있습니다. 전환을 다시 요청하지 않습니다.
 - `failed_requests`·`probe_*`: `ALPHA_PROBE_URL`(Worker 공개 주소)이 있으면 전환 중 프로버가 GET 으로 실측합니다. 응답 코드 400 이상, 연결 실패, 시간 초과를 실패로 셉니다. 읽기만 잽니다. 주소가 없으면 "미제공" 입니다. 시뮬레이션에서는 프로버를 켜지 않으며, 시뮬레이터가 보낸 값이 그대로 보이고 화면에 시뮬레이션으로 표시합니다. 에이전트 loadcheck 결과를 이 값으로 보고할지는 미정입니다 (박준서).
 - `write_requests`·`write_failed_requests`: `WORKER_URL` 이 있으면 전환 뒤 Worker 의 `request_counts` 에서 읽습니다. 보류 시작부터 끝난 실제 쓰기 요청을 세며, 원본 5xx·연결 실패가 실패입니다. 집계가 이번 보류의 것이 아니면(Worker 객체 재시작 등) 보고하지 않습니다.
 - 에이전트 오류 문구: 단계 `error`, 전환 단계 메시지, `cdc_error` 는 저장 전에 주소·포트·사용자·비밀번호·토큰을 가리고 300자로 자릅니다. `measure_error` 는 예외 원문이고 화면이 쓰지 않아 cutover·db_migration 지표로 넘기지 않습니다. 실시간 점검은 이 값을 에이전트에서 직접 읽습니다.

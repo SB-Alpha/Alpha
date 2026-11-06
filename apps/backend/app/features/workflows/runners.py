@@ -267,22 +267,57 @@ def _outcome_if_not_started(run: RunStatus) -> str:
     return "not_started" if prior is None or prior in CUTOVER_ON_SOURCE else prior
 
 
-def _post_cutover(agent: Any, ctx: RunContext, job_id: str, approved_by: str, not_started: str) -> bool:
-    """전환을 요청합니다. 이미 시작했거나 준비 전이라 에이전트가 409 로 거절하면 True 입니다."""
+def _read_worker_status() -> Mapping[str, Any] | None:
+    """Worker 의 지금 상태입니다. 설정이 없거나 읽지 못하면 None 입니다."""
+    try:
+        worker = _cutover_worker()
+        status = worker.status() if worker is not None else None
+    except Exception as exc:
+        log.warning("Worker 상태를 읽지 못했습니다 (%s)", type(exc).__name__)
+        return None
+    return status if isinstance(status, Mapping) else None
+
+
+def _worker_confirms_source() -> bool:
+    """트래픽이 원본에 있다고 Worker 가 직접 말할 때만 True 입니다."""
+    status = _read_worker_status()
+    return status is not None and status.get("mode") == "SOURCE" and status.get("next_origin") == "SOURCE"
+
+
+def _rollback_outcome(job: Mapping[str, Any]) -> str:
+    """에이전트가 롤백을 보고해도 복귀 단계가 실패했거나 Worker 가 원본을 확인하지 않으면 unknown 입니다.
+
+    경로 변경 응답만 잃으면 에이전트는 경로가 바뀐 줄 모른 채 cutover_ready 를 보고합니다. 이때 안전하다고
+    표시하면 운영자가 중단해 복제를 지울 수 있습니다.
+    """
+    try:
+        steps = _cutover_steps(job.get("evidence")) or []
+        if any(step["step"].endswith("_failed") for step in steps):
+            return "unknown"
+    except Exception as exc:
+        log.warning("복귀 단계를 확인하지 못했습니다 (%s)", type(exc).__name__)
+        return "unknown"
+    return "rolled_back" if _worker_confirms_source() else "unknown"
+
+
+def _post_cutover(agent: Any, ctx: RunContext, job_id: str, approved_by: str, not_started: str) -> str:
+    """전환을 요청합니다. accepted(접수), refused(409 거절), lost(응답을 잃어 닿았는지 모름) 중 하나입니다."""
     from app.features.db_migration.client import AgentError
 
     try:
         agent.cutover(job_id, approved_by=approved_by)
     except AgentError as exc:
         if exc.status_code == 409:
-            return True
+            return "refused"
         if exc.status_code < 500:
             ctx.report("running", 10, {CUTOVER_OUTCOME: not_started})
             raise RuntimeError(f"에이전트가 전환 요청을 거부했습니다 (HTTP {exc.status_code})") from None
         log.warning("컷오버 요청 응답 오류, 상태로 판정합니다 (HTTP %s)", exc.status_code)
+        return "lost"
     except Exception as exc:  # 응답만 잃었을 수 있으므로 실패로 치지 않고 상태를 봅니다.
         log.warning("컷오버 요청 응답을 받지 못했습니다, 상태로 판정합니다 (%s)", type(exc).__name__)
-    return False
+        return "lost"
+    return "accepted"
 
 
 def _job_progress(job: Mapping[str, Any]) -> int:
@@ -412,6 +447,11 @@ def clean_up_cdc(run: RunStatus) -> bool:
     # 에이전트는 전환 이후의 정리를 거부합니다. 그 상태로 stop 하면 VPN 만 지워져 원본 슬롯을 지울 길이 끊깁니다.
     if job is not None and job.get("phase") in _PAST_CUTOVER_PHASES:
         raise RuntimeError("전환을 시작한 작업은 자동으로 정리하지 않습니다. 트래픽과 데이터를 확인한 뒤 처리하세요")
+
+    # 에이전트 단계만 믿지 않습니다. 트래픽이 목적지에 있으면 복제를 지우는 순간 되돌릴 길이 없어집니다.
+    outcome = run.stage(StageName.CUTOVER).metrics.get(CUTOVER_OUTCOME)
+    if outcome is not None and outcome not in CUTOVER_ON_SOURCE and not _worker_confirms_source():
+        raise RuntimeError("트래픽이 목적지로 넘어갔을 수 있어 자동으로 정리하지 않습니다. Worker 상태와 데이터를 확인한 뒤 처리하세요")
 
     db_migration_service.stop(run.run_id, agent=agent)
     return True
@@ -618,7 +658,18 @@ def run_cutover(
         time.sleep(probe_settle_s)  # 전환 직후 요청까지 측정에 포함합니다.
         return job
     finally:
-        measured.finish(_write_request_metrics(worker, _cutover_job_id(run)) if worker is not None else None)
+        _finish_measurement(measured, worker, run)
+
+
+def _finish_measurement(measured: ProbedContext, worker: Any, run: RunStatus) -> None:
+    """측정 마무리에 실패해도 끝난 전환의 결과를 바꾸지 않습니다. 프로버는 finish 에서 항상 멈춥니다."""
+    extra = _write_request_metrics(worker, _cutover_job_id(run)) if worker is not None else None
+    try:
+        measured.finish(extra)
+    except RunAborted:
+        raise
+    except Exception as exc:
+        log.warning("전환 측정값을 남기지 못했습니다 (%s)", type(exc).__name__)
 
 
 def _cutover_job_id(run: RunStatus) -> str:
@@ -641,12 +692,12 @@ def _cutover_worker() -> Any:
 
 def _write_request_metrics(worker: Any, job_id: str) -> dict[str, Any]:
     """보류 시작부터 Worker 가 센 쓰기 요청. 이번 보류의 집계라고 확인되지 않으면 보고하지 않습니다."""
-    from app.features.provisioning.terraform import ProvisioningError
-
     try:
         status = worker.status()
-    except ProvisioningError as exc:
-        log.warning("Worker 상태를 읽지 못해 쓰기 실패 수를 생략합니다 (%s)", exc)
+    except Exception as exc:
+        log.warning("Worker 상태를 읽지 못해 쓰기 실패 수를 생략합니다 (%s)", type(exc).__name__)
+        return {}
+    if not isinstance(status, Mapping):
         return {}
     counts = status.get("request_counts")
     hold_started_at = status.get("hold_started_at")
@@ -656,7 +707,7 @@ def _write_request_metrics(worker: Any, job_id: str) -> dict[str, Any]:
         and hold_started_at is not None
         and counts.get("since") == hold_started_at
     )
-    if not is_this_hold:
+    if not is_this_hold or not (_is_number(counts.get("write_total")) and _is_number(counts.get("write_failed"))):
         return {}
     return {"write_requests": counts["write_total"], "write_failed_requests": counts["write_failed"]}
 
@@ -689,7 +740,7 @@ def _request_cutover(
 
     agent = CdcAgentClient(settings)
     ctx.report("running", 10, {CUTOVER_OUTCOME: "unknown"})
-    was_refused = _post_cutover(agent, ctx, job_id, _cutover_approver(run), not_started)
+    post = _post_cutover(agent, ctx, job_id, _cutover_approver(run), not_started)
 
     start_t = time.monotonic()
     while True:
@@ -711,12 +762,16 @@ def _request_cutover(
             return job
 
         # 2. 롤백 상태 (전환 실패 후 원본 복귀)
-        if state == "waiting_approval" or phase == "cutover_ready":
-            ctx.report("running", _job_progress(job), {**metrics, CUTOVER_OUTCOME: "rolled_back"})
-            raise RuntimeError(f"컷오버 실패로 원본으로 롤백되었습니다: {msg or '상세 불명'}")
+        # 요청 응답을 잃었으면 아직 처리 전일 수 있어 롤백으로 보지 않고 계속 봅니다. 끝까지 모르면 unknown 입니다.
+        if (state == "waiting_approval" or phase == "cutover_ready") and post != "lost":
+            outcome = _rollback_outcome(job)
+            ctx.report("running", _job_progress(job), {**metrics, CUTOVER_OUTCOME: outcome})
+            if outcome == "rolled_back":
+                raise RuntimeError(f"컷오버 실패로 원본으로 롤백되었습니다: {msg or '상세 불명'}")
+            raise RuntimeError(f"에이전트가 원본 복귀를 보고했지만 확인하지 못했습니다: {msg or '상세 불명'}")
 
         # 3. 거절됐고 전환 단계도 아니면 이번 요청으로 시작된 전환이 없습니다.
-        if was_refused and job and phase != "cutover":
+        if post == "refused" and job and phase != "cutover":
             ctx.report("running", _job_progress(job), {**metrics, CUTOVER_OUTCOME: not_started})
             raise RuntimeError(f"에이전트가 전환 요청을 거부했습니다 ({state}/{phase}): {msg or '상세 불명'}")
 

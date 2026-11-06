@@ -6,6 +6,7 @@ import threading
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from functools import partial
+from http.client import IncompleteRead
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -16,7 +17,8 @@ from fastapi.testclient import TestClient
 from app.features.db_migration.client import AgentError
 from app.features.db_migration.guide_workflow import to_job_id
 from app.features.provisioning.schemas import ProvisioningInput
-from app.features.workflows.engine import Engine
+from app.features.workflows.engine import Engine, InvalidTransition
+from app.features.workflows.readiness import cutover_readiness
 from app.features.workflows.router import get_engine, get_preflight
 from app.features.workflows.runners import CUTOVER_SEQUENCE, RUNNERS, run_cutover
 from app.features.workflows.schemas import (
@@ -132,6 +134,8 @@ def world(monkeypatch) -> Iterator[SimpleNamespace]:
             return job
 
     monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", FakeAgent)
+    # 롤백 시험의 기본값은 Worker 가 원본을 확인한 경우입니다.
+    monkeypatch.setattr("app.features.workflows.runners._read_worker_status", lambda: CONFIRMED_ON_SOURCE)
     try:
         yield state
     finally:
@@ -900,3 +904,265 @@ def test_old_approval_rows_load_without_a_condition_decision():
     record = ApprovalRecord.model_validate({"gate": "cutover", "at": MEASURED_AT})
 
     assert record.readiness_decision is None
+
+
+# -- 리뷰에서 재현된 문제: 원본 복귀가 확인되지 않으면 rolled_back 으로 쓰지 않습니다 --------------
+
+
+CONFIRMED_ON_SOURCE = {"mode": "SOURCE", "next_origin": "SOURCE"}
+
+
+@pytest.fixture
+def worker_status(monkeypatch):
+    """Worker 가 돌려줄 상태입니다. None 이면 읽지 못한 경우입니다."""
+    holder = SimpleNamespace(value=CONFIRMED_ON_SOURCE)
+    monkeypatch.setattr("app.features.workflows.runners._read_worker_status", lambda: holder.value)
+    return holder
+
+
+def test_confirmed_rollback_is_rolled_back(fast, world, worker_status):
+    _, run = _approve_cutover(fast, [ROLLED_BACK], world)
+
+    assert _outcome(run) == "rolled_back"
+    assert "cutover" not in run.approvals
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        {"mode": "TARGET", "next_origin": "TARGET"},  # 경로 변경 응답만 잃고 release 가 목적지로 보낸 경우
+        {"mode": "HOLD", "next_origin": "SOURCE"},
+        {"mode": "SOURCE", "next_origin": "TARGET"},
+        {},
+        None,
+    ],
+    ids=["on-target", "still-held", "source-but-next-target", "no-fields", "unreadable"],
+)
+def test_rollback_report_without_worker_confirmation_is_unknown(fast, world, worker_status, status):
+    worker_status.value = status
+
+    _, run = _approve_cutover(fast, [ROLLED_BACK], world)
+
+    assert _outcome(run) == "unknown"
+    assert run.approvals == ["plan", "cutover"]  # 사람이 확인한 뒤 완료를 기록할 수 있어야 합니다
+    assert "수동 확인 필요" in run.message
+    assert "롤백되었습니다" not in (run.stage(StageName.CUTOVER).message or "")
+
+
+def test_rollback_with_a_failed_resume_step_is_unknown(fast, world, worker_status):
+    steps = [{"step": "failed", "error": "x"}, {"step": "source_writes_unblocked_failed", "error": "y"}]
+
+    _, run = _approve_cutover(fast, [{**ROLLED_BACK, "evidence": {"cutover": {"steps": steps}}}], world)
+
+    assert _outcome(run) == "unknown"
+
+
+@pytest.mark.parametrize("error", [httpx.ReadTimeout("lost"), AgentError(502, "bad gateway")], ids=["timeout", "502"])
+def test_lost_post_with_job_still_ready_is_not_a_rollback(fast, world, worker_status, error):
+    world.cutover_error = error
+
+    _, run = _approve_cutover(fast, [ROLLED_BACK], world)
+
+    assert _outcome(run) == "unknown"
+    assert run.approvals == ["plan", "cutover"]
+
+
+def test_lost_post_that_then_switches_still_succeeds(fast, world, worker_status):
+    world.cutover_error = httpx.ReadTimeout("lost")
+
+    _, run = _approve_cutover(fast, [ROLLED_BACK, STABILIZED], world)
+
+    assert run.state == WorkflowState.SUCCEEDED
+    assert _outcome(run) == "switched"
+
+
+def _uncertain_at_gate(fast, world):
+    """시간 초과로 결과를 모른 채 재개해 승인 ② 대기로 돌아온 run 입니다."""
+    run_id, run = _approve_cutover(fast, [LOST], world)
+    assert _outcome(run) == "unknown"
+    fast.resume(run_id)
+    run = fast.advance(run_id)
+    assert run.waiting_gate == "cutover"
+    return run_id
+
+
+def test_uncertain_outcome_has_a_recording_exit_even_when_conditions_fail(fast, world):
+    from app.features.workflows.context import with_stage
+
+    run_id = _uncertain_at_gate(fast, world)
+    fast._store.update(run_id, lambda r: with_stage(r, StageName.DB_MIGRATION, metrics={"cdc_error": "끝남"}))
+    with pytest.raises(InvalidTransition):
+        fast.approve(run_id, "cutover", acknowledge_unknown=True)
+    calls_before = len(world.cutover_calls)
+
+    fast.submit_manual(run_id, StageName.CUTOVER, ManualStageInput(output={"checked": True}, note="에이전트에서 전환 완료 확인"))
+    run = fast.advance(run_id)
+
+    assert run.state == WorkflowState.SUCCEEDED
+    assert run.stage(StageName.CUTOVER).manual is True
+    assert len(world.cutover_calls) == calls_before  # 기록만 하고 전환을 다시 요청하지 않습니다
+
+
+def test_recording_exit_needs_a_note(fast, world):
+    run_id = _uncertain_at_gate(fast, world)
+
+    with pytest.raises(InvalidTransition):
+        fast.submit_manual(run_id, StageName.CUTOVER, ManualStageInput(output={"checked": True}))
+
+
+def test_recording_exit_is_refused_when_traffic_is_on_the_source(fast, world, worker_status):
+    run_id, _ = _approve_cutover(fast, [ROLLED_BACK], world)
+    fast.resume(run_id)
+    assert fast.advance(run_id).waiting_gate == "cutover"
+
+    with pytest.raises(InvalidTransition):
+        fast.submit_manual(run_id, StageName.CUTOVER, ManualStageInput(output={"checked": True}, note="확인"))
+
+
+def test_recording_exit_is_refused_on_a_first_attempt(fast, world):
+    run_id = _to_cutover_gate(fast)
+
+    with pytest.raises(InvalidTransition):
+        fast.submit_manual(run_id, StageName.CUTOVER, ManualStageInput(output={"checked": True}, note="확인"))
+
+
+def test_stale_lag_from_a_cutover_attempt_does_not_block_approval(fast, world, worker_status):
+    from app.features.workflows.context import with_stage
+
+    job = {**ROLLED_BACK, "metrics": {"replication_lag_bytes": 2 * 1024 * 1024}}
+    run_id, _ = _approve_cutover(fast, [job], world)
+    fast.resume(run_id)
+    fast.advance(run_id)
+    fast._store.update(run_id, lambda r: with_stage(r, StageName.DB_MIGRATION, metrics={"replication_lag_bytes": 0}))
+
+    lag = next(c for c in cutover_readiness(fast.get(run_id)).checks if c.id == "lag")
+
+    assert lag.status == "pass"
+
+
+def test_lag_growing_after_a_cutover_attempt_still_blocks_approval(fast, world, worker_status):
+    from app.features.workflows.context import with_stage
+
+    job = {**ROLLED_BACK, "metrics": {"replication_lag_bytes": 0}}
+    run_id, _ = _approve_cutover(fast, [job], world)
+    fast.resume(run_id)
+    fast.advance(run_id)
+    fast._store.update(
+        run_id, lambda r: with_stage(r, StageName.DB_MIGRATION, metrics={"replication_lag_bytes": 50 * 1024 * 1024})
+    )
+
+    with pytest.raises(InvalidTransition):
+        fast.approve(run_id, "cutover", acknowledge_unknown=True)
+
+
+@pytest.mark.parametrize("outcome", ["unknown", "post_switch_failed", "switched"])
+def test_cleanup_refuses_when_traffic_may_have_moved(monkeypatch, tmp_path, world, fast, outcome):
+    from app.features.workflows.context import with_stage
+    from app.features.workflows.runners import clean_up_cdc
+
+    monkeypatch.setattr("app.features.workflows.runners._read_worker_status", lambda: {"mode": "TARGET", "next_origin": "TARGET"})
+    stopped = []
+    monkeypatch.setattr("app.features.db_migration.service.stop", lambda run_id, agent=None: stopped.append(run_id))
+    world.jobs = [{"state": "waiting_approval", "phase": "cutover_ready"}]
+    run_id = _to_cutover_gate(fast)
+    fast._store.update(run_id, lambda r: with_stage(r, StageName.CUTOVER, metrics={"cutover_outcome": outcome}))
+
+    with pytest.raises(RuntimeError, match="목적지"):
+        clean_up_cdc(fast.get(run_id))
+
+    assert stopped == []
+
+
+def test_cleanup_proceeds_when_worker_confirms_the_source(monkeypatch, world, fast):
+    from app.features.workflows.context import with_stage
+    from app.features.workflows.runners import clean_up_cdc
+
+    monkeypatch.setattr("app.features.workflows.runners._read_worker_status", lambda: CONFIRMED_ON_SOURCE)
+    stopped = []
+    monkeypatch.setattr("app.features.db_migration.service.stop", lambda run_id, agent=None: stopped.append(run_id))
+    world.jobs = [{"state": "waiting_approval", "phase": "cutover_ready"}]
+    run_id = _to_cutover_gate(fast)
+    fast._store.update(run_id, lambda r: with_stage(r, StageName.CUTOVER, metrics={"cutover_outcome": "unknown"}))
+
+    assert clean_up_cdc(fast.get(run_id)) is True
+    assert stopped == [run_id]
+
+
+class _RaisingWorker:
+    def __init__(self, status):
+        self._status = status
+
+    def status(self):
+        if isinstance(self._status, Exception):
+            raise self._status
+        return self._status
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        IncompleteRead(b""),
+        "not an object",
+        {"run_id": "x", "hold_started_at": "t", "request_counts": {"since": "t"}},
+        {"run_id": "x", "hold_started_at": "t", "request_counts": {"since": "t", "write_total": "many", "write_failed": 0}},
+    ],
+    ids=["incomplete-read", "non-object", "missing-counts", "non-numeric-counts"],
+)
+def test_worker_count_failure_never_fails_a_finished_switch_and_stops_the_prober(fast, world, monkeypatch, status):
+    stopped = []
+
+    class Prober:
+        def start(self):
+            pass
+
+        def snapshot(self):
+            return {}
+
+        def stop(self):
+            stopped.append(True)
+            return {}
+
+    monkeypatch.setattr("app.features.workflows.runners.prober_from_env", lambda: Prober())
+    monkeypatch.setattr("app.features.workflows.runners._cutover_worker", lambda: _RaisingWorker(status))
+    monkeypatch.setattr("app.features.workflows.runners.PROBE_SETTLE_S", 0.0)
+    monkeypatch.setattr("app.features.workflows.runners.time.sleep", lambda _s: None)
+
+    _, run = _approve_cutover(fast, [STABILIZED], world)
+
+    assert run.state == WorkflowState.SUCCEEDED
+    assert _outcome(run) == "switched"
+    assert stopped == [True]
+    assert "write_requests" not in run.stage(StageName.CUTOVER).metrics
+
+
+def test_failing_final_report_does_not_fail_a_finished_switch(monkeypatch):
+    from app.features.workflows import runners
+
+    class Prober:
+        def start(self):
+            pass
+
+        def snapshot(self):
+            return {}
+
+        def stop(self):
+            return {}
+
+    class Ctx:
+        calls = 0
+
+        def report(self, state, progress, metrics=None, message=None):
+            pass
+
+    monkeypatch.setattr(runners, "prober_from_env", lambda: Prober())
+    monkeypatch.setattr(runners, "_cutover_worker", lambda: None)
+    monkeypatch.setattr(runners, "_agent_is_simulated", lambda: False)
+    monkeypatch.setattr(runners, "_request_cutover", lambda *a: {"state": "running", "phase": "stabilizing"})
+    monkeypatch.setattr(
+        runners.ProbedContext, "finish", lambda self, extra=None: (_ for _ in ()).throw(ValueError("store down"))
+    )
+
+    job = runners.run_cutover(SimpleNamespace(run_id="mig-1"), Ctx(), probe_settle_s=0)
+
+    assert job["phase"] == "stabilizing"
+

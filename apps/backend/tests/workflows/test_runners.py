@@ -34,6 +34,16 @@ from app.features.workflows.schemas import (
 )
 from app.features.workflows.store import RunStore
 
+
+@pytest.fixture(autouse=True)
+def worker_confirms_source(monkeypatch):
+    """롤백 시험의 기본값은 Worker 가 원본을 확인한 경우입니다. 확인하지 못한 경우는 test_cutover_flow 에 있습니다."""
+    monkeypatch.setattr(
+        "app.features.workflows.runners._read_worker_status",
+        lambda: {"mode": "SOURCE", "next_origin": "SOURCE"},
+    )
+
+
 REQUEST = MigrationRequest(
     github_repo_url="https://github.com/example/target-app",
     aws_region="ap-northeast-2",

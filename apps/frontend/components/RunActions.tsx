@@ -27,10 +27,12 @@ export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, 
   const requiredGate = run.current_stage ? GATE_BEFORE[run.current_stage] : undefined;
   // 승인이 없는 단계의 수동 입력은 백엔드가 항상 거절합니다. 승인이 남아 있으면 결과 불명 전환을 완료로 기록하는 길입니다.
   const isManualRefused = requiredGate !== undefined && !run.approvals.includes(requiredGate);
-  const canManual = (run.state === "paused" || run.state === "failed") && !isManualRefused;
   const isWaitingCutover = run.state === "waiting_approval" && run.waiting_gate === "cutover";
   const isCutoverFailed = run.state === "failed" && run.stages.some((s) => s.stage === "cutover" && s.state === "failed");
   const isTrafficUncertain = needsManualCheck(run);
+  // 결과를 모르는 전환은 승인 조건이 막아도 사람이 확인한 결과를 기록할 수 있습니다. 전환을 다시 요청하지 않습니다.
+  const canRecordUncertain = isWaitingCutover && isTrafficUncertain;
+  const canManual = canRecordUncertain || ((run.state === "paused" || run.state === "failed") && !isManualRefused);
   // 전환 후 오류는 에이전트가 다시 받지 않으므로 재시도할 수 없습니다. 수동 입력이나 중단만 남습니다.
   const canResume = run.state === "failed" && !(isCutoverFailed && cutoverOutcome(run) === "post_switch_failed");
 

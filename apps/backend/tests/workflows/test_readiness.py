@@ -106,7 +106,12 @@ def test_a_numeric_string_counts_as_a_number():
 def test_the_latest_stage_report_wins():
     run = make_run({**GOOD_METRICS, "phase": "streaming", "mismatch": 2})
     assert check(run, "mismatch").status == "fail"
-    assert check(with_stage(run, StageName.CUTOVER, metrics={"mismatch": 0}), "mismatch").status == "pass"
+    assert check(with_stage(run, StageName.APP_DEPLOY, metrics={"mismatch": 0}), "mismatch").status == "pass"
+
+
+def test_metrics_from_a_past_cutover_attempt_are_ignored():
+    run = make_run({**GOOD_METRICS, "phase": "streaming", "mismatch": 2})
+    assert check(with_stage(run, StageName.CUTOVER, metrics={"mismatch": 0}), "mismatch").status == "fail"
 
 
 def test_app_health_follows_the_deploy_result():

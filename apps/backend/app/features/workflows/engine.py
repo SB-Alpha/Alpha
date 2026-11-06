@@ -86,6 +86,14 @@ def _require_cutover_ready(run: RunStatus, acknowledge_unknown: bool) -> Cutover
     return readiness.decision
 
 
+def _is_uncertain_cutover_gate(run: RunStatus, stage: StageName) -> bool:
+    """결과를 모르는 전환 뒤 승인 ② 대기로 돌아온 상태입니다. 승인 조건이 막아도 기록할 길이 있어야 합니다."""
+    if stage != StageName.CUTOVER or run.state != WorkflowState.WAITING_APPROVAL or run.waiting_gate != "cutover":
+        return False
+    outcome = run.stage(StageName.CUTOVER).metrics.get(CUTOVER_OUTCOME)
+    return outcome is not None and outcome not in CUTOVER_ON_SOURCE
+
+
 class Engine:
     def __init__(
         self,
@@ -227,15 +235,18 @@ class Engine:
 
         def change(run: RunStatus) -> RunStatus:
             # 등록된 모듈이 돌 차례(pending·running)에 끼어들지 않도록 멈춘 run 에만 받습니다.
-            if run.state not in _MANUAL_ALLOWED:
+            is_uncertain = _is_uncertain_cutover_gate(run, stage)
+            if run.state not in _MANUAL_ALLOWED and not is_uncertain:
                 raise InvalidTransition(f"지금은 수동 입력을 받을 수 없습니다 (현재 {run.state.value})")
+            if is_uncertain and not (payload.note or "").strip():
+                raise InvalidTransition("결과를 모르는 전환을 기록하려면 확인한 내용을 메모로 남겨야 합니다")
             expected = next_stage(run)
             if stage != expected:
                 raise InvalidTransition(f"지금 입력할 수 있는 단계는 {expected.value if expected else '없음'} 입니다")
             if run.stage(stage).state == WorkflowState.RUNNING:
                 raise InvalidTransition(f"{stage.value} 단계가 실행 중입니다")
             gate = GATE_BEFORE.get(stage)
-            if gate and gate not in run.approvals:
+            if gate and gate not in run.approvals and not is_uncertain:
                 raise InvalidTransition(f"{GATE_LABEL[gate]} 전에는 {stage.value} 결과를 넣을 수 없습니다")
             note = f": {payload.note}" if payload.note else ""
             updated = with_stage(
@@ -249,6 +260,7 @@ class Engine:
             return updated.model_copy(
                 update={
                     "state": WorkflowState.RUNNING,
+                    "waiting_gate": None,
                     "outputs": {**run.outputs, stage.value: payload.output},
                     "message": f"{stage.value} 수동 입력",
                 }
