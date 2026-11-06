@@ -49,8 +49,17 @@ def run(inp: <Module>Input, ctx: RunContext) -> <Module>Output: ...
 | POST | `/runs/{id}/abort` | 중단 (`{"reason": ...}` 선택) |
 | POST | `/runs/{id}/resume` | 실패한 단계 재시도·끊긴 진행 재개 |
 | POST | `/runs/{id}/stages/{stage}/manual` | 다음 차례 단계 결과를 수동 입력 (`{"output": {...}}`) |
+| GET·POST | `/runs/{id}/diagnosis`, `/runs/{id}/diagnose` | 실패한 run 의 원인·복구 조치. 실패가 아니면 `409` |
 
 상태가 맞지 않는 명령은 `409`, 없는 run은 `404`, 잘못된 입력은 `422`입니다.
+
+## 화면 지표와 시뮬레이션
+- `secret_encryption`: 요청의 자격 증명 참조가 모두 `secret://` 일 때만 `ENCRYPTED`.
+- `cloud_sql_private_ip`: provisioning 이 돌려준 주소가 사설 IP 면 `SECURE`, 아니면 `PUBLIC`.
+- `serving`·`cutover_seconds`: 에이전트의 `traffic_mode`·`cutover_ms` 에서 옮깁니다.
+- `iam_audit_status`·`failed_requests`: 보내는 모듈이 아직 없어 "미제공" 입니다. 그래서 `COMPLIANT` 배지도 켜지지 않습니다.
+- 시뮬레이션: `CDC_AGENT_URL` 이 비어 있고 `ALPHA_CDC_SIMULATION=1` 일 때만 켜집니다. 실제 URL 이 있으면 실제 에이전트를 부릅니다. 실제 VPN 은 만들지 않고, 화면에 시뮬레이션으로 표시합니다.
+- AI 진단: `ALPHA_AI_ENABLED=1` + `pip install -e ".[ai]"`. 없으면 규칙 기반으로 진단하고 화면에 그렇게 표시합니다.
 
 ## 상태 저장
 - 백엔드 DB의 상태 테이블 하나(`runs`)에 run 전체를 JSON으로 저장합니다. 서버를 재시작해도 남습니다.

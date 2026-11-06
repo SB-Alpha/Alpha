@@ -18,6 +18,7 @@ from .schemas import (
     MigrationRequest,
     RunStatus,
     StageName,
+    WorkflowState,
 )
 from .runners import RUNNERS
 from .store import RunNotFound, RunStore
@@ -106,4 +107,6 @@ def submit_manual(
 def get_diagnosis(run_id: str, engine: Engine = Depends(get_engine)) -> SelfHealingDiagnosis:
     """장애 발생 시 AI 자가치유(Self-Healing) 진단 리포트를 생성합니다."""
     run = _apply(run_id, lambda: engine.get(run_id))
+    if run.state != WorkflowState.FAILED:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"실패한 run 만 진단합니다 (현재 {run.state.value})")
     return diagnose_run(run)

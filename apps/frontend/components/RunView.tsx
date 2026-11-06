@@ -101,8 +101,9 @@ export function RunView() {
 
           <SelfHealingCard
             run={run}
-            onApplyManual={(output) =>
-              run.current_stage && act(() => workflows.submitManual(run.run_id, run.current_stage!, output, "AI 자가치유 권장 픽스처 주입"))
+            isBusy={isBusy}
+            onApplySimulationInput={(output) =>
+              run.current_stage && act(() => workflows.submitManual(run.run_id, run.current_stage!, output, "시뮬레이션 값"))
             }
           />
 

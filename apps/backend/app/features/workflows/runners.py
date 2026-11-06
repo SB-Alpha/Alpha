@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import os
+import ipaddress
 import threading
 import time
 from collections.abc import Mapping
@@ -17,6 +17,47 @@ from .schemas import RunContext, RunStatus, StageName
 
 class MissingStageOutput(RuntimeError):
     """요청이나 앞 단계 출력이 없어 이 단계 입력을 만들 수 없을 때."""
+
+
+def _secret_encryption_metric(run: RunStatus) -> dict[str, str]:
+    """요청의 자격 증명 참조가 모두 암호화 저장소(secret://)를 가리킬 때만 보고합니다."""
+    req = run.request
+    refs = [r for r in (req.aws_credentials_ref, req.db_admin_ref, req.db_credentials_ref) if r]
+    if refs and all(r.startswith("secret://") for r in refs):
+        return {"secret_encryption": "ENCRYPTED"}
+    return {}
+
+
+def _private_ip_metric(output: Any) -> dict[str, str]:
+    """provisioning 이 돌려준 Cloud SQL 주소를 직접 확인합니다. 주소가 없으면 보고하지 않습니다."""
+    target = output.get("target") if isinstance(output, Mapping) else getattr(output, "target", None)
+    db = target.get("db") if isinstance(target, Mapping) else None
+    ip = db.get("private_ip") if isinstance(db, Mapping) else None
+    try:
+        is_private = ipaddress.ip_address(ip).is_private
+    except (TypeError, ValueError):
+        return {}
+    return {"cloud_sql_private_ip": "SECURE" if is_private else "PUBLIC"}
+
+
+def _cutover_metrics(metrics: Mapping[str, Any] | None) -> dict[str, Any]:
+    """에이전트 보고(traffic_mode, cutover_ms)를 화면 키로 옮깁니다. 보고 없는 값은 만들지 않습니다."""
+    result = dict(metrics or {})
+    if result.get("traffic_mode") == "TARGET":
+        result["serving"] = "gcp"
+    cutover_ms = result.get("cutover_ms")
+    if isinstance(cutover_ms, (int, float)):
+        result["cutover_seconds"] = round(cutover_ms / 1000, 3)
+    return result
+
+
+def _agent_is_simulated() -> bool:
+    from app.features.db_migration.client import AgentSettings
+
+    try:
+        return AgentSettings.from_env().is_simulation
+    except KeyError:
+        return False
 
 
 DISCOVERY_MERGED_MESSAGE = "assessment 에 통합 — 원본 조회는 planning 단계에서 합니다"
@@ -71,8 +112,10 @@ def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
         rds_instance_id=req.rds_instance_id,
     )
     res = assessment_service.run(inp, ctx)
-    if ctx is not None:
-        ctx.report("running", 100, {"iam_audit_status": "PASS", "secret_encryption": "ENCRYPTED"}, "계획 수립 및 보안 감사 완료")
+    # IAM 감사를 하는 모듈이 아직 없어 iam_audit_status 는 보고하지 않습니다 (화면: 미제공).
+    metrics = _secret_encryption_metric(run)
+    if ctx is not None and metrics:
+        ctx.report("running", 100, metrics)
     return res
 
 
@@ -88,8 +131,9 @@ def run_provisioning(run: RunStatus, ctx: RunContext) -> Any:
         target_infra=target_infra,
     )
     res = provisioning_service.run(inp, ctx)
-    if ctx is not None:
-        ctx.report("running", 100, {"cloud_sql_private_ip": "SECURE"}, "인프라 프로비저닝 및 사설망 바인딩 완료")
+    metrics = _private_ip_metric(res)
+    if ctx is not None and metrics:
+        ctx.report("running", 100, metrics)
     return res
 
 
@@ -131,6 +175,12 @@ def run_db_migration(
         "source": source_dict,
         "target": dict(target),
     }
+
+    if _agent_is_simulated():
+        # 모의 에이전트로 실제 VPN 을 만들지 않습니다. 화면에는 simulated 지표로 구분됩니다.
+        inp["options"] = {"skip_vpn": True}
+        if ctx is not None:
+            ctx.report("running", 0, {"simulated": True}, "시뮬레이션 모드: 실제 VPN·CDC 없이 진행합니다")
 
     job_id = to_job_id(run.run_id)
     ready_event = threading.Event()
@@ -246,10 +296,7 @@ def run_cutover(
         if not settings.url:
             raise KeyError("CDC_AGENT_URL")
     except (KeyError, ValueError):
-        if os.getenv("ALPHA_CDC_SIMULATION", "0") in ("1", "true", "True"):
-            settings = AgentSettings(url="mock://simulation")
-        else:
-            raise RuntimeError("CDC_AGENT_URL 환경변수가 설정되지 않아 트래픽 전환을 호출할 수 없습니다") from None
+        raise RuntimeError("CDC_AGENT_URL 환경변수가 설정되지 않아 트래픽 전환을 호출할 수 없습니다") from None
 
     # 승인 ② 실제 승인자 이름 기록 (감사 추적용)
     approved_by = "workflows"
@@ -270,11 +317,7 @@ def run_cutover(
         # 1. 성공 상태 (에이전트가 stabilizing 또는 succeeded 도달)
         if phase == "stabilizing" or state == "succeeded":
             message = f"트래픽 전환 완료 ({msg})" if msg else "트래픽 전환 완료 (안정화 관찰 중)"
-            m = dict(metrics or {})
-            m.setdefault("serving", "gcp")
-            m.setdefault("failed_requests", 0)
-            m.setdefault("cutover_seconds", round(time.monotonic() - start_t, 1))
-            ctx.report("running", 100, m, message)
+            ctx.report("running", 100, _cutover_metrics(metrics), message)
             return job
 
         # 2. 롤백 상태 (전환 실패 후 원본 복귀)

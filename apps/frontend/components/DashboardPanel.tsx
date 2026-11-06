@@ -7,6 +7,7 @@ import {
   formatBytes,
   formatDuration,
   isFinished,
+  isSimulated,
   numberMetric,
   overallProgress,
   securityAuditSummary,
@@ -105,6 +106,12 @@ export function DashboardPanel({ run }: Props) {
       <h2 id="dashboard-heading" className="sr-only">
         이전 관제 대시보드
       </h2>
+
+      {isSimulated(run) && (
+        <p role="status" className="rounded-lg border-2 border-amber-500 bg-amber-50 p-3 text-sm font-semibold text-amber-950 lg:col-span-2">
+          시뮬레이션 모드입니다. 아래 CDC·전환 지표는 실제 복제나 트래픽 전환 결과가 아닙니다.
+        </p>
+      )}
 
       <div className="rounded-lg border border-ink bg-white p-4 shadow-[3px_3px_0_0_var(--color-ink)]">
         <p className="text-xs text-ink/60">전체 진행률</p>

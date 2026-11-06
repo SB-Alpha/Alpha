@@ -18,6 +18,10 @@ class AgentSettings:
     access_client_secret: str | None = None
     timeout_s: float = 30
 
+    @property
+    def is_simulation(self) -> bool:
+        return self.url.startswith("mock")
+
     @classmethod
     def from_env(cls) -> "AgentSettings":
         url = os.getenv("CDC_AGENT_URL")
@@ -76,6 +80,7 @@ class _MockSimulationTransport(httpx.BaseTransport):
                     "created_at": time.time(),
                     "polls": 0,
                     "metrics": {
+                        "simulated": True,
                         "copy_percent": 30,
                         "replication_lag_bytes": 1048576,
                         "mismatch": 0,
@@ -118,6 +123,7 @@ class _MockSimulationTransport(httpx.BaseTransport):
                     "created_at": time.time(),
                     "polls": 0,
                     "metrics": {
+                        "simulated": True,
                         "copy_percent": 100,
                         "replication_lag_bytes": 0,
                         "mismatch": 0,
@@ -137,9 +143,11 @@ class _MockSimulationTransport(httpx.BaseTransport):
                     job["progress"] = 100
                     job["message"] = "[Simulation] Cutover completed. Traffic serving on GCP Cloud Run."
                     m = job.setdefault("metrics", {})
-                    m["serving"] = "gcp"
+                    # 실제 에이전트(jobs.py)와 같은 키로 보고합니다.
+                    m["simulated"] = True
+                    m["traffic_mode"] = "TARGET"
+                    m["cutover_ms"] = 1200
                     m["failed_requests"] = 0
-                    m["cutover_seconds"] = 1.2
                     m["copy_percent"] = 100
                     m["replication_lag_bytes"] = 0
                 elif job.get("polls", 0) >= 2 and job["phase"] == "snapshot":
@@ -159,22 +167,23 @@ class _MockSimulationTransport(httpx.BaseTransport):
         return httpx.Response(404, json={"detail": f"Path {path} not found in simulation"})
 
 
+# db_migration 과 cutover 가 클라이언트를 따로 만들어도 같은 모의 job 을 보도록 하나만 둡니다.
+_SHARED_SIMULATION = _MockSimulationTransport()
+
+
 class CdcAgentClient:
     def __init__(self, settings: AgentSettings, transport: httpx.BaseTransport | None = None):
-        self._is_simulated = (
-            settings.url in ("mock", "mock://", "mock://simulation", "simulation")
-            or os.getenv("ALPHA_CDC_SIMULATION", "0") in ("1", "true", "True")
-            or (transport is None and settings.url.startswith("mock"))
-        )
+        # 실제 URL 이 있으면 ALPHA_CDC_SIMULATION 이 켜져 있어도 실제 에이전트를 부릅니다.
+        self._is_simulated = settings.is_simulation
         if self._is_simulated and transport is None:
-            transport = _MockSimulationTransport()
+            transport = _SHARED_SIMULATION
 
         headers = {}
         if settings.access_client_id and settings.access_client_secret:
             headers["CF-Access-Client-Id"] = settings.access_client_id
             headers["CF-Access-Client-Secret"] = settings.access_client_secret
 
-        base_url = "http://mock-simulation" if self._is_simulated and not settings.url.startswith("http") else settings.url
+        base_url = "http://mock-simulation" if self._is_simulated else settings.url
         self._http = httpx.Client(base_url=base_url, headers=headers,
                                   timeout=settings.timeout_s, transport=transport)
 

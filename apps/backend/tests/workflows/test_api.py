@@ -78,12 +78,5 @@ def test_openapi_lists_workflows_routes(client):
     assert {"/runs", "/runs/{run_id}", "/runs/{run_id}/approve", "/runs/{run_id}/abort", "/runs/{run_id}/diagnosis"} <= set(paths)
 
 
-def test_diagnosis_route_returns_self_healing_report(client):
-    run_id = client.post("/runs", json=BODY).json()["run_id"]
-    res = client.get(f"/runs/{run_id}/diagnosis")
-    assert res.status_code == 200
-    diag = res.json()
-    assert "category" in diag
-    assert "root_cause" in diag
-    assert len(diag["action_plan"]) >= 1
-    assert diag["diagnosed_by"] in ("ai", "rule")
+def test_diagnosis_route_answers_404_for_unknown_run(client):
+    assert client.get("/runs/mig-unknown/diagnosis").status_code == 404

@@ -1,10 +1,11 @@
 // 대시보드 계산. run 상태만으로 만들고, 값이 없으면 null(화면에 "미제공")을 돌려줍니다.
-// db_migration 키는 #30·#31 이 실제로 보내는 이름입니다. serving·failed_requests·cutover_seconds 와
-// 보안 키는 보내는 모듈이 아직 없어 "미제공"으로 남습니다. 어느 단계에서 보고하든 화면에 나타납니다.
+// db_migration 키는 #30·#31 이 실제로 보내는 이름입니다. serving·cutover_seconds 는 workflows 가 에이전트 보고로
+// 채웁니다. failed_requests·iam_audit_status 는 보내는 모듈이 아직 없어 "미제공"으로 남습니다.
 
 import type { RunStatus, StageStatus, WorkflowState } from "./workflows";
 
 export const METRIC_KEYS = {
+  simulated: "simulated", // true: 실제 에이전트가 아닌 시뮬레이션 값
   serving: "serving", // "aws" | "gcp": 지금 요청을 처리하는 쪽
   replicationLagBytes: "replication_lag_bytes",
   copyPercent: "copy_percent",
@@ -79,6 +80,11 @@ export function securityTone(value: string | null): SecurityTone {
   if (value === null) return "neutral";
   if (SECURITY_GOOD.includes(value)) return "good";
   return SECURITY_BAD.includes(value) ? "bad" : "neutral";
+}
+
+/** 시뮬레이션 모드에서 나온 값이 섞여 있으면 true 입니다. */
+export function isSimulated(run: RunStatus): boolean {
+  return findMetric(run, METRIC_KEYS.simulated) === true;
 }
 
 /** 모듈이 실제로 보고한 값만 돌려줍니다. 보고가 없으면 null 입니다. */

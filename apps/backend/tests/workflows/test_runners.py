@@ -6,6 +6,7 @@ import pytest
 
 from app.features.workflows.engine import Engine
 from app.features.workflows.runners import (
+    _private_ip_metric,
     DISCOVERY_MERGED_MESSAGE,
     RUNNERS,
     MissingStageOutput,
@@ -363,21 +364,117 @@ def test_cutover_runner_with_simulation_fallback(engine, monkeypatch):
     assert job["phase"] == "stabilizing"
     last_report = reports[-1]
     assert last_report[1] == 100
+    assert last_report[2]["simulated"] is True
     assert last_report[2]["serving"] == "gcp"
-    assert last_report[2]["failed_requests"] == 0
 
 
-def test_planning_reports_security_governance_metrics(engine, fake_assessment):
-    run = engine.create_run(REQUEST)
+def _run_cutover_with_agent_metrics(engine, monkeypatch, metrics):
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+
+    class FakeAgent:
+        def __init__(self, settings):
+            pass
+
+        def cutover(self, job_id, approved_by):
+            return {"accepted": True}
+
+        def get_job(self, job_id):
+            return {"state": "running", "phase": "stabilizing", "metrics": metrics, "message": "완료"}
+
+    monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", FakeAgent)
     reports = []
 
     class FakeCtx:
         def report(self, state, progress, metrics=None, message=None):
-            reports.append((state, progress, metrics, message))
+            reports.append(metrics)
 
-    run_assessment(run, ctx=FakeCtx())
-    assert any(
-        r[2] and r[2].get("iam_audit_status") == "PASS" and r[2].get("secret_encryption") == "ENCRYPTED"
-        for r in reports
+    run_cutover(engine.create_run(REQUEST), ctx=FakeCtx(), poll_interval_s=0.01)  # type: ignore[arg-type]
+    return reports[-1]
+
+
+def test_cutover_metrics_come_from_agent_report(engine, monkeypatch):
+    m = _run_cutover_with_agent_metrics(engine, monkeypatch, {"traffic_mode": "TARGET", "cutover_ms": 1250.0})
+    assert m["serving"] == "gcp"
+    assert m["cutover_seconds"] == 1.25
+
+
+def test_cutover_does_not_invent_metrics_when_agent_reports_none(engine, monkeypatch):
+    m = _run_cutover_with_agent_metrics(engine, monkeypatch, {})
+    assert not {"serving", "failed_requests", "cutover_seconds"} & set(m)
+
+
+def _planning_metrics(engine, request):
+    reports = []
+
+    class FakeCtx:
+        def report(self, state, progress, metrics=None, message=None):
+            reports.append(metrics or {})
+
+    run_assessment(engine.create_run(request), ctx=FakeCtx())  # type: ignore[arg-type]
+    return {k: v for m in reports for k, v in m.items()}
+
+
+def test_planning_reports_encryption_only_for_secret_refs_and_no_iam_audit(engine, fake_assessment):
+    metrics = _planning_metrics(engine, REQUEST)
+    assert metrics["secret_encryption"] == "ENCRYPTED"
+    assert "iam_audit_status" not in metrics
+
+
+def test_planning_omits_encryption_when_a_ref_is_not_a_secret_ref(engine, fake_assessment):
+    request = REQUEST.model_copy(update={"aws_credentials_ref": "profile:default"})
+    assert "secret_encryption" not in _planning_metrics(engine, request)
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ({"target": {"db": {"private_ip": "10.31.0.5"}}}, {"cloud_sql_private_ip": "SECURE"}),
+        ({"target": {"db": {"private_ip": "34.64.0.1"}}}, {"cloud_sql_private_ip": "PUBLIC"}),
+        (SimpleNamespace(target={"db": {"private_ip": "10.31.0.5"}}), {"cloud_sql_private_ip": "SECURE"}),
+        ({"target": {"db": {}}}, {}),
+        ({"target": {"db": {"private_ip": "not-an-ip"}}}, {}),
+        ({}, {}),
+    ],
+)
+def test_private_ip_metric_checks_the_returned_address(output, expected):
+    assert _private_ip_metric(output) == expected
+
+
+def _run_db_migration_capturing_input(engine, monkeypatch, ctx):
+    seen = {}
+
+    def fake_run(inp, proxy):
+        seen.update(inp)
+        return {"state": "stopped"}
+
+    monkeypatch.setattr("app.features.db_migration.service.run", fake_run)
+    run = engine.create_run(REQUEST).model_copy(
+        update={"outputs": {"planning": {"source": {"tables": []}}, "provisioning": {"target": {"db": {}}}}}
     )
+    run_db_migration(run, ctx=ctx, poll_interval_s=0.01)  # type: ignore[arg-type]
+    return seen
+
+
+def test_db_migration_skips_real_vpn_and_marks_run_in_simulation(engine, monkeypatch):
+    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
+    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+    reports = []
+
+    class FakeCtx:
+        def report(self, state, progress, metrics=None, message=None):
+            reports.append(metrics or {})
+
+    seen = _run_db_migration_capturing_input(engine, monkeypatch, FakeCtx())
+
+    assert seen["options"] == {"skip_vpn": True}
+    assert reports[0]["simulated"] is True
+
+
+def test_db_migration_uses_real_vpn_path_with_real_agent_url(engine, monkeypatch):
+    monkeypatch.setenv("CDC_AGENT_URL", "https://cdc.example")
+    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+
+    seen = _run_db_migration_capturing_input(engine, monkeypatch, None)
+
+    assert "options" not in seen
 

@@ -81,5 +81,28 @@ def test_simulation_mode_full_lifecycle():
     final_job = client.get_job("test-sim-01")
     assert final_job["phase"] == "stabilizing"
     assert final_job["state"] == "succeeded"
-    assert final_job["metrics"]["serving"] == "gcp"
+    assert final_job["metrics"]["simulated"] is True
+    assert final_job["metrics"]["traffic_mode"] == "TARGET"
     assert final_job["metrics"]["copy_percent"] == 100
+
+
+def test_simulation_flag_does_not_replace_a_real_agent_url(monkeypatch):
+    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+    monkeypatch.setenv("CDC_AGENT_URL", "https://cdc.example")
+    settings = AgentSettings.from_env()
+    assert not settings.is_simulation
+
+    client = CdcAgentClient(settings, transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"status": "real"})))
+    assert client.status() == {"status": "real"}
+
+
+def test_simulation_flag_is_used_only_when_url_is_missing(monkeypatch):
+    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
+    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+    assert AgentSettings.from_env().is_simulation
+
+
+def test_simulated_state_is_shared_across_clients():
+    settings = AgentSettings(url="mock://simulation")
+    job = CdcAgentClient(settings).create_job({"job_id": "shared-sim", "source": {}, "target": {}})
+    assert CdcAgentClient(settings).get_job(job["job_id"])["job_id"] == "shared-sim"
