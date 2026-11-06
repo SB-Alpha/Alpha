@@ -96,6 +96,12 @@ export function DashboardPanel({ run }: Props) {
   const mismatch = numberMetric(run, METRIC_KEYS.mismatchTables);
   const failed = numberMetric(run, METRIC_KEYS.failedRequests);
   const cutover = numberMetric(run, METRIC_KEYS.cutoverSeconds);
+  const probeRequests = numberMetric(run, METRIC_KEYS.probeRequests);
+  const probeMaxMs = numberMetric(run, METRIC_KEYS.probeMaxMs);
+  const failedHint =
+    probeRequests === null || probeMaxMs === null
+      ? undefined
+      : `실측 ${probeRequests.toLocaleString("ko-KR")}건 · 최대 ${Math.round(probeMaxMs).toLocaleString("ko-KR")}ms`;
 
   const rowsText = rows && `${rows.source.toLocaleString("ko-KR")} / ${rows.target.toLocaleString("ko-KR")}`;
   // 복사 중에는 목적지 행 수가 적은 것이 정상이라 빨강으로 표시하지 않습니다.
@@ -169,6 +175,7 @@ export function DashboardPanel({ run }: Props) {
           label="요청 실패"
           value={failed === null ? null : `${failed.toLocaleString("ko-KR")}건`}
           tone={countTone(failed)}
+          hint={failedHint}
         />
         <MetricTile label="전환 시간 T1−T0" value={cutover === null ? null : `${cutover.toFixed(1)}초`} />
       </dl>

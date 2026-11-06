@@ -503,3 +503,19 @@ def test_db_migration_uses_real_vpn_path_with_real_agent_url(engine, monkeypatch
 
     assert "options" not in seen
 
+
+
+def test_cutover_reports_probe_measurements_when_configured(engine, monkeypatch):
+    monkeypatch.setenv("ALPHA_PROBE_URL", "http://127.0.0.1:9/")
+    m = _run_cutover_with_agent_metrics(engine, monkeypatch, {"traffic_mode": "TARGET"})
+    assert m["failed_requests"] >= 1
+    assert m["failed_requests"] == m["probe_requests"]
+
+
+def test_simulated_cutover_does_not_probe(monkeypatch):
+    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
+    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+    monkeypatch.setenv("ALPHA_PROBE_URL", "http://127.0.0.1:9/")
+    monkeypatch.setattr("app.features.workflows.runners.prober_from_env", lambda: pytest.fail("프로버를 켜면 안 됩니다"))
+    monkeypatch.setattr("app.features.workflows.runners._request_cutover", lambda *a: {"phase": "stabilizing"})
+    assert run_cutover(None, ctx=None)["phase"] == "stabilizing"  # type: ignore[arg-type]

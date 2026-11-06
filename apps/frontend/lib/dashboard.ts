@@ -1,6 +1,6 @@
 // 대시보드 계산. run 상태만으로 만들고, 값이 없으면 null(화면에 "미제공")을 돌려줍니다.
 // db_migration 키는 #30·#31 이 실제로 보내는 이름입니다. serving·cutover_seconds 는 workflows 가 에이전트 보고로
-// 채웁니다. failed_requests·iam_audit_status 는 보내는 모듈이 아직 없어 "미제공"으로 남습니다.
+// 채웁니다. failed_requests·probe_* 는 프로버 실측값입니다(ALPHA_PROBE_URL). iam_audit_status 는 보내는 모듈이 아직 없어 "미제공"으로 남습니다.
 
 import type { RunStatus, StageStatus, WorkflowState } from "./workflows";
 
@@ -12,6 +12,8 @@ export const METRIC_KEYS = {
   tables: "tables", // { 테이블명: { source_rows, target_rows, percent, match } }
   mismatchTables: "mismatch", // 불일치 테이블 수
   failedRequests: "failed_requests",
+  probeRequests: "probe_requests", // 프로버가 보낸 요청 수
+  probeMaxMs: "probe_max_ms", // 가장 오래 기다린 요청
   cutoverSeconds: "cutover_seconds", // T1 − T0
   iamAuditStatus: "iam_audit_status", // "PASS" | "WARN" | "FAIL"
   cloudSqlPrivateIp: "cloud_sql_private_ip", // "SECURE" | "PUBLIC"

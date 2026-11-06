@@ -14,9 +14,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from .engine import StageRunner
+from .prober import ProbedContext, prober_from_env
 from .schemas import RunContext, RunStatus, StageName
 
 log = logging.getLogger(__name__)
+
+PROBE_SETTLE_S = 3.0
 
 
 class MissingStageOutput(RuntimeError):
@@ -295,6 +298,31 @@ def run_cutover(
     *,
     poll_interval_s: float = 1.0,
     timeout_s: float = 60.0,
+    probe_settle_s: float = PROBE_SETTLE_S,
+) -> Any:
+    """전환을 실행합니다. ALPHA_PROBE_URL 이 있으면 전환 내내 외부 프로버로 실패 수와 대기 시간을 잽니다.
+
+    시뮬레이션에서는 실제 전환이 없어 잴 대상이 없으므로 프로버를 켜지 않습니다.
+    """
+    prober = None if _agent_is_simulated() else prober_from_env()
+    if prober is None:
+        return _request_cutover(run, ctx, poll_interval_s, timeout_s)
+
+    prober.start()
+    probed = ProbedContext(ctx, prober)
+    try:
+        job = _request_cutover(run, probed, poll_interval_s, timeout_s)
+        time.sleep(probe_settle_s)  # 전환 직후 요청까지 측정에 포함합니다.
+        return job
+    finally:
+        probed.finish()
+
+
+def _request_cutover(
+    run: RunStatus,
+    ctx: RunContext,
+    poll_interval_s: float,
+    timeout_s: float,
 ) -> Any:
     """승인 ② 완료 후 CDC 에이전트에 cutover 요청(hold -> switch -> release)을 전달하고,
     에이전트가 stabilizing(전환 완료) 또는 failed/waiting_approval(롤백)에 도달할 때까지 대기합니다.

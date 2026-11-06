@@ -57,7 +57,8 @@ def run(inp: <Module>Input, ctx: RunContext) -> <Module>Output: ...
 - `secret_encryption`: 요청의 자격 증명 참조가 모두 `secret://` 이고 암호화 저장소에 실제로 있을 때만 `ENCRYPTED`. 확인할 수 없으면 "미제공" 입니다.
 - `cloud_sql_private_ip`: provisioning 이 돌려준 주소가 사설 IP 면 `SECURE`, 아니면 `PUBLIC`.
 - `serving`·`cutover_seconds`: 에이전트의 `traffic_mode`·`cutover_ms` 에서 옮깁니다.
-- `iam_audit_status`·`failed_requests`: 보내는 모듈이 아직 없어 "미제공" 입니다. 그래서 `COMPLIANT` 배지도 켜지지 않습니다.
+- `failed_requests`·`probe_*`: `ALPHA_PROBE_URL`(Worker 공개 주소)이 있으면 전환 중 프로버가 GET 으로 실측합니다. 응답 코드 400 이상, 연결 실패, 시간 초과를 실패로 셉니다. 쓰기 요청은 재지 않습니다. 주소가 없으면 "미제공" 입니다.
+- `iam_audit_status`: 보내는 모듈이 아직 없어 "미제공" 입니다. 그래서 `COMPLIANT` 배지도 켜지지 않습니다.
 - 시뮬레이션: `CDC_AGENT_URL` 이 비어 있고 `ALPHA_CDC_SIMULATION=1` 일 때만 켜집니다. 실제 URL 이 있으면 실제 에이전트를 부릅니다. 실제 VPN 은 만들지 않고, 화면에 시뮬레이션으로 표시합니다.
 - AI 진단: `ALPHA_AI_ENABLED=1` + `pip install -e ".[ai]"`. 없으면 규칙 기반으로 진단하고 화면에 그렇게 표시합니다.
 
