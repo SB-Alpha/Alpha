@@ -6,6 +6,7 @@ running a job dies, another one continues from the stored phase.
 """
 
 import logging
+import os
 import threading
 import time
 from collections.abc import Iterator
@@ -29,8 +30,8 @@ SETUP_PHASES = {"source_prepare", "target_prepare", "precheck", "replication_set
 # Earlier phases fail at once, which reports a wrong password or host.
 WATCH_PHASES = {"snapshot", "streaming"}
 TEMPORARY_ERRORS = (psycopg.OperationalError, httpx.HTTPError)
-ABORT_LOCK_WAIT_S = 20
-SLOT_DROP_WAIT_S = 30
+ABORT_LOCK_WAIT_S = float(os.getenv("ABORT_LOCK_WAIT_S", "20"))
+SLOT_DROP_WAIT_S = float(os.getenv("SLOT_DROP_WAIT_S", "30"))
 
 
 class SecretsNotReady(RuntimeError):

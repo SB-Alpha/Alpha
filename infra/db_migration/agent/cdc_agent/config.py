@@ -24,6 +24,7 @@ class Settings:
     secrets_topic: str = "_alpha_cdc_secrets"
     # Connect reads only secrets_dir. Accounts it does not use stay here, mounted on the agent only.
     agent_secrets_dir: Path = Path("/etc/alpha-cdc/agent-secrets")
+    worker_timeout_s: float = 5
 
 
 @lru_cache
@@ -45,6 +46,7 @@ def get_settings() -> Settings:
         secrets_key=os.getenv("SECRETS_KEY") or None,
         secrets_topic=os.getenv("SECRETS_TOPIC", "_alpha_cdc_secrets"),
         agent_secrets_dir=Path(os.getenv("AGENT_SECRETS_DIR", "/etc/alpha-cdc/agent-secrets")),
+        worker_timeout_s=float(os.getenv("WORKER_TIMEOUT_S", "5")),
     )
 
 
