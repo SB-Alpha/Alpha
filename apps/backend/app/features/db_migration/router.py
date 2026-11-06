@@ -4,14 +4,15 @@ from functools import lru_cache
 from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Request
 from fastapi.responses import JSONResponse
 
+from app.core.local_access import require_local_access
 from app.features.db_migration import input_secrets
 from app.features.db_migration.client import AgentError, AgentSettings, CdcAgentClient
 from app.features.db_migration.schemas import CutoverRequest, JobRequest
 
-router = APIRouter(prefix="/db-migration", tags=["db_migration"])
+router = APIRouter(prefix="/db-migration", tags=["db_migration"], dependencies=[Depends(require_local_access)])
 router.include_router(input_secrets.router)
 
 

@@ -1,17 +1,27 @@
 """FastAPI entry point."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from app.core.config import get_settings
+from app.core.local_access import ensure_api_token
 from app.core.logging import configure_logging
 from app.features.db_migration import router as db_migration
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    ensure_api_token()
+    yield
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    app = FastAPI(title=settings.app_name, version="0.1.0")
+    app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=_lifespan)
 
     @app.get("/health", tags=["system"])
     def health() -> dict:
