@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { BUTTON_SECONDARY } from "@/lib/ui";
 import { workflows, type RunStatus, type SelfHealingDiagnosis } from "@/lib/workflows";
 
 type Props = {
@@ -21,6 +22,7 @@ export function SelfHealingCard({ run, isBusy, onApplySimulationInput }: Props) 
   const runId = run.run_id;
   const failureKey = `${runId}:${run.updated_at}`;
   const [result, setResult] = useState<DiagnosisResult | null>(null);
+  const [isRediagnosing, setIsRediagnosing] = useState(false);
   const current = result?.key === failureKey ? result : null;
   const diagnosis = current?.diagnosis ?? null;
   const error = current?.error ?? null;
@@ -47,6 +49,19 @@ export function SelfHealingCard({ run, isBusy, onApplySimulationInput }: Props) 
 
   if (!isFailed) return null;
 
+  const handleRediagnose = async () => {
+    setIsRediagnosing(true);
+    try {
+      const data = await workflows.triggerDiagnosis(runId);
+      setResult({ key: failureKey, diagnosis: data, error: null });
+    } catch (err) {
+      // 다시 진단하지 못해도 앞서 받은 진단은 그대로 보여 줍니다.
+      setResult({ key: failureKey, diagnosis, error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setIsRediagnosing(false);
+    }
+  };
+
   const simulationInput = diagnosis?.suggested_manual_input;
   const hasSimulationInput = !!simulationInput && Object.keys(simulationInput).length > 0;
 
@@ -54,11 +69,21 @@ export function SelfHealingCard({ run, isBusy, onApplySimulationInput }: Props) 
     <section className="rounded-lg border-2 border-amber-500/30 bg-amber-50/50 p-4 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200/60 pb-3">
         <h3 className="font-semibold text-amber-950">자가치유(Self-Healing) 진단 리포트</h3>
-        {diagnosis && (
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800">
-            {diagnosis.diagnosed_by === "ai" ? "Claude AI 진단" : "규칙 기반 진단"}
-          </span>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {diagnosis && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800">
+              {diagnosis.diagnosed_by === "ai" ? "Claude AI 진단" : "규칙 기반 진단"}
+            </span>
+          )}
+          <button
+            type="button"
+            disabled={loading || isRediagnosing || isBusy}
+            onClick={() => void handleRediagnose()}
+            className={`${BUTTON_SECONDARY} !px-3 !py-1 text-xs`}
+          >
+            {isRediagnosing ? "재진단 중…" : "AI 재진단"}
+          </button>
+        </div>
       </div>
 
       {loading && (

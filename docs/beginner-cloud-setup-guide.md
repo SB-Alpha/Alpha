@@ -283,17 +283,15 @@ uv run python scripts/register_secrets.py
 ---
 
 ### 4.2 입력 폼 채우기
-화면에 나타나는 9개 칸 중, 초보자 분들은 아래 표대로 **5개 항목**만 입력하시면 됩니다:
+아래 표대로 **3개 항목**만 입력하고, 목적지 클라우드는 기본값을 그대로 두면 됩니다:
 
 | 화면 레이블 | 입력할 내용 | 설명 |
 | :--- | :--- | :--- |
-| **GitHub 저장소** | `https://github.com/Jeonsubb/cloudmorph-demo-guestbook` | 이전할 샘플 웹 애플리케이션 코드 주소 |
-| **원본 AWS 리전** | `ap-northeast-2` | 현재 서비스가 있는 서울 리전 |
-| **목적지 GCP 리전** | `asia-northeast3` | 새로 이사 갈 GCP 서울 리전 |
-| **AWS 자격증명 참조** | `secret://default/source-cloud` | 방금 3단계에서 등록한 AWS 인증 이름표 |
-| **DB 관리자 계정 참조** | `secret://default/source-db-admin` | 방금 3단계에서 등록한 DB 비밀번호 이름표 |
+| **서비스 이름** | `target-app` | 이전할 ECS 서비스 이름 |
+| **원본 AWS 자격증명 참조** | `secret://default/source-cloud` | 방금 3단계에서 등록한 AWS 인증 이름표 |
+| **원본 DB 관리자 참조** | `secret://default/source-db-admin` | 방금 3단계에서 등록한 DB 비밀번호 이름표 |
 
-*(나머지 ECS 서비스, RDS 식별자 등은 비워두셔도 플랫폼이 자동으로 탐색하거나 기본값을 적용합니다!)*
+*(원본 리전은 `ap-northeast-2`, 목적지는 GCP `asia-northeast3` 가 기본입니다. RDS 는 계정에 하나뿐이면 자동으로 고릅니다. 다르게 쓰려면 "고급 클라우드 설정"을 여세요.)*
 
 ---
 

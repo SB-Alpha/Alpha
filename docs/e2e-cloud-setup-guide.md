@@ -43,19 +43,23 @@ Cloudmorph 플랫폼은 **AWS(ECS Fargate + RDS PostgreSQL)** 환경의 소스 �
 ```
 
 ### UI 입력 필드와 백엔드 모듈 매핑
-UI(`http://localhost:3000`)에서 입력하는 9개 항목의 역할과 실제 사용처입니다:
+UI(`http://localhost:3000`)의 입력 항목입니다. 위쪽 4개만 채우면 시작할 수 있고, 나머지는 "고급 클라우드 설정"에 있습니다.
 
 | UI 입력 항목 | 필드명 | 필수 | 형식 / 예시값 | 설명 및 사용처 |
 | :--- | :--- | :---: | :--- | :--- |
-| **GitHub 저장소** | `github_repo_url` | ✅ | `https://github.com/Jeonsubb/cloudmorph-demo-guestbook` | 소스 앱 코드 분석 및 컨테이너 빌드 명세 |
-| **원본 AWS 리전** | `aws_region` | ✅ | `ap-northeast-2` | 소스 ECS, RDS, VPC가 위치한 AWS 리전 |
-| **목적지 GCP 리전** | `target_region` | ✅ | `asia-northeast3` | 목적지 Cloud Run, Cloud SQL 생성 리전 (서울) |
-| **AWS 자격증명 참조** | `aws_credentials_ref` | ✅ | `profile:default` 또는 `secret://mig/source-cloud` | 소스 리소스(ECS, RDS) 인벤토리 조회용 AWS 인증 정보 |
-| **AWS 조회 역할 ARN** | `aws_role_ref` | 선택 | `arn:aws:iam::123456789012:role/CloudmorphReader` | 크로스 계정 조회 시 STS AssumeRole 대상 역할 |
-| **ECS 서비스** | `ecs_service` | 선택 | `target-app` | 원본 컨테이너 사양(CPU, Mem, Port, Env)을 읽어올 서비스명 |
-| **RDS 식별자** | `rds_instance_id` | 선택 | `target-db` | 원본 DB 엔진, 버전, VPC, 서브넷 사양을 읽어올 인스턴스 ID |
-| **DB 접속 정보 참조** | `db_credentials_ref` | 선택 | `arn:aws:secretsmanager:...` | AWS Secrets Manager에 저장된 원본 DB 계정 ARN |
-| **DB 관리자 계정 참조** | `db_admin_ref` | 선택 | `secret://mig/source-db-admin` | CDC 복제를 위한 소스 PostgreSQL 관리자(superuser) 계정 |
+| **서비스 이름** | `service_name` | ✅ | `target-app` | 원본 서비스 이름. ECS 서비스를 따로 적지 않으면 이 이름을 씁니다 |
+| **원본 AWS 자격증명 참조** | `aws_credentials_ref` | ✅ | `secret://mig/source-cloud` | 소스 리소스(ECS, RDS) 인벤토리 조회용 AWS 인증 정보 |
+| **원본 DB 관리자 참조** | `db_admin_ref` | ✅ (DB 접속 정보 참조가 있으면 선택) | `secret://mig/source-db-admin` | CDC 복제를 위한 소스 PostgreSQL 관리자(superuser) 계정 |
+| **목적지 클라우드** | `target_infra.provider` | ✅ | GCP | 어댑터가 등록된 클라우드만 고를 수 있습니다 (`docs/TARGET_ADAPTER_SPEC.md`) |
+| **원본 AWS 리전** | `aws_region` | 고급 | `ap-northeast-2` | 소스 ECS, RDS, VPC가 위치한 AWS 리전 |
+| **AWS 조회 역할 ARN** | `aws_role_ref` | 고급 | `arn:aws:iam::123456789012:role/CloudmorphReader` | 크로스 계정 조회 시 STS AssumeRole 대상 역할 |
+| **ECS 서비스** | `ecs_service` | 고급 | `target-app` | 서비스 이름과 다를 때만 적습니다 |
+| **RDS 식별자** | `rds_instance_id` | 고급 | `target-db` | 비우면 계정의 RDS 가 하나뿐일 때 자동으로 고릅니다. 여러 개면 적어야 합니다 |
+| **DB 접속 정보 참조** | `db_credentials_ref` | 고급 | `arn:aws:secretsmanager:...` | AWS Secrets Manager에 저장된 원본 DB 계정 ARN |
+| **GitHub 저장소** | `github_repo_url` | 고급 | `https://github.com/Jeonsubb/cloudmorph-demo-guestbook` | 선택. 이미지는 provisioning 이 원본 ECR 에서 복사하므로 없어도 됩니다 |
+| **목적지 리전** | `target_region` | 고급 | `asia-northeast3` | 비우면 목적지 클라우드의 기본 리전(서울)을 씁니다 |
+
+`profile:` 참조는 로컬 CLI 전용이라 화면에서 시작한 run 에서는 쓰지 않습니다.
 
 ---
 
