@@ -1,10 +1,11 @@
 """assessment 진입 함수. workflows 가 run() 을 호출합니다. (결과 조립: 이주호)
 
-흐름: AWS 세션 → db.py(김준석) · app.py(이주호) 조회 → 합쳐서 plan.py 판정 → AssessmentOutput
+흐름: AWS 세션 → db.py(김준석) · app.py(이주호) 동시 조회 → 합쳐서 plan.py 판정 → AssessmentOutput
 """
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Protocol
 
 from . import ai as ai_part
@@ -52,11 +53,21 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
         db_res = DbAssessment()
         app_res = AppAssessment(facts=AppInfo(service_name=app_part.fallback_name(inp)))
     else:
-        report(20, "DB·네트워크 조회")
-        db_res = _safe("DB·네트워크 조회", lambda: db_part.collect(inp, session), DbAssessment(), gaps)
-        report(50, "앱 조회")
-        app_res = _safe("앱 조회", lambda: app_part.collect(inp, session),
-                        AppAssessment(facts=AppInfo(service_name=app_part.fallback_name(inp))), gaps)
+        # DB 쪽(RDS → bastion → SSM 터널 → PG)과 앱 쪽(ECS·ECR)은 서로 기다릴 게 없어 동시에 조회합니다.
+        # 진행 보고(ctx.report)는 이 스레드에서만 합니다.
+        report(20, "DB·네트워크·앱 동시 조회")
+        db_gaps: list[str] = []
+        app_gaps: list[str] = []
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="assessment") as pool:
+            db_job = pool.submit(_safe, "DB·네트워크 조회", lambda: db_part.collect(inp, session),
+                                 DbAssessment(), db_gaps)
+            app_job = pool.submit(_safe, "앱 조회", lambda: app_part.collect(inp, session),
+                                  AppAssessment(facts=AppInfo(service_name=app_part.fallback_name(inp))), app_gaps)
+            app_res = app_job.result()
+            if not db_job.done():
+                report(50, "앱 조회 완료, DB·네트워크 조회 중")
+            db_res = db_job.result()
+        gaps += db_gaps + app_gaps  # 순서는 예전(DB → 앱)과 같게
     gaps += db_res.gaps + app_res.gaps
 
     report(80, "필수 조건 판정·목적지 계획")

@@ -18,7 +18,8 @@ out = run(AssessmentInput(...), ctx)   # ctx.report(state, progress, metrics, me
 ```
 단독 확인: `POST /assessment/run` (body = `AssessmentInput`), 조회 없이 계획만: `POST /assessment/plan` (body = `PlanningInput`)
 
-- 진행 보고: 5 연결 → 20 DB → 50 앱 → 80 판정 → (90 AI) → 100, 모두 `running`. 단계 성공은 `run()` 반환으로 workflows 가 정하고, 승인 ① 대기는 workflows 게이트가 처리 (PR #22 `RunContext`).
+- 진행 보고: 5 연결 → 20 DB·앱 동시 조회 → (50 앱 끝, DB 대기) → 80 판정 → (90 AI) → 100, 모두 `running`. 단계 성공은 `run()` 반환으로 workflows 가 정하고, 승인 ① 대기는 workflows 게이트가 처리 (PR #22 `RunContext`).
+- 속도: DB 쪽(RDS → bastion → SSM 터널 → PG)과 앱 쪽(ECS·ECR)은 서로 기다릴 게 없어 스레드 2개로 동시에 조회합니다. AWS 클라이언트는 (서비스, 리전)마다 한 번만 만들어 재사용하고(`aws.CachedSession`), 호출마다 연결 5초·읽기 20초 제한과 표준 재시도(총 3번)를 겁니다. botocore 기본값(60초·legacy 재시도)이면 응답 없는 엔드포인트 하나에 단계가 몇 분씩 멈출 수 있습니다.
 - workflows `MigrationRequest`(PR #22) 와 이름을 맞춤: `github_repo_url`, `aws_region`, `ecs_service`, `rds_instance_id`, `target_region`.
   키는 `aws_role_ref`(역할 ARN) 대신 `aws_credentials_ref`(키 이름표) — 원본 키 방식 합의(안재현) 후 맞춥니다.
 
