@@ -1,5 +1,7 @@
 from types import SimpleNamespace as N
 
+import contextlib
+
 import pytest
 
 from app.features.assessment import azure_pg, db
@@ -36,16 +38,49 @@ def factory(srv=None, flag="logical", rules=(1,), get_err=None, cfg_err=None):
     return lambda session, sub: c
 
 
+SUB = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network"
+
+
+def compute(vms=(), running=("b1",)):
+    # vms: (name, tags, nic 이름)
+    items = [N(id=f"/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/{n}", tags=t,
+               network_profile=N(network_interfaces=[N(id=f"{SUB}/networkInterfaces/{nic}")])) for n, t, nic in vms]
+    c = N(virtual_machines=N(list_all=lambda: items, instance_view=lambda rg, n: N(
+        statuses=[N(code="PowerState/running" if n in running else "PowerState/deallocated")])))
+    return lambda session, sub: c
+
+
+def net(nics=None, pips=None):
+    # nics: nic -> (vnet, private ip, public ip 이름 또는 None)
+    nics, pips = nics or {}, pips or {}
+
+    def nic(rg, n):
+        v, ip, pip = nics[n]
+        return N(ip_configurations=[N(private_ip_address=ip, subnet=N(id=f"{SUB}/virtualNetworks/{v}/subnets/x"),
+                                      public_ip_address=N(id=f"{SUB}/publicIPAddresses/{pip}") if pip else None)])
+
+    c = N(network_interfaces=N(get=nic), public_ip_addresses=N(get=lambda rg, n: N(ip_address=pips[n])))
+    return lambda session, sub: c
+
+
+TAG = {"Purpose": "alpha-assessment-bastion"}
+PRIV = lambda: server(public="Disabled", subnet=f"{SUB}/virtualNetworks/v1/subnets/db")
+
+
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
+    monkeypatch.setattr(azure_pg.shutil, "which", lambda n: None)
+    monkeypatch.delenv("ALPHA_AZURE_BASTION", raising=False)
     monkeypatch.setenv("ALPHA_AZURE_SUBSCRIPTION_ID", "sub")
     monkeypatch.setenv("ALPHA_ALLOW_ENV_REFS", "1")
     monkeypatch.setenv("AZ_USER", "u")
     monkeypatch.setenv("AZ_PASSWORD", "pw-secret")
 
 
-def run(f, rid="rg/srv", ref="env://AZ"):
-    return azure_pg.collect(AssessmentInput(rds_instance_id=rid, db_admin_ref=ref, **KW), None, f)
+def run(f, rid="rg/srv", ref="env://AZ", cf=None, nf=None):
+    cf = cf or compute()
+    nf = nf or net()
+    return azure_pg.collect(AssessmentInput(rds_instance_id=rid, db_admin_ref=ref, **KW), None, f, cf, nf)
 
 
 def test_ok():
@@ -56,6 +91,23 @@ def test_ok():
     assert r.creds == {"user": "u", "password": "pw-secret"}
     with r.tunnel() as hp:
         assert hp == ("s.postgres.database.azure.com", 5432)
+
+
+def test_ha_backup_cidrs():
+    srv = server()
+    srv.high_availability, srv.backup = N(mode="ZoneRedundant"), N(backup_retention_days=9)
+    rules = [N(start_ip_address="10.0.0.0", end_ip_address="10.0.0.255"), N(start_ip_address="1.1.1.1", end_ip_address="1.1.1.1"),
+             N(start_ip_address="bad", end_ip_address="x"), 1]
+    r = run(factory(srv, rules=rules))
+    assert r.db.ha_enabled is True and r.db.backup_retention_days == 9
+    assert r.network.allowed_cidrs == ["10.0.0.0/24", "1.1.1.1/32", "bad-x"]
+    srv.high_availability = N(mode="Disabled")
+    assert run(factory(srv)).db.ha_enabled is False
+
+
+def test_ha_backup_absent():
+    r = run(factory())
+    assert r.db.ha_enabled is None and r.db.backup_retention_days is None and r.network.allowed_cidrs == []
 
 
 def test_flag_off():
@@ -105,3 +157,149 @@ def test_no_creds_no_leak():
 def test_integration_never_raises():
     out = db.collect(AssessmentInput(source_cloud="azure", **{k: v for k, v in KW.items() if k != "source_cloud"}), None)
     assert out.gaps
+
+
+def test_private_uses_bastion_public_ip(monkeypatch):
+    calls = []
+    monkeypatch.setattr(azure_pg.ssh_tunnel, "forward", lambda *a: calls.append(a) or "cm")
+    r = run(factory(srv=PRIV()), cf=compute([("b1", TAG, "n1")]), nf=net({"n1": ("v1", "10.0.0.4", "p1")}, {"p1": "1.2.3.4"}))
+    assert r.tunnel() == "cm" and calls == [("1.2.3.4", "s.postgres.database.azure.com", 5432)]
+
+
+def test_bastion_private_ip_and_vnet_preferred(monkeypatch):
+    calls = []
+    monkeypatch.setattr(azure_pg.ssh_tunnel, "forward", lambda *a: calls.append(a))
+    r = run(factory(srv=PRIV()), cf=compute([("b1", TAG, "n1"), ("b2", TAG, "n2")], running=("b1", "b2")),
+            nf=net({"n1": ("other", "10.9.0.4", None), "n2": ("V1", "10.0.0.5", None)}))
+    r.tunnel()
+    assert calls[0][0] == "10.0.0.5"
+
+
+@pytest.mark.parametrize("cf", [compute(), compute([("b1", {"Purpose": "x"}, "n1")]), compute([("b1", TAG, "n1")], running=())])
+def test_private_no_bastion_gap(cf):
+    r = run(factory(srv=PRIV()), cf=cf, nf=net({"n1": ("v1", "10.0.0.4", None)}))
+    assert r.tunnel is None and any("bastion" in g for g in r.gaps)
+
+
+def test_public_without_rules_falls_to_bastion():
+    r = run(factory(rules=()), cf=compute([("b1", TAG, "n1")]), nf=net({"n1": ("v1", "10.0.0.4", None)}))
+    assert r.tunnel is not None and r.creds
+
+
+def test_public_direct_preferred():
+    r = run(factory(), cf=compute([("b1", TAG, "n1")]), nf=net({"n1": ("v1", "10.0.0.4", None)}))
+    with r.tunnel() as hp:
+        assert hp == ("s.postgres.database.azure.com", 5432)
+
+
+VM = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/b1"
+
+
+def bnet(nics, hosts):
+    base = net(nics)(None, None)
+    base.bastion_hosts = N(list=lambda: hosts)
+    return lambda session, sub: base
+
+
+def bhost(vnet, name="bh"):
+    return N(id=f"{SUB.replace('Microsoft.Network', 'Microsoft.Network')}/bastionHosts/{name}",
+             ip_configurations=[N(subnet=N(id=f"{SUB}/virtualNetworks/{vnet}/subnets/AzureBastionSubnet"))])
+
+
+def test_find_bastion_returns_vm_id():
+    r = azure_pg.find_bastion(None, "s", None, compute([("b1", TAG, "n1")]), net({"n1": ("v1", "10.0.0.4", None)}))
+    assert r[:2] == ("10.0.0.4", VM)
+
+
+def test_azure_bastion_env_first(monkeypatch):
+    monkeypatch.setenv("ALPHA_AZURE_BASTION", "rg2/mybast")
+    assert azure_pg.find_azure_bastion(None, "s", "x", bnet({}, []))[0] == ("rg2", "mybast")
+    monkeypatch.setenv("ALPHA_AZURE_BASTION", "bad;rm")
+    assert azure_pg.find_azure_bastion(None, "s", "x", bnet({}, []))[0] is None
+
+
+def test_azure_bastion_same_vnet():
+    v = f"{SUB}/virtualNetworks/v1".lower()
+    got = azure_pg.find_azure_bastion(None, "s", v, bnet({}, [bhost("other", "a"), bhost("V1", "b")]))
+    assert got[0] == ("rg", "b")
+    assert azure_pg.find_azure_bastion(None, "s", v, bnet({}, [bhost("other")]))[0] is None
+
+
+@pytest.fixture
+def procs(monkeypatch):
+    ev = []
+
+    class P:
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(azure_pg.shutil, "which", lambda n: "/bin/az")
+    monkeypatch.setattr(azure_pg, "_free_port", lambda: 5555)
+    monkeypatch.setattr(azure_pg, "_listening", lambda p: True)
+    monkeypatch.setattr(azure_pg, "_stop", lambda p: ev.append("stop-az"))
+    monkeypatch.setattr(azure_pg.subprocess, "Popen", lambda cmd, **kw: ev.append(cmd) or P())
+
+    @contextlib.contextmanager
+    def fwd(*a, **kw):
+        ev.append(("ssh", a, kw))
+        yield "127.0.0.1", 6666
+        ev.append("stop-ssh")
+
+    monkeypatch.setattr(azure_pg.ssh_tunnel, "forward", fwd)
+    return ev
+
+
+def test_bastion_tunnel_two_stage_cleanup(procs):
+    with azure_pg.bastion_tunnel("rg", "bh", VM, "s.pg") as hp:
+        assert hp == ("127.0.0.1", 6666)
+    assert procs[0] == ["az", "network", "bastion", "tunnel", "--name", "bh", "--resource-group", "rg",
+                        "--target-resource-id", VM, "--resource-port", "22", "--port", "5555"]
+    assert procs[1] == ("ssh", ("127.0.0.1", "s.pg", 5432), {"ssh_port": 5555, "proxy_command": ""})
+    assert procs[2:] == ["stop-ssh", "stop-az"]
+
+
+def test_bastion_tunnel_stops_az_on_error(procs):
+    with pytest.raises(RuntimeError):
+        with azure_pg.bastion_tunnel("rg", "bh", VM, "s.pg"):
+            raise RuntimeError
+    assert procs[-1] == "stop-az"
+
+
+@pytest.mark.parametrize("rg,name,vm", [("rg;x", "bh", VM), ("rg", "b h", VM), ("rg", "bh", VM + " --x"), ("rg", "bh", "vm")])
+def test_bastion_tunnel_rejects_injection(procs, rg, name, vm):
+    with pytest.raises(azure_pg.BastionTunnelError):
+        with azure_pg.bastion_tunnel(rg, name, vm, "s.pg"):
+            pass
+    assert procs == []
+
+
+def test_bastion_tunnel_no_az(procs, monkeypatch):
+    monkeypatch.setattr(azure_pg.shutil, "which", lambda n: None)
+    with pytest.raises(azure_pg.BastionTunnelError, match="az 없음"):
+        with azure_pg.bastion_tunnel("rg", "bh", VM, "s.pg"):
+            pass
+
+
+def test_select_bastion_tunnel(procs):
+    r = run(factory(srv=PRIV()), cf=compute([("b1", TAG, "n1")]),
+            nf=bnet({"n1": ("v1", "10.0.0.4", None)}, [bhost("v1")]))
+    with r.tunnel():
+        pass
+    assert procs[0][:4] == ["az", "network", "bastion", "tunnel"] and r.gaps
+
+
+def test_select_no_az_gap_and_ssh_fallback(monkeypatch):
+    calls = []
+    monkeypatch.setattr(azure_pg.ssh_tunnel, "forward", lambda *a: calls.append(a))
+    r = run(factory(srv=PRIV()), cf=compute([("b1", TAG, "n1")]), nf=net({"n1": ("v1", "10.0.0.4", "p1")}, {"p1": "1.2.3.4"}))
+    r.tunnel()
+    assert calls[0][0] == "1.2.3.4" and any("az 없음" in g for g in r.gaps)
+
+
+def test_select_az_but_no_bastion_resource_falls_back(monkeypatch):
+    calls = []
+    monkeypatch.setattr(azure_pg.shutil, "which", lambda n: "/bin/az")
+    monkeypatch.setattr(azure_pg.ssh_tunnel, "forward", lambda *a: calls.append(a))
+    r = run(factory(srv=PRIV()), cf=compute([("b1", TAG, "n1")]), nf=bnet({"n1": ("v1", "10.0.0.4", None)}, []))
+    r.tunnel()
+    assert calls[0][0] == "10.0.0.4" and any("Bastion" in g for g in r.gaps)

@@ -61,6 +61,8 @@ class DbInfo(BaseModel):
     # 복제 슬롯 여유 (PG 카탈로그 조회). CDC 가 슬롯을 하나 만들어야 합니다. 모르면 None
     max_replication_slots: int | None = None
     replication_slots_in_use: int | None = None
+    ha_enabled: bool | None = None  # 고가용성 여부 (Multi-AZ / REGIONAL / zone redundant)
+    backup_retention_days: int | None = None  # 자동 백업 보관 일수
 
 
 class InventoryForPlanning(BaseModel):
@@ -256,6 +258,7 @@ class SourceNetwork(BaseModel):
     cidr: str | None = None
     route_table_ids: list[str] = Field(default_factory=list)
     db_security_group_id: str | None = None
+    allowed_cidrs: list[str] = Field(default_factory=list)  # DB 접근 허용 대역 요약 (GCP authorized networks / Azure 방화벽 / AWS SG 인바운드)
 
 
 class SourceApp(BaseModel):
