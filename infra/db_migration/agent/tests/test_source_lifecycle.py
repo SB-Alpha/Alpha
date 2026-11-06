@@ -29,6 +29,9 @@ class FakeStore:
     def get(self, job_id):
         return self.jobs[job_id].model_copy(deep=True)
 
+    def all(self):
+        return self.jobs
+
     def put(self, job):
         self.jobs[job.job_id] = job
 
@@ -74,6 +77,8 @@ def setup(monkeypatch, tmp_path: Path):
             yield locked
 
         monkeypatch.setattr(jobs.db, "job_lock", lock)
+        monkeypatch.setattr(jobs.db, "retire_target_accounts", lambda ep, users: calls.append(
+            ("retire", ep.user, users)) or users)
         monkeypatch.setattr(jobs.db, "drop_slot", lambda ep, slot: calls.append(("drop_slot", ep.user)) or True)
         monkeypatch.setattr(jobs.db, "cleanup_source", lambda ep, job, repl: calls.append(
             ("cleanup_source", ep.user, repl)) or {"role_dropped": True})
@@ -164,7 +169,8 @@ def test_abort_cleans_everything_in_order(setup):
     job = runner.abort("job01")
 
     assert [c[0] for c in calls] == [
-        "secrets_sync", "lock", "connect_delete", "connect_delete", "drop_slot", "cleanup_source", "secrets_delete",
+        "secrets_sync", "lock", "connect_delete", "connect_delete", "drop_slot", "cleanup_source", "retire",
+        "secrets_delete",
     ]
     assert ("cleanup_source", "source.admin-user", "source-user") in calls
     assert job.state == "aborted"
@@ -360,3 +366,71 @@ def test_retry_restarts_failed_connectors_only_once_they_exist(setup):
     job.phase = "target_prepare"
     runner.restart_failed_connectors(job)
     assert restarted == []
+
+
+def test_close_takes_login_from_the_target_accounts_before_the_secrets_go(setup):
+    runner, calls = setup(phase="stabilizing")
+    job = runner.store.get("job01")
+    runner.close(job)
+    names = [c[0] for c in calls]
+
+    assert ("retire", "target.admin-user", ["target-user", "target.ddl-user"]) in calls
+    assert names.index("retire") < names.index("secrets_delete")
+    assert job.evidence["cleanup"]["target_accounts"] == {"retired": ["target-user", "target.ddl-user"]}
+
+
+def test_abort_takes_login_from_the_target_accounts_too(setup):
+    runner, calls = setup()
+    runner.abort("job01")
+    assert any(c[0] == "retire" for c in calls)
+
+
+def test_app_account_keeps_its_login(setup):
+    runner, calls = setup(phase="stabilizing")
+    job = runner.store.get("job01")
+    job.request.target.app_role = "target-user"
+    runner.close(job)
+
+    assert ("retire", "target.admin-user", ["target.ddl-user"]) in calls
+
+
+def test_accounts_the_caller_gave_keep_their_login(setup):
+    runner, calls = setup(phase="stabilizing")
+    job = runner.store.get("job01")
+    job.request.target.keep_sink_user = True
+    runner.close(job)
+
+    assert ("retire", "target.admin-user", ["target.ddl-user"]) in calls
+
+
+def test_accounts_stay_while_another_job_uses_the_same_target(setup):
+    runner, calls = setup(phase="stabilizing")
+    job = runner.store.get("job01")
+    other = job.model_copy(deep=True, update={"job_id": "job02", "state": "running"})
+    runner.store.put(other)
+    runner.close(job)
+
+    assert not any(c[0] == "retire" for c in calls)
+    assert job.evidence["cleanup"]["target_accounts"] == {
+        "kept": ["target-user", "target.ddl-user"], "used_by": ["job02"]}
+
+    runner.store.put(other.model_copy(update={"state": "succeeded"}))
+    second = runner.store.get("job01")
+    runner.close(second)
+    assert any(c[0] == "retire" for c in calls)
+
+
+def test_failure_to_retire_is_reported_and_does_not_undo_the_cleanup(setup, monkeypatch):
+    runner, calls = setup(phase="stabilizing")
+
+    def broken(ep, users):
+        raise RuntimeError("no route, target.admin-password")
+
+    monkeypatch.setattr(jobs.db, "retire_target_accounts", broken)
+    job = runner.store.get("job01")
+    runner.close(job)
+    accounts = job.evidence["cleanup"]["target_accounts"]
+
+    assert job.state == "succeeded" and accounts["accounts"] == ["target-user", "target.ddl-user"]
+    assert "no route" in accounts["error"] and "target.admin-password" not in accounts["error"]
+    assert ("secrets_delete", "job01") in calls

@@ -417,10 +417,32 @@ class Runner:
         self.connect.delete(job.sink_connector)
         dropped = self._drop_slot(admin, job.slot_name)
         source = db.cleanup_source(admin, job, creds.source.user)
+        accounts = self._retire_target_accounts(job, creds)
         if self.secrets:
             self.secrets.delete(job.job_id)
         return {"connectors_deleted": [job.source_connector, job.sink_connector],
-                "slot_dropped": dropped, **source, "at": now()}
+                "slot_dropped": dropped, **source, "target_accounts": accounts, "at": now()}
+
+    def _retire_target_accounts(self, job: Job, creds: Credentials) -> dict:
+        # The source is already clean, so this must not undo the cleanup. A failure is reported instead.
+        target = job.request.target
+        keep = {creds.target_admin.user, target.app_role}
+        if target.keep_sink_user:
+            keep.add(creds.target.user)
+        if target.keep_ddl_user:
+            keep.add(creds.target_ddl.user)
+        users = [u for u in (creds.target.user, creds.target_ddl.user) if u not in keep]
+        try:
+            # Jobs on one target share the default accounts. The last one to end retires them.
+            others = sorted(j.job_id for j in self.store.all().values()
+                            if j.job_id != job.job_id and j.state not in ("aborted", "succeeded")
+                            and (j.request.target.host, j.request.target.database) == (target.host, target.database))
+            if others:
+                return {"kept": users, "used_by": others}
+            return {"retired": db.retire_target_accounts(creds.target_admin, users)}
+        except Exception as exc:
+            log.warning("job %s: target accounts still have login", job.job_id)
+            return {"error": self.error_text(job.job_id, exc), "accounts": users}
 
     def _drop_slot(self, ep: db.Endpoint, slot: str) -> bool:
         # A slot left behind keeps WAL on the source until its disk fills, so wait for it.

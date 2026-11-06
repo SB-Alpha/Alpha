@@ -165,6 +165,17 @@ def cleanup_source(admin: Endpoint, job: Job, repl_user: str) -> dict:
     return {"publication_dropped": job.publication_name, "role_dropped": existed}
 
 
+def retire_target_accounts(admin: Endpoint, users: list[str]) -> list[str]:
+    """No login once replication has ended. A new run turns it back on (set_login). Safe to run again."""
+    retired = []
+    with connect(admin) as conn:
+        for user in users:
+            if role_exists(conn, user):
+                conn.execute(sql.SQL("ALTER ROLE {} NOLOGIN").format(sql.Identifier(user)))
+                retired.append(user)
+    return retired
+
+
 def precheck_source(ep: Endpoint, job: Job) -> list[dict]:
     checks: list[dict] = []
     with connect(ep) as conn:
