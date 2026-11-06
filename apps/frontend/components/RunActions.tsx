@@ -51,6 +51,7 @@ export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, 
       {isWaitingCutover && (
         <CutoverApprovalPanel
           key={run.run_id}
+          run={run}
           runId={run.run_id}
           readiness={run.cutover_readiness ?? null}
           isBusy={isBusy}

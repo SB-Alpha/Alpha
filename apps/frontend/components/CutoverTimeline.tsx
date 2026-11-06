@@ -1,3 +1,4 @@
+import { CutoverSimulationWidget } from "./3d/CutoverSimulationWidget";
 import {
   METRIC_KEYS,
   cutoverApprovals,
@@ -114,8 +115,14 @@ export function CutoverTimeline({ run }: Props) {
   const approvals = cutoverApprovals(run);
   if (steps === null && approvals.length === 0) return null;
 
+  const isWaitingCutover = run.state === "waiting_approval" && run.waiting_gate === "cutover";
+
   return (
-    <section aria-labelledby="cutover-timeline-heading" className="rounded-xl border border-ink/15 bg-white p-5">
+    <section
+      id="cutover-section"
+      aria-labelledby="cutover-timeline-heading"
+      className="rounded-xl border border-ink/15 bg-white p-5"
+    >
       <h2 id="cutover-timeline-heading" className="text-lg font-semibold">
         전환 기록
       </h2>
@@ -141,6 +148,14 @@ export function CutoverTimeline({ run }: Props) {
           <StepList steps={steps} />
         </div>
       </div>
+
+      {!isWaitingCutover && (
+        <CutoverSimulationWidget
+          run={run}
+          defaultOpen={true}
+          title="승인 ② 전환 검증 물리 시뮬레이션 & 경영진/클라이언트 데모 주행 모드"
+        />
+      )}
     </section>
   );
 }
