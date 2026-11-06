@@ -95,11 +95,18 @@ def setup(monkeypatch, tmp_path: Path):
             "source": None, "source_app": None, "target": None})())
         monkeypatch.setattr(jobs, "WorkerClient", lambda s: FakeWorker(calls, worker_fail_on))
         monkeypatch.setattr(jobs.db, "job_lock", lock)
+
+        @contextmanager
+        def connect(ep):
+            calls.append(("db", "connect"))
+            yield None
+
+        monkeypatch.setattr(jobs.db, "connect", connect)
         monkeypatch.setattr(jobs.db, "block_app_writes", record("block", 0))
         monkeypatch.setattr(jobs.db, "unblock_app_writes", record("unblock"))
         monkeypatch.setattr(jobs.db, "insert_marker", record("insert_marker", "m1"))
         monkeypatch.setattr(jobs.db, "wait_marker", wait_marker)
-        monkeypatch.setattr(jobs.db, "compare", record("compare", {"mismatch": mismatch, "rows_checked": 10}))
+        monkeypatch.setattr(jobs.db, "compare_frozen", record("compare", {"mismatch": mismatch, "rows_checked": 10}))
         return runner, calls
 
     return make
@@ -111,6 +118,7 @@ def test_success_runs_steps_in_order(setup):
     job = runner.store.get("job01")
 
     assert calls == [
+        ("db", "connect"), ("db", "connect"), ("db", "connect"),
         ("worker", "hold"), ("worker", "inflight_zero"), ("db", "block"), ("db", "insert_marker"),
         ("db", "wait_marker"), ("pause", "job01-sink"), ("db", "compare"),
         ("worker", "switch"), ("worker", "release"),

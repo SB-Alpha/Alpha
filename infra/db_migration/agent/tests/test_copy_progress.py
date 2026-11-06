@@ -117,3 +117,20 @@ def test_metrics_carry_the_copy_progress(monkeypatch, tmp_path: Path):
     assert metrics["tables"]["public.t"]["target_rows"] == 5
     assert metrics["replication_lag_bytes"] == 7
     assert metrics["measured_at"]
+
+
+def test_frozen_compare_digests_both_sides(sides):
+    sides["source"]["t"] = 10
+    sides["target"]["t"] = 10
+    check = db.compare_frozen("source", "target", ["t"])
+
+    assert sorted(sides["digested"]) == [("source", "t"), ("target", "t")]
+    assert (check["mismatch"], check["rows_checked"]) == (0, 10)
+
+
+def test_frozen_compare_reports_a_different_checksum(sides):
+    sides["source"]["t"] = 10
+    sides["target"]["t"] = 10
+    sides["checksums"] = {("target", "t"): "other"}
+
+    assert db.compare_frozen("source", "target", ["t"])["mismatch"] == 1

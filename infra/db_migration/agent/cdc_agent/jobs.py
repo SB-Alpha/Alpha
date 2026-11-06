@@ -270,7 +270,11 @@ class Runner:
         worker = WorkerClient(self.settings)
         blocked = switched = False
         try:
-            with db.job_lock(creds.source, job_id) as locked:
+            # Connections open before the hold: each new one costs 500ms or more over the VPN.
+            with (db.job_lock(creds.source, job_id) as locked,
+                  db.connect(creds.source_app) as app_conn,
+                  db.connect(creds.source) as source_conn,
+                  db.connect(creds.target) as target_conn):
                 if not locked:
                     raise RuntimeError("another agent holds this job")
                 hold = worker.hold(job_id, job.request.options.max_hold_ms)
@@ -279,19 +283,19 @@ class Runner:
                 step("hold")
                 status = worker.wait_inflight_zero(self.settings.inflight_timeout_s)
                 step("inflight_zero", held_count=status.get("held_count"))
-                ended = db.block_app_writes(creds.source_app)
+                ended = db.block_app_writes(app_conn)
                 blocked = True
                 step("source_writes_blocked", sessions_ended=ended)
-                marker = db.insert_marker(creds.source, job_id)
+                marker = db.insert_marker(source_conn, job_id)
                 budget_s = job.request.options.max_hold_ms / 1000 - (time.monotonic() - t0)
-                waited = db.wait_marker(creds.target, marker,
+                waited = db.wait_marker(target_conn, marker,
                                         max(0.1, min(self.settings.marker_timeout_s, budget_s)))
                 ev["marker_id"] = marker
                 step("marker_on_target", waited_ms=round(waited * 1000, 1))
                 self.connect.pause(job.sink_connector)
                 step("sink_paused")
                 # Writes are held and blocked, so both sides are frozen: this is the reference point.
-                check = db.compare(creds.source, creds.target, job.request.source.tables)
+                check = db.compare_frozen(source_conn, target_conn, job.request.source.tables)
                 job.evidence["validation"] = {**check, "checked_at": now(), "at": "cutover_reference_point"}
                 step("validated", mismatch=check["mismatch"])
                 if check["mismatch"]:

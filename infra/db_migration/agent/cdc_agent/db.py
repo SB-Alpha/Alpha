@@ -13,6 +13,7 @@ import os
 import subprocess
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator
@@ -272,6 +273,24 @@ def compare(source: Endpoint, target: Endpoint, tables: list[str]) -> dict:
     return result
 
 
+def compare_frozen(src: psycopg.Connection, tgt: psycopg.Connection, tables: list[str]) -> dict:
+    """compare() for the cutover reference point, on open connections.
+
+    Both sides are frozen, so a digest always applies; its row count replaces the separate
+    count. The two sides run at once because every millisecond here is held traffic.
+    """
+    result: dict = {"tables": {}, "mismatch": 0}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for table in tables:
+            source, target = pool.submit(table_digest, src, table), pool.submit(table_digest, tgt, table)
+            s, t = source.result(), target.result()
+            same = s == t
+            result["tables"][table] = {"source": s, "target": t, "match": same}
+            result["mismatch"] += 0 if same else 1
+    result["rows_checked"] = sum(v["source"]["rows"] for v in result["tables"].values())
+    return result
+
+
 def copy_done(check: dict, baseline: dict[str, int]) -> bool:
     """Every row the source had when the copy began has reached the target.
 
@@ -326,18 +345,18 @@ def drop_slot(source: Endpoint, slot: str) -> bool:
     return row is not None
 
 
-def block_app_writes(app: Endpoint) -> int:
+def block_app_writes(conn: psycopg.Connection) -> int:
     """Make the app role read-only for new sessions and end its open sessions.
 
     A role may change its own session defaults and end its own sessions, so the
-    app account needs no extra privilege. Returns the number of sessions ended.
+    app account needs no extra privilege. Takes an open connection of that account.
+    Returns the number of sessions ended.
     """
-    with connect(app) as conn:
-        conn.execute("ALTER ROLE CURRENT_USER SET default_transaction_read_only = on")
-        rows = conn.execute(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            "WHERE usename = current_user AND pid <> pg_backend_pid() AND datname = current_database()"
-        ).fetchall()
+    conn.execute("ALTER ROLE CURRENT_USER SET default_transaction_read_only = on")
+    rows = conn.execute(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+        "WHERE usename = current_user AND pid <> pg_backend_pid() AND datname = current_database()"
+    ).fetchall()
     return len(rows)
 
 
@@ -353,29 +372,27 @@ def unblock_app_writes(app: Endpoint) -> None:
         )
 
 
-def insert_marker(source: Endpoint, job_id: str) -> str:
+def insert_marker(conn: psycopg.Connection, job_id: str) -> str:
     marker_id = str(uuid.uuid4())
-    with connect(source) as conn:
-        conn.execute(
-            sql.SQL("INSERT INTO {} (id, job_id) VALUES (%s, %s)").format(ident(MARKER_TABLE)),
-            (marker_id, job_id),
-        )
+    conn.execute(
+        sql.SQL("INSERT INTO {} (id, job_id) VALUES (%s, %s)").format(ident(MARKER_TABLE)),
+        (marker_id, job_id),
+    )
     return marker_id
 
 
-def wait_marker(target: Endpoint, marker_id: str, timeout_s: float) -> float:
+def wait_marker(conn: psycopg.Connection, marker_id: str, timeout_s: float) -> float:
     """Wait until the marker row reaches the target. Returns seconds waited."""
     started = time.monotonic()
-    with connect(target) as conn:
-        while True:
-            found = conn.execute(
-                sql.SQL("SELECT 1 FROM {} WHERE id = %s").format(ident(MARKER_TABLE)), (marker_id,)
-            ).fetchone()
-            if found:
-                return time.monotonic() - started
-            if time.monotonic() - started > timeout_s:
-                raise TimeoutError(f"marker {marker_id} did not reach target in {timeout_s:.1f}s")
-            time.sleep(0.05)
+    while True:
+        found = conn.execute(
+            sql.SQL("SELECT 1 FROM {} WHERE id = %s").format(ident(MARKER_TABLE)), (marker_id,)
+        ).fetchone()
+        if found:
+            return time.monotonic() - started
+        if time.monotonic() - started > timeout_s:
+            raise TimeoutError(f"marker {marker_id} did not reach target in {timeout_s:.1f}s")
+        time.sleep(0.05)
 
 
 @contextmanager
