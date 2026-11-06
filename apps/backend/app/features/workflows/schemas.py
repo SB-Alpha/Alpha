@@ -12,11 +12,13 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # 상태·단계
@@ -51,6 +53,9 @@ PreflightStatus = Literal["pass", "fail", "unknown", "info"]
 PreflightVerdict = Literal["go", "no_go", "unverified"]
 CheckStatus = Literal["pass", "fail", "unknown"]
 CutoverDecision = Literal["go", "needs_confirmation", "no_go"]
+TargetInfraType = Literal["gcp", "azure", "ncp"]
+
+_SECRET_LIKE_PARAM = re.compile(r"password|passwd|secret|token|api_?key|private_?key|credential", re.IGNORECASE)
 
 # 이 단계를 시작하기 전에 사람의 승인이 필요합니다. ① 계획 승인 ② 전환 승인
 GATE_BEFORE: dict[StageName, Gate] = {
@@ -76,18 +81,62 @@ class RunContext(Protocol):
 # ---------------------------------------------------------------------------
 
 
+class TargetInfraConfig(BaseModel):
+    """목적지 클라우드 선택. 해석은 어댑터가 합니다 (docs/TARGET_ADAPTER_SPEC.md)."""
+
+    provider: TargetInfraType = "gcp"
+    region: str | None = None
+    project_id: str | None = None  # 클라우드별 소속 단위. GCP 는 프로젝트 ID
+    extra_params: dict[str, Any] = Field(default_factory=dict)  # 어댑터 전용 값. 비밀은 secret:// 참조만
+
+    @field_validator("extra_params")
+    @classmethod
+    def _no_raw_secrets(cls, params: dict[str, Any]) -> dict[str, Any]:
+        for key, value in params.items():
+            is_reference = isinstance(value, str) and value.startswith("secret://")
+            if _SECRET_LIKE_PARAM.search(key) and not is_reference:
+                raise ValueError(f"extra_params.{key} 에는 원문 대신 secret:// 참조를 넣으세요")
+        return params
+
+
 class MigrationRequest(BaseModel):
     """이전 요청. 비밀번호·키 원문은 넣지 않고 참조(ARN, Secret 경로)만 받습니다."""
 
-    github_repo_url: str
+    github_repo_url: str | None = None  # 선택. 이미지는 provisioning 이 원본 ECR 에서 복사합니다 (PR #40)
+    service_name: str | None = None  # 원본 서비스 이름. ecs_service 를 비우면 이 값을 씁니다
     aws_region: str
     aws_role_ref: str | None = None  # 원본 조회용 IAM 역할 ARN
     aws_credentials_ref: str | None = None  # 원본 AWS 자격증명 참조 (secret://... 등)
     ecs_service: str | None = None
-    rds_instance_id: str | None = None
+    rds_instance_id: str | None = None  # 비우면 assessment 가 계정의 RDS 가 하나뿐일 때 고릅니다
     db_credentials_ref: str | None = None  # 예: Secrets Manager ARN. 값 금지
     db_admin_ref: str | None = None  # 원본 DB 관리자 계정 참조
     target_region: str = "asia-northeast3"
+    target_infra: TargetInfraConfig | None = None  # 없으면 GCP
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_derived_fields(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping):
+            return data
+        values = dict(data)
+        service = values.get("service_name")
+        if isinstance(service, str):
+            values["service_name"] = service.strip() or None
+        if values.get("service_name") and not values.get("ecs_service"):
+            values["ecs_service"] = values["service_name"]
+        target = values.get("target_infra")
+        region = target.get("region") if isinstance(target, Mapping) else getattr(target, "region", None)
+        if region and not values.get("target_region"):
+            values["target_region"] = region
+        return values
+
+    @model_validator(mode="after")
+    def _target_regions_agree(self) -> MigrationRequest:
+        region = self.target_infra.region if self.target_infra else None
+        if region and region != self.target_region:
+            raise ValueError(f"target_region({self.target_region})과 target_infra.region({region})이 다릅니다")
+        return self
 
 
 class ApproveRequest(BaseModel):
@@ -202,3 +251,4 @@ class RunDetail(RunStatus):
     """단건 응답. 저장하지 않고 응답할 때 계산한 값을 더합니다."""
 
     cutover_readiness: CutoverReadiness | None = None  # 승인 ② 대기 중일 때만 채웁니다
+    cdc_job_id: str | None = None  # 이 run 의 CDC 에이전트 작업 ID. 직접 제어(/db-migration/jobs/...)에 씁니다

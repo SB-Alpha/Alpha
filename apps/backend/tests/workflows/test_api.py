@@ -119,7 +119,7 @@ def test_abort_then_commands_conflict(client):
 def test_errors_for_unknown_run_and_bad_input(client):
     assert client.get("/runs/mig-missing").status_code == 404
     assert client.post("/runs/mig-missing/abort").status_code == 404
-    assert client.post("/runs", json={"aws_region": "ap-northeast-2"}).status_code == 422
+    assert client.post("/runs", json={"github_repo_url": "https://github.com/example/target-app"}).status_code == 422
 
     run_id = client.post("/runs", json=BODY).json()["run_id"]
     assert client.post(f"/runs/{run_id}/stages/unknown/manual", json={"output": {}}).status_code == 422

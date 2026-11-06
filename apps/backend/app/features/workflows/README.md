@@ -44,9 +44,9 @@ def run(inp: <Module>Input, ctx: RunContext) -> <Module>Output: ...
 
 | 메서드 | 경로 | 설명 |
 | --- | --- | --- |
-| POST | `/runs` | 이전 요청(`MigrationRequest`)으로 run 생성 후 백그라운드로 진행 (201) |
+| POST | `/runs` | 이전 요청(`MigrationRequest`)으로 run 생성 후 백그라운드로 진행 (201). `github_repo_url` 은 선택이고, `service_name` 이 있으면 비어 있는 `ecs_service` 를 채웁니다. 어댑터가 없는 목적지는 `422` |
 | GET | `/runs` | 최근 run 목록 (`limit` 1~200) |
-| GET | `/runs/{id}` | run 상태 (`RunDetail`: `RunStatus` + 승인 ② 대기 중일 때 `cutover_readiness`) |
+| GET | `/runs/{id}` | run 상태 (`RunDetail`: `RunStatus` + 승인 ② 대기 중일 때 `cutover_readiness`, CDC 작업 ID `cdc_job_id`) |
 | POST | `/runs/{id}/approve` | `{"gate": "plan" \| "cutover", "comment": ..., "approver": ..., "acknowledge_unknown": false, "preflight_verdict": ..., "preflight_measured_at": ...}` 승인 후 진행. 승인 ②는 아래 판정을 통과해야 합니다. `approver` 는 100자 이내, 공백만 있으면 없는 값. 네트워크 호출을 하지 않습니다 |
 | GET | `/runs/{id}/preflight` | 실시간 전환 전 점검 (`PreflightReport`). 참고용입니다. `waiting_approval`/`cutover` 가 아니면 `409` |
 | POST | `/runs/{id}/abort` | 중단 (`{"reason": ...}` 선택). 이어서 백그라운드로 복제 자원을 정리합니다 |
@@ -56,6 +56,9 @@ def run(inp: <Module>Input, ctx: RunContext) -> <Module>Output: ...
 | GET·POST | `/runs/{id}/diagnosis`, `/runs/{id}/diagnose` | 실패한 run 의 원인·복구 조치. 실패가 아니면 `409` |
 
 상태가 맞지 않는 명령은 `409`, 없는 run은 `404`, 잘못된 입력은 `422`입니다.
+
+## 목적지 어댑터 (`target_adapters.py`)
+provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어댑터를 부릅니다. 지금은 `gcp` 만 등록돼 있고 `target_infra` 가 없는 요청도 `gcp` 입니다. 새 클라우드의 계약과 아직 GCP 에 묶인 부분은 `docs/TARGET_ADAPTER_SPEC.md` 에 있습니다.
 
 ## 승인 ② 판정
 `readiness.py` 가 복제 상태, 초기 복사, 복제 지연, 불일치 테이블, 목적지 앱 상태를 봅니다. 화면과 API 가 같은 판정을 씁니다.

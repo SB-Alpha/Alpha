@@ -8,6 +8,7 @@ from functools import lru_cache
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 
 from app.core.config import get_settings
+from app.features.db_migration.guide_workflow import to_job_id
 
 from .engine import Engine, InvalidTransition
 from .healer import SelfHealingDiagnosis, diagnose_run
@@ -26,6 +27,7 @@ from .schemas import (
 )
 from .runners import RUNNERS, clean_up_cdc
 from .store import RunNotFound, RunStore
+from .target_adapters import UnsupportedTarget, adapter_for
 
 router = APIRouter(prefix="/runs", tags=["workflows"])
 
@@ -48,7 +50,7 @@ def _waiting_at_cutover(run: RunStatus) -> bool:
 
 def _detail(run: RunStatus) -> RunDetail:
     readiness = cutover_readiness(run) if _waiting_at_cutover(run) else None
-    return RunDetail(**run.model_dump(), cutover_readiness=readiness)
+    return RunDetail(**run.model_dump(), cutover_readiness=readiness, cdc_job_id=to_job_id(run.run_id))
 
 
 def _apply(run_id: str, action: Callable[[], RunStatus]) -> RunDetail:
@@ -64,6 +66,10 @@ def _apply(run_id: str, action: Callable[[], RunStatus]) -> RunDetail:
 def create_run(
     req: MigrationRequest, background: BackgroundTasks, engine: Engine = Depends(get_engine)
 ) -> RunStatus:
+    try:
+        adapter_for(req)
+    except UnsupportedTarget as exc:
+        raise HTTPException(422, str(exc)) from None
     run = engine.create_run(req)
     background.add_task(engine.advance, run.run_id)
     return run

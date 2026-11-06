@@ -21,6 +21,7 @@ from .context import RunAborted
 from .engine import CUTOVER_ON_SOURCE, CUTOVER_OUTCOME, StageRunner
 from .prober import ProbedContext, prober_from_env
 from .schemas import RunContext, RunStatus, StageName, WorkflowState
+from .target_adapters import adapter_for
 
 log = logging.getLogger(__name__)
 
@@ -402,15 +403,7 @@ def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
 def run_provisioning(run: RunStatus, ctx: RunContext) -> Any:
     # planning 출력의 target_infra 로 목적지 인프라(VPC, Cloud SQL)를 프로비저닝합니다 (PR #40).
     target_infra = _extract_plan_target_infra(run)
-
-    from app.features.provisioning import service as provisioning_service
-    from app.features.provisioning.schemas import ProvisioningInput
-
-    inp = ProvisioningInput(
-        run_id=run.run_id,
-        target_infra=target_infra,
-    )
-    res = provisioning_service.run(inp, ctx)
+    res = adapter_for(run.request).provision(run.run_id, target_infra, run.request.target_infra, ctx)
     metrics = _private_ip_metric(res)
     if ctx is not None and metrics:
         ctx.report("running", 100, metrics)
@@ -616,18 +609,7 @@ def run_app_deploy(run: RunStatus, ctx: RunContext) -> Any:
       - GCP_PROJECT_ID: 배포 대상 GCP 프로젝트 ID
     """
     target_infra = _extract_plan_target_infra(run)
-
-    import os
-    from app.features.provisioning import service as provisioning_service
-    from app.features.provisioning.schemas import AppDeployInput
-
-    worker_url = os.environ.get("WORKER_URL")
-    inp = AppDeployInput(
-        run_id=run.run_id,
-        target_infra=target_infra,
-        update_worker_target=bool(worker_url),
-    )
-    return provisioning_service.deploy_app(inp, ctx)
+    return adapter_for(run.request).deploy_app(run.run_id, target_infra, run.request.target_infra, ctx)
 
 
 def run_cutover(
