@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
+import sqlite3
 import threading
 import time
 from collections.abc import Mapping
@@ -14,17 +16,29 @@ from typing import Any
 from .engine import StageRunner
 from .schemas import RunContext, RunStatus, StageName
 
+log = logging.getLogger(__name__)
+
 
 class MissingStageOutput(RuntimeError):
     """요청이나 앞 단계 출력이 없어 이 단계 입력을 만들 수 없을 때."""
 
 
 def _secret_encryption_metric(run: RunStatus) -> dict[str, str]:
-    """요청의 자격 증명 참조가 모두 암호화 저장소(secret://)를 가리킬 때만 보고합니다."""
+    """요청의 자격 증명 참조가 모두 secret:// 이고 암호화 저장소에 실제로 있을 때만 보고합니다.
+
+    저장소를 확인할 수 없으면 모르는 값이므로 보고하지 않습니다 (화면: 미제공).
+    """
     req = run.request
     refs = [r for r in (req.aws_credentials_ref, req.db_admin_ref, req.db_credentials_ref) if r]
-    if refs and all(r.startswith("secret://") for r in refs):
-        return {"secret_encryption": "ENCRYPTED"}
+    if not refs or not all(r.startswith("secret://") for r in refs):
+        return {}
+    try:
+        from app.core.secrets import has_secret
+
+        if all(has_secret(r) for r in refs):
+            return {"secret_encryption": "ENCRYPTED"}
+    except (ImportError, OSError, sqlite3.Error) as exc:
+        log.warning("시크릿 저장소를 확인하지 못해 암호화 지표를 생략합니다 (%s)", type(exc).__name__)
     return {}
 
 

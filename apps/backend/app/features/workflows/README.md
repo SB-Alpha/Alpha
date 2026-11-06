@@ -54,7 +54,7 @@ def run(inp: <Module>Input, ctx: RunContext) -> <Module>Output: ...
 상태가 맞지 않는 명령은 `409`, 없는 run은 `404`, 잘못된 입력은 `422`입니다.
 
 ## 화면 지표와 시뮬레이션
-- `secret_encryption`: 요청의 자격 증명 참조가 모두 `secret://` 일 때만 `ENCRYPTED`.
+- `secret_encryption`: 요청의 자격 증명 참조가 모두 `secret://` 이고 암호화 저장소에 실제로 있을 때만 `ENCRYPTED`. 확인할 수 없으면 "미제공" 입니다.
 - `cloud_sql_private_ip`: provisioning 이 돌려준 주소가 사설 IP 면 `SECURE`, 아니면 `PUBLIC`.
 - `serving`·`cutover_seconds`: 에이전트의 `traffic_mode`·`cutover_ms` 에서 옮깁니다.
 - `iam_audit_status`·`failed_requests`: 보내는 모듈이 아직 없어 "미제공" 입니다. 그래서 `COMPLIANT` 배지도 켜지지 않습니다.

@@ -9,28 +9,41 @@ type Props = {
   onApplySimulationInput: (input: Record<string, unknown>) => void;
 };
 
+/** 어느 실패에 대한 응답인지 key 로 남깁니다. key 가 다르면 지난 실패의 결과이므로 보여주지 않습니다. */
+type DiagnosisResult = {
+  key: string;
+  diagnosis: SelfHealingDiagnosis | null;
+  error: string | null;
+};
+
 export function SelfHealingCard({ run, isBusy, onApplySimulationInput }: Props) {
   const isFailed = run.state === "failed";
-  const [diagnosis, setDiagnosis] = useState<SelfHealingDiagnosis | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const loading = isFailed && !diagnosis && !error;
+  const runId = run.run_id;
+  const failureKey = `${runId}:${run.updated_at}`;
+  const [result, setResult] = useState<DiagnosisResult | null>(null);
+  const current = result?.key === failureKey ? result : null;
+  const diagnosis = current?.diagnosis ?? null;
+  const error = current?.error ?? null;
+  const loading = isFailed && !current;
 
   useEffect(() => {
     if (!isFailed) return;
     let isCurrent = true;
     workflows
-      .getDiagnosis(run.run_id)
+      .getDiagnosis(runId)
       .then((data) => {
-        if (isCurrent) setDiagnosis(data);
+        if (isCurrent) setResult({ key: failureKey, diagnosis: data, error: null });
       })
       .catch((err) => {
-        if (isCurrent) setError(err instanceof Error ? err.message : String(err));
+        if (isCurrent) {
+          setResult({ key: failureKey, diagnosis: null, error: err instanceof Error ? err.message : String(err) });
+        }
       });
 
     return () => {
       isCurrent = false;
     };
-  }, [run.run_id, isFailed, run.updated_at]);
+  }, [runId, isFailed, failureKey]);
 
   if (!isFailed) return null;
 

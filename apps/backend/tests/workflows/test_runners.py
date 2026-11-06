@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -30,6 +31,12 @@ REQUEST = MigrationRequest(
     aws_credentials_ref="secret://mig-001/source-cloud",
     db_admin_ref="secret://mig-001/source-db-admin",
 )
+
+
+@pytest.fixture(autouse=True)
+def no_real_secret_store(monkeypatch):
+    """테스트가 실제 시크릿 DB 를 만들거나 읽지 않게 합니다."""
+    monkeypatch.setattr("app.core.secrets.has_secret", lambda ref: False)
 
 
 @pytest.fixture
@@ -414,13 +421,31 @@ def _planning_metrics(engine, request):
     return {k: v for m in reports for k, v in m.items()}
 
 
-def test_planning_reports_encryption_only_for_secret_refs_and_no_iam_audit(engine, fake_assessment):
+def test_planning_reports_encryption_only_for_secrets_in_the_store(engine, fake_assessment, monkeypatch):
+    monkeypatch.setattr("app.core.secrets.has_secret", lambda ref: True)
     metrics = _planning_metrics(engine, REQUEST)
     assert metrics["secret_encryption"] == "ENCRYPTED"
     assert "iam_audit_status" not in metrics
 
 
-def test_planning_omits_encryption_when_a_ref_is_not_a_secret_ref(engine, fake_assessment):
+def test_planning_omits_encryption_when_a_secret_is_not_in_the_store(engine, fake_assessment, monkeypatch):
+    monkeypatch.setattr("app.core.secrets.has_secret", lambda ref: ref != REQUEST.db_admin_ref)
+    assert "secret_encryption" not in _planning_metrics(engine, REQUEST)
+
+
+def test_planning_omits_encryption_when_the_store_cannot_be_checked(engine, fake_assessment, monkeypatch):
+    def unavailable(ref):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr("app.core.secrets.has_secret", unavailable)
+    assert "secret_encryption" not in _planning_metrics(engine, REQUEST)
+
+
+def test_planning_omits_encryption_when_a_ref_is_not_a_secret_ref(engine, fake_assessment, monkeypatch):
+    def must_not_be_called(ref):
+        raise AssertionError(ref)
+
+    monkeypatch.setattr("app.core.secrets.has_secret", must_not_be_called)
     request = REQUEST.model_copy(update={"aws_credentials_ref": "profile:default"})
     assert "secret_encryption" not in _planning_metrics(engine, request)
 
