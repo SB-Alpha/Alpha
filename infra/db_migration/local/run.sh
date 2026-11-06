@@ -77,9 +77,18 @@ print("validation mismatch:", v.get("mismatch"), "rows:", v.get("rows_checked"))
     # backend run·stop 전체 흐름 (VPN은 건너뜀). backend 의존성이 있는 python으로 실행한다.
     "${PYTHON:-python3}" e2e_run.py
     ;;
+  workflow)
+    # workflows 엔진·컷오버 전체 흐름 (클라우드 없음). serve 를 띄운 뒤 다른 터미널에서 prepare·verify 를 부른다.
+    shift
+    "${PYTHON:-python3}" e2e_workflow.py "$@"
+    ;;
+  load)
+    # fake-worker 로 쓰기 부하를 보낸다. 끝나면 목적지에 모두 반영됐는지 출력한다.
+    compose exec -T fake-worker python load.py "${2:-30}" "${3:-10}"
+    ;;
   down)
     compose down -v
     ;;
   *)
-    echo "usage: $0 up|e2e [seconds]|run|down" >&2; exit 2;;
+    echo "usage: $0 up|e2e [seconds]|run|workflow serve|prepare|verify <run_id>|load [seconds] [rps]|down" >&2; exit 2;;
 esac
