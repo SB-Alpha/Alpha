@@ -3,12 +3,17 @@ from __future__ import annotations
 from typing import Any
 from pydantic import BaseModel, Field
 
+from .providers import DEFAULT_PROVIDER
+
 
 class ProvisioningInput(BaseModel):
     """목적지 인프라를 만드는 단계(provisioning)의 입력."""
 
     run_id: str
     target_infra: dict[str, Any]
+    # 목적지 클라우드. providers.PROVIDERS 에 등록된 이름이어야 한다. 비우면 gcp.
+    provider: str = DEFAULT_PROVIDER
+    # 목적지 소속 단위(GCP 프로젝트 ID, Azure 구독 ID 등). 비우면 provider 가 정한 환경변수를 읽는다.
     project_id: str | None = None
     # 계획에 기존 리소스 삭제가 들어 있어도 진행할지. 기본은 막음.
     allow_destroy: bool = False
@@ -33,6 +38,7 @@ class AppDeployInput(BaseModel):
     run_id: str
     # provisioning 때와 같은 값을 다시 넘김.
     target_infra: dict[str, Any]
+    provider: str = DEFAULT_PROVIDER  # provisioning 때와 같은 값을 다시 넘김.
     project_id: str | None = None
     allow_destroy: bool = False
     dry_run: bool = False

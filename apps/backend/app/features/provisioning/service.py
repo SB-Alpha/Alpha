@@ -12,34 +12,15 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
+from .providers import DEFAULT_PROVIDER, GCP, get_provider, terraform_dir
 from .schemas import AppDeployInput, AppDeployOutput, ProvisioningInput, ProvisioningOutput
 from .target import TargetBuildError, build_target, find_problems
 from .terraform import ProvisioningError, TerraformCli, summarize_plan
 from .worker_client import WorkerClient
 
-DEFAULT_REGION = "asia-northeast3" 
-
-# Terraform 루트 모듈(infra/terraform/gcp)이 선언한 변수들.
-KNOWN_VARIABLES = frozenset(
-    {
-        "region",
-        "service_name",
-        "source_image",
-        "container_image",
-        "container_port",
-        "cpu",
-        "memory",
-        "health_check_path",
-        "env_vars",
-        "secret_refs",
-        "db_version",
-        "db_name",
-        "db_user",
-        "db_tier",
-        "db_disk_size_gb",
-        "db_logical_decoding",
-    }
-)
+# 예전 코드가 이 이름을 읽을 수 있어 GCP 값으로 남겨 둔다. 목적지별 값은 providers.py 에 있다.
+DEFAULT_REGION = GCP.default_region
+KNOWN_VARIABLES = GCP.known_variables
 
 # terraform apply 출력 줄을 알아보는 패턴 (진행률 계산용)
 #   "module.x.y: Creating..."                    → 시작
@@ -52,22 +33,27 @@ class Reporter(Protocol):
     def report(self, state: str, progress: int, metrics: dict[str, Any] | None = None, message: str | None = None) -> None: ...
 
 
-def default_terraform() -> TerraformCli:
-    repo_root = Path(__file__).resolve().parents[5]
-    workdir = Path(os.getenv("PROVISIONING_TF_DIR") or repo_root / "infra" / "terraform" / "gcp")
-    return TerraformCli(workdir, binary=os.getenv("TERRAFORM_BIN", "terraform"))
+def default_terraform(provider: str = DEFAULT_PROVIDER) -> TerraformCli:
+    config = get_provider(provider)
+    return TerraformCli(terraform_dir(config), binary=os.getenv("TERRAFORM_BIN", "terraform"))
 
 
-def resolve_project_id(project_id: str | None) -> str:
-    resolved = project_id or os.getenv("GCP_PROJECT_ID")
+def resolve_project_id(project_id: str | None, provider: str = DEFAULT_PROVIDER) -> str:
+    config = get_provider(provider)
+    resolved = project_id or os.getenv(config.scope_env)
     if not resolved:
-        raise ProvisioningError("GCP 프로젝트 ID 가 없습니다. 입력의 project_id 나 환경변수 GCP_PROJECT_ID 를 지정하세요")
+        raise ProvisioningError(
+            f"{config.scope_label} 가 없습니다. 입력의 project_id 나 환경변수 {config.scope_env} 를 지정하세요"
+        )
     return resolved
 
 
-def build_tfvars(target_infra: Mapping[str, Any], *, project_id: str, deploy_app: bool) -> dict[str, Any]:
-    values = {key: value for key, value in target_infra.items() if key in KNOWN_VARIABLES and value is not None}
-    values.update(project_id=project_id, deploy_app=deploy_app, create_vpn_key=True)
+def build_tfvars(
+    target_infra: Mapping[str, Any], *, project_id: str, deploy_app: bool, provider: str = DEFAULT_PROVIDER
+) -> dict[str, Any]:
+    config = get_provider(provider)
+    values = {key: value for key, value in target_infra.items() if key in config.known_variables and value is not None}
+    values.update({config.scope_variable: project_id, "deploy_app": deploy_app, **config.forced_variables})
     return values
 
 
@@ -95,8 +81,8 @@ def _converge(
     *,
     deploy_app: bool,
 ) -> tuple[str, dict[str, int], bool, dict[str, Any]]:
-    project_id = resolve_project_id(inp.project_id)
-    values = build_tfvars(inp.target_infra, project_id=project_id, deploy_app=deploy_app)
+    project_id = resolve_project_id(inp.project_id, inp.provider)
+    values = build_tfvars(inp.target_infra, project_id=project_id, deploy_app=deploy_app, provider=inp.provider)
 
     # 임시 폴더에 변수 파일과 계획 파일을 두고, 끝나면 폴더째 자동으로 지워진다 (with 블록을 나가는 순간)
     with tempfile.TemporaryDirectory(prefix="alpha-tf-") as tmp:
@@ -134,10 +120,10 @@ def _converge(
 
 def run(inp: ProvisioningInput, ctx: Reporter, *, terraform: TerraformCli | None = None) -> ProvisioningOutput:
     # provisioning 단계: 목적지 인프라를 만들고 target 을 돌려준다.
-    tf = terraform or default_terraform()
+    tf = terraform or default_terraform(inp.provider)
     project_id, counts, applied, outputs = _converge(inp, ctx, tf, deploy_app=False)
 
-    region = inp.target_infra.get("region") or DEFAULT_REGION
+    region = inp.target_infra.get("region") or get_provider(inp.provider).default_region
     try:
         target = build_target(outputs, run_id=inp.run_id, project_id=project_id, region=region)
     except TargetBuildError as exc:
@@ -202,10 +188,10 @@ def deploy_app(
                 "Worker 주소(환경변수 WORKER_URL)가 없습니다. 지정하거나 입력의 update_worker_target 을 false 로 하세요"
             )
 
-    tf = terraform or default_terraform()
+    tf = terraform or default_terraform(inp.provider)
     project_id, counts, applied, outputs = _converge(inp, ctx, tf, deploy_app=True)
 
-    region = inp.target_infra.get("region") or DEFAULT_REGION
+    region = inp.target_infra.get("region") or get_provider(inp.provider).default_region
     try:
         target = build_target(outputs, run_id=inp.run_id, project_id=project_id, region=region)
     except TargetBuildError as exc:
