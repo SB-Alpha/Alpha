@@ -110,7 +110,7 @@ def open_cursor(host: str, port: int, user: str, password: str,
 
 
 def collect_catalog(host: str, port: int, user: str, password: str,
-                    database: str = "postgres") -> dict:
+                    database: str = "postgres", cloud: str = "aws") -> dict:
     """접속해 카탈로그를 수집한다. 연결/실행 실패는 예외로 올라간다(호출자가 gap 처리)."""
     with open_cursor(host, port, user, password, database) as cur:
-        return pg_tables.collect_pg_catalog(cur)
+        return pg_tables.collect_pg_catalog(cur, cloud)

@@ -49,7 +49,7 @@ def fx(monkeypatch):
         finally:
             s["closed"] += 1
 
-    def catalog(host, port, user, password, database):
+    def catalog(host, port, user, password, database, cloud="aws"):
         s["args"] = (host, port, user, database)
         if s["exc"]:
             raise s["exc"]

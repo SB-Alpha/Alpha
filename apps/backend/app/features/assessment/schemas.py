@@ -219,6 +219,7 @@ class AssessmentInput(BaseModel):
     run_id: str | None = None
     source_kind: Literal["aws", "manual"] = "aws"
     github_repo_url: str | None = None
+    source_cloud: Literal["aws", "gcp", "azure"] = "aws"  # source_kind="aws" 일 때 원본 클라우드. db.collect 가 수집기를 고름
     aws_credentials_ref: str | None = None  # 원본 AWS 키 이름표. source_kind="aws" 면 필수
     db_admin_ref: str | None = None  # 원본 DB 관리자 계정 이름표 (db.py 가 PG 카탈로그 조회에 씀)
     aws_region: str | None = None  # 원본 AWS 리전. 예: "ap-northeast-2". source_kind="aws" 면 필수

@@ -12,10 +12,11 @@ from typing import Any
 
 from app.features.assessment.schemas import TableInfo
 
-# rdsadmin: RDS 관리용 내부 DB, 템플릿 DB: 이관 대상 아님
+# rdsadmin·cloudsqladmin·azure_*: 각 CSP 관리용 내부 DB, 템플릿 DB: 이관 대상 아님
 SQL_DATABASES = (
     "SELECT datname FROM pg_database "
-    "WHERE NOT datistemplate AND datname <> 'rdsadmin' ORDER BY datname"
+    "WHERE NOT datistemplate AND datname NOT IN ('rdsadmin', 'cloudsqladmin', 'azure_maintenance', 'azure_sys') "
+    "ORDER BY datname"
 )
 SQL_CURRENT_DB = "SELECT current_database()"
 SQL_WAL_LEVEL = "SHOW wal_level"
@@ -35,13 +36,23 @@ SELECT n.nspname, c.relname, pg_get_userbyid(c.relowner), c.relreplident, c.relt
    AND n.nspname NOT LIKE 'pg_toast%'
  ORDER BY n.nspname, c.relname
 """
-# rds_replication 멤버십은 직접 멤버만 본다(상속된 간접 멤버십은 미확인).
-SQL_CAN_REPLICATE = """
+# CSP별로 복제를 허용하는 역할. 멤버십은 직접 멤버만 본다(상속된 간접 멤버십은 미확인).
+REPLICATION_ROLES = {
+    "aws": ("rds_replication",),
+    "gcp": ("cloudsqlsuperuser",),
+    "azure": ("azure_pg_admin",),
+}
+
+
+def sql_can_replicate(cloud: str = "aws") -> str:
+    roles = ", ".join(f"'{r}'" for r in REPLICATION_ROLES[cloud])  # 고정 상수라 주입 위험 없음
+    return f"""
 SELECT r.rolreplication OR r.rolsuper OR EXISTS (
          SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
-          WHERE m.member = r.oid AND g.rolname = 'rds_replication')
+          WHERE m.member = r.oid AND g.rolname IN ({roles}))
   FROM pg_roles r WHERE r.rolname = current_user
 """
+
 
 _REPLIDENT = {"d": "default", "f": "full", "n": "nothing", "i": "index"}
 
@@ -78,7 +89,7 @@ def _row_estimate(v: Any) -> int | None:
     return None if v is None or float(v) < 0 else int(v)
 
 
-def collect_pg_catalog(cur: Any) -> dict:
+def collect_pg_catalog(cur: Any, cloud: str = "aws") -> dict:
     """카탈로그 정보를 수집한다. 실패한 항목은 None/[]로 두고 gaps에 사유를 남긴다."""
     out: dict[str, Any] = {
         "databases": [], "current_database": None, "wal_level": None,
@@ -103,7 +114,7 @@ def collect_pg_catalog(cur: Any) -> dict:
     step("wal_level", lambda: str(_one(cur, SQL_WAL_LEVEL)).strip())
     step("max_replication_slots", lambda: int(_one(cur, SQL_MAX_SLOTS)))
     step("slots_in_use", lambda: int(_one(cur, SQL_SLOTS_IN_USE)))
-    step("can_replicate", lambda: _bool(_one(cur, SQL_CAN_REPLICATE)))
+    step("can_replicate", lambda: _bool(_one(cur, sql_can_replicate(cloud))))
 
     def tables():
         res = []
