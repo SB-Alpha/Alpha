@@ -82,11 +82,16 @@ def _converge(
     tf: TerraformCli,
     *,
     deploy_app: bool,
-    # init 이 끝난 뒤, 계획을 세우기 전에 부른다. 돌려준 값을 변수에 더한다 (앱 배포의 이미지 복사에 쓴다).
     prepare: Callable[[TerraformCli], Mapping[str, Any]] | None = None,
 ) -> tuple[str, dict[str, int], bool, dict[str, Any]]:
     project_id = resolve_project_id(inp.project_id, inp.provider)
-    values = build_tfvars(inp.target_infra, project_id=project_id, deploy_app=deploy_app, provider=inp.provider)
+    target_infra = inp.target_infra
+    adapt = get_provider(inp.provider).adapt
+    if adapt is not None: 
+        target_infra, notes = adapt(target_infra)
+        for note in notes:
+            ctx.report("running", 4, message=note)
+    values = build_tfvars(target_infra, project_id=project_id, deploy_app=deploy_app, provider=inp.provider)
 
     # 임시 폴더에 변수 파일과 계획 파일을 두고, 끝나면 폴더째 자동으로 지워진다 (with 블록을 나가는 순간)
     with tempfile.TemporaryDirectory(prefix="alpha-tf-") as tmp:
@@ -102,7 +107,7 @@ def _converge(
 
         ctx.report("running", 15, message="변경 계획 확인")
         exit_code = tf.plan(var_file, plan_file)  # 0 = 바뀔 것 없음, 2 = 바뀔 것 있음
-        if exit_code == 0:  # 바뀔 것이 없다 (이미 원하는 상태)
+        if exit_code == 0:  
             counts, deletions = {"add": 0, "change": 0, "destroy": 0}, []
         else:
             counts, deletions = summarize_plan(tf.show_plan(plan_file))
@@ -125,6 +130,7 @@ def _converge(
     return project_id, counts, applied, outputs
 
 
+
 def run(
     inp: ProvisioningInput,
     ctx: Reporter,
@@ -132,8 +138,7 @@ def run(
     terraform: TerraformCli | None = None,
     put_secret: PutSecret | None = None,
 ) -> ProvisioningOutput:
-    # provisioning 단계: 목적지 인프라를 만들고 target 을 돌려준다.
-    # 목적지 비밀(관리자 계정, VPN 자격 증명)은 비밀 저장소에 넣고 결과에는 이름표만 남긴다.
+
     tf = terraform or default_terraform(inp.provider)
     project_id, counts, applied, outputs = _converge(inp, ctx, tf, deploy_app=False)
 
@@ -197,6 +202,7 @@ def _output_value(outputs: Mapping[str, Any], name: str) -> Any:
     return entry.get("value") if isinstance(entry, Mapping) else None
 
 
+
 def _image_step(
     inp: AppDeployInput, ctx: Reporter, transfer: Callable[..., TransferResult]
 ) -> Callable[[TerraformCli], dict[str, Any]] | None:
@@ -244,6 +250,7 @@ def _image_step(
     return prepare
 
 
+
 def deploy_app(
     inp: AppDeployInput,
     ctx: Reporter,
@@ -255,8 +262,7 @@ def deploy_app(
     worker: WorkerClient | None = None,
     transfer: Callable[..., TransferResult] = transfer_image,
 ) -> AppDeployOutput:
-    # app_deploy 단계: 목적지 앱(Cloud Run)을 배포하고 app_url 을 돌려줌.
-    # 앱이 준비되면 Worker 가 그 주소로 보내도록 알림 (update_worker_target).
+  
     worker_client = None
     if inp.update_worker_target and not inp.dry_run:
         worker_client = worker or WorkerClient.from_env()
@@ -281,7 +287,6 @@ def deploy_app(
     if not app_url:
         raise ProvisioningError("app_url 출력이 없습니다. 앱이 배포되지 않았습니다")
 
-    # /health/ready 는 DB 연결까지 본다. 컷오버 전에 DB 에 붙는지 알아야 해서, TF startup probe(health_check_path, /health/live)와 일부러 다르다.
     _wait_healthy(
         app_url.rstrip("/") + "/health/ready",
         ctx,

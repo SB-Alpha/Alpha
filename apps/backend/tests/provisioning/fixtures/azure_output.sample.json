@@ -1,0 +1,18 @@
+{
+  "_note": "infra/azure/outputs.tf 의 terraform output -json 모양을 본뜬 가짜 값. 실제 Azure 출력이 아니다. VPN 키(vpn_credentials_json)는 Azure 에 없다.",
+  "app_url": {"sensitive": false, "type": "string", "value": null},
+  "db_admin_password": {"sensitive": true, "type": "string", "value": "FAKE-AZURE-ADMIN-PASSWORD-DO-NOT-LEAK"},
+  "db_admin_user": {"sensitive": false, "type": "string", "value": "alphaadmin"},
+  "db_instance": {"sensitive": false, "type": "string", "value": "psql-target-app"},
+  "db_name": {"sensitive": false, "type": "string", "value": "workitems"},
+  "db_port": {"sensitive": false, "type": "number", "value": 5432},
+  "db_private_ip": {"sensitive": false, "type": "string", "value": "10.20.2.4"},
+  "db_ssl_mode": {"sensitive": false, "type": "string", "value": "ENCRYPTED_ONLY"},
+  "db_user": {"sensitive": false, "type": "string", "value": "alphaadmin"},
+  "db_version": {"sensitive": false, "type": "string", "value": "16"},
+  "psa_range_cidr": {"sensitive": false, "type": "string", "value": "10.20.2.0/24"},
+  "registry_url": {"sensitive": false, "type": "string", "value": "acrtargetapp.azurecr.io"},
+  "resource_group_name": {"sensitive": false, "type": "string", "value": "rg-alpha-target"},
+  "subnet_cidrs": {"sensitive": false, "type": ["tuple", ["string"]], "value": ["10.20.1.0/24"]},
+  "vpc_name": {"sensitive": false, "type": "string", "value": "vnet-target-app"}
+}

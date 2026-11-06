@@ -77,7 +77,62 @@ class GcpTargetAdapter:
         return provisioning_service.deploy_app(inp, ctx)
 
 
-TARGET_ADAPTERS: Mapping[TargetInfraType, TargetAdapter] = {"gcp": GcpTargetAdapter()}
+
+def _azure_infra(target_infra: dict[str, Any], config: TargetInfraConfig | None) -> dict[str, Any]:
+    """조사 결과에 요청의 Azure 값을 얹는다: 리전은 요청 값이 우선, 리소스 그룹은 extra_params 에서 받는다."""
+    infra = dict(target_infra)
+    if config is None:
+        return infra
+    if config.region:
+        infra["region"] = config.region
+    group = config.extra_params.get("resource_group") or config.extra_params.get("resource_group_name")
+    if group:
+        infra["resource_group_name"] = group
+    return infra
+
+
+class AzureTargetAdapter:
+    """Container Apps + PostgreSQL Flexible Server (infra/azure).
+
+    구독 ID 는 요청의 project_id, 없으면 환경변수 AZURE_SUBSCRIPTION_ID 를 씁니다.
+    앱 크기(cpu/memory)는 provisioning 이 Azure 규칙에 맞춰 바꾸고, DB 등급(db_tier)은 넘기지 않습니다.
+    """
+    provider: TargetInfraType = "azure"
+
+    def provision(
+        self, run_id: str, target_infra: dict[str, Any], config: TargetInfraConfig | None, ctx: RunContext
+    ) -> Any:
+        from app.features.provisioning import service as provisioning_service
+        from app.features.provisioning.schemas import ProvisioningInput
+
+        inp = ProvisioningInput(
+            run_id=run_id,
+            target_infra=_azure_infra(target_infra, config),
+            provider=self.provider,
+            project_id=_project_id(config),
+        )
+        return provisioning_service.run(inp, ctx)
+
+    def deploy_app(
+        self, run_id: str, target_infra: dict[str, Any], config: TargetInfraConfig | None, ctx: RunContext
+    ) -> Any:
+        from app.features.provisioning import service as provisioning_service
+        from app.features.provisioning.schemas import AppDeployInput
+
+        inp = AppDeployInput(
+            run_id=run_id,
+            target_infra=_azure_infra(target_infra, config),
+            provider=self.provider,
+            project_id=_project_id(config),
+            update_worker_target=bool(os.environ.get("WORKER_URL")),
+        )
+        return provisioning_service.deploy_app(inp, ctx)
+
+
+TARGET_ADAPTERS: Mapping[TargetInfraType, TargetAdapter] = {
+    "gcp": GcpTargetAdapter(),
+    "azure": AzureTargetAdapter(),
+}
 
 
 def provider_of(request: MigrationRequest) -> TargetInfraType:

@@ -121,7 +121,7 @@ def test_extra_params_accept_references_and_plain_settings():
 # -- 어댑터 선택 ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("provider", ["azure", "ncp"])
+@pytest.mark.parametrize("provider", ["ncp"])  # azure 는 어댑터가 등록되어 거절 대상이 아니다
 def test_create_run_refuses_a_target_without_an_adapter(client, provider):
     response = client.post("/runs", json={**SIMPLE_BODY, "target_infra": {"provider": provider}})
 
@@ -143,9 +143,9 @@ def test_provisioning_refuses_instead_of_building_another_cloud(tmp_path, monkey
         raise AssertionError("GCP 를 대신 구축하면 안 됩니다")
 
     monkeypatch.setattr(provisioning_service, "run", must_not_run)
-    run = _run_at_provisioning(tmp_path, MigrationRequest(**SIMPLE_BODY, target_infra={"provider": "azure"}))
+    run = _run_at_provisioning(tmp_path, MigrationRequest(**SIMPLE_BODY, target_infra={"provider": "ncp"}))
 
-    with pytest.raises(UnsupportedTarget, match="azure"):
+    with pytest.raises(UnsupportedTarget, match="ncp"):
         runners.run_provisioning(run, RecordingContext())
 
 
