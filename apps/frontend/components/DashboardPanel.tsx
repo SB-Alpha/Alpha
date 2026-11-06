@@ -102,6 +102,8 @@ export function DashboardPanel({ run }: Props) {
     probeRequests === null || probeMaxMs === null
       ? undefined
       : `실측 ${probeRequests.toLocaleString("ko-KR")}건 · 최대 ${Math.round(probeMaxMs).toLocaleString("ko-KR")}ms`;
+  const writeRequests = numberMetric(run, METRIC_KEYS.writeRequests);
+  const writeFailed = numberMetric(run, METRIC_KEYS.writeFailedRequests);
 
   const rowsText = rows && `${rows.source.toLocaleString("ko-KR")} / ${rows.target.toLocaleString("ko-KR")}`;
   // 복사 중에는 목적지 행 수가 적은 것이 정상이라 빨강으로 표시하지 않습니다.
@@ -172,10 +174,16 @@ export function DashboardPanel({ run }: Props) {
           tone={countTone(mismatch)}
         />
         <MetricTile
-          label="요청 실패"
+          label="읽기 실패 (프로버)"
           value={failed === null ? null : `${failed.toLocaleString("ko-KR")}건`}
           tone={countTone(failed)}
           hint={failedHint}
+        />
+        <MetricTile
+          label="쓰기 실패 (Worker)"
+          value={writeFailed === null ? null : `${writeFailed.toLocaleString("ko-KR")}건`}
+          tone={countTone(writeFailed)}
+          hint={writeRequests === null ? undefined : `실측 ${writeRequests.toLocaleString("ko-KR")}건`}
         />
         <MetricTile label="전환 시간 T1−T0" value={cutover === null ? null : `${cutover.toFixed(1)}초`} />
       </dl>

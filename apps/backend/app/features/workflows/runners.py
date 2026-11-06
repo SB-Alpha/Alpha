@@ -371,22 +371,66 @@ def run_cutover(
     timeout_s: float = 60.0,
     probe_settle_s: float = PROBE_SETTLE_S,
 ) -> Any:
-    """전환을 실행합니다. ALPHA_PROBE_URL 이 있으면 전환 내내 외부 프로버로 실패 수와 대기 시간을 잽니다.
+    """전환을 실행하고 실측값을 남깁니다.
 
-    시뮬레이션에서는 실제 전환이 없어 잴 대상이 없으므로 프로버를 켜지 않습니다.
+    ALPHA_PROBE_URL 이 있으면 외부 프로버로 읽기 실패 수와 대기 시간을, WORKER_URL 이 있으면 Worker 집계로
+    쓰기 실패 수를 잽니다. 시뮬레이션에서는 실제 전환이 없어 잴 대상이 없으므로 둘 다 켜지 않습니다.
     """
-    prober = None if _agent_is_simulated() else prober_from_env()
-    if prober is None:
+    is_simulated = _agent_is_simulated()
+    prober = None if is_simulated else prober_from_env()
+    worker = None if is_simulated else _cutover_worker()
+    if prober is None and worker is None:
         return _request_cutover(run, ctx, poll_interval_s, timeout_s)
 
-    prober.start()
-    probed = ProbedContext(ctx, prober)
+    if prober is not None:
+        prober.start()
+    measured = ProbedContext(ctx, prober)
     try:
-        job = _request_cutover(run, probed, poll_interval_s, timeout_s)
+        job = _request_cutover(run, measured, poll_interval_s, timeout_s)
         time.sleep(probe_settle_s)  # 전환 직후 요청까지 측정에 포함합니다.
         return job
     finally:
-        probed.finish()
+        measured.finish(_write_request_metrics(worker, _cutover_job_id(run)) if worker is not None else None)
+
+
+def _cutover_job_id(run: RunStatus) -> str:
+    from app.features.db_migration.guide_workflow import to_job_id
+
+    return to_job_id(run.run_id)
+
+
+def _cutover_worker() -> Any:
+    """Worker 집계를 읽을 클라이언트. 설정이 없거나 쓸 수 없으면 None 이고, 화면은 '미제공' 입니다."""
+    from app.features.provisioning.terraform import ProvisioningError
+    from app.features.provisioning.worker_client import WorkerClient
+
+    try:
+        return WorkerClient.from_env()
+    except (ProvisioningError, OSError) as exc:
+        log.warning("Worker 집계를 읽을 수 없어 쓰기 실패 수를 생략합니다 (%s)", type(exc).__name__)
+        return None
+
+
+def _write_request_metrics(worker: Any, job_id: str) -> dict[str, Any]:
+    """보류 시작부터 Worker 가 센 쓰기 요청. 이번 보류의 집계라고 확인되지 않으면 보고하지 않습니다."""
+    from app.features.provisioning.terraform import ProvisioningError
+
+    try:
+        status = worker.status()
+    except ProvisioningError as exc:
+        log.warning("Worker 상태를 읽지 못해 쓰기 실패 수를 생략합니다 (%s)", exc)
+        return {}
+    counts = status.get("request_counts")
+    hold_started_at = status.get("hold_started_at")
+    is_this_hold = (
+        isinstance(counts, Mapping)
+        and status.get("run_id") == job_id
+        and hold_started_at is not None
+        and counts.get("since") == hold_started_at
+    )
+    if not is_this_hold:
+        return {}
+    return {"write_requests": counts["write_total"], "write_failed_requests": counts["write_failed"]}
 
 
 def _request_cutover(

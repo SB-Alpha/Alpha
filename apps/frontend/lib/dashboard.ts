@@ -14,6 +14,8 @@ export const METRIC_KEYS = {
   failedRequests: "failed_requests",
   probeRequests: "probe_requests", // 프로버가 보낸 요청 수
   probeMaxMs: "probe_max_ms", // 가장 오래 기다린 요청
+  writeRequests: "write_requests", // 보류 시작부터 Worker 가 처리한 쓰기 요청 수
+  writeFailedRequests: "write_failed_requests", // 그중 원본 5xx·연결 실패 수
   cutoverSeconds: "cutover_seconds", // T1 − T0
   iamAuditStatus: "iam_audit_status", // "PASS" | "WARN" | "FAIL"
   cloudSqlPrivateIp: "cloud_sql_private_ip", // "SECURE" | "PUBLIC"

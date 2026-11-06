@@ -101,9 +101,9 @@ class TrafficProber:
 
 
 class ProbedContext:
-    """모듈 보고에 프로버 실측값을 더합니다. 같은 키는 실측값이 우선합니다."""
+    """모듈 보고에 프로버 실측값을 더합니다. 같은 키는 실측값이 우선합니다. 프로버가 없으면 보고만 넘깁니다."""
 
-    def __init__(self, ctx: RunContext, prober: TrafficProber) -> None:
+    def __init__(self, ctx: RunContext, prober: TrafficProber | None) -> None:
         self._ctx = ctx
         self._prober = prober
         self._last_progress = 0
@@ -116,11 +116,13 @@ class ProbedContext:
         message: str | None = None,
     ) -> None:
         self._last_progress = progress
-        self._ctx.report(state, progress, {**(metrics or {}), **self._prober.snapshot()}, message)
+        probed = self._prober.snapshot() if self._prober else {}
+        self._ctx.report(state, progress, {**(metrics or {}), **probed}, message)
 
-    def finish(self) -> None:
+    def finish(self, extra: dict[str, Any] | None = None) -> None:
         """프로버를 멈추고 최종값을 남깁니다. 실패·롤백으로 끝나도 측정값이 남도록 finally 에서 부릅니다."""
-        self._ctx.report("running", self._last_progress, self._prober.stop())
+        final = self._prober.stop() if self._prober else {}
+        self._ctx.report("running", self._last_progress, {**final, **(extra or {})})
 
 
 def prober_from_env() -> TrafficProber | None:

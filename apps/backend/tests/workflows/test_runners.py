@@ -8,10 +8,12 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from app.features.db_migration.client import AgentError
+from app.features.provisioning.terraform import ProvisioningError
 from app.features.workflows.context import with_stage
 from app.features.workflows.engine import Engine
 from app.features.workflows.runners import (
     _private_ip_metric,
+    _write_request_metrics,
     clean_up_cdc,
     DISCOVERY_MERGED_MESSAGE,
     RUNNERS,
@@ -380,7 +382,7 @@ def test_cutover_runner_with_simulation_fallback(engine, monkeypatch):
     assert last_report[2]["serving"] == "gcp"
 
 
-def _run_cutover_with_agent_metrics(engine, monkeypatch, metrics):
+def _run_cutover_with_agent_metrics(engine, monkeypatch, metrics, **cutover_options):
     monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
 
     class FakeAgent:
@@ -400,7 +402,7 @@ def _run_cutover_with_agent_metrics(engine, monkeypatch, metrics):
         def report(self, state, progress, metrics=None, message=None):
             reports.append(metrics)
 
-    run_cutover(engine.create_run(REQUEST), ctx=FakeCtx(), poll_interval_s=0.01)  # type: ignore[arg-type]
+    run_cutover(engine.create_run(REQUEST), ctx=FakeCtx(), poll_interval_s=0.01, **cutover_options)  # type: ignore[arg-type]
     return reports[-1]
 
 
@@ -605,6 +607,83 @@ def test_clean_up_cdc_passes_on_an_agent_read_failure(engine, monkeypatch):
     with pytest.raises(AgentError):
         clean_up_cdc(_run_with_cdc_stage(engine))
     assert stopped == []
+
+
+COUNTS = {"since": "t0", "write_total": 5, "write_failed": 1, "read_total": 9, "read_failed": 0}
+
+
+class _FakeWorkerStatus:
+    def __init__(self, status=None, error=None):
+        self._status = status
+        self._error = error
+
+    def status(self):
+        if self._error:
+            raise self._error
+        return self._status
+
+
+def test_write_metrics_come_from_this_runs_hold():
+    worker = _FakeWorkerStatus({"run_id": "job", "hold_started_at": "t0", "request_counts": COUNTS})
+    assert _write_request_metrics(worker, "job") == {"write_requests": 5, "write_failed_requests": 1}
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        {"run_id": "job", "hold_started_at": "t0"},
+        {"run_id": "job", "hold_started_at": "t0", "request_counts": {**COUNTS, "since": "after-restart"}},
+        {"run_id": "other", "hold_started_at": "t0", "request_counts": COUNTS},
+        {"run_id": "job", "hold_started_at": None, "request_counts": COUNTS},
+    ],
+)
+def test_write_metrics_are_omitted_when_they_may_not_cover_this_hold(status):
+    assert _write_request_metrics(_FakeWorkerStatus(status), "job") == {}
+
+
+def test_write_metrics_are_omitted_when_the_worker_is_unreachable():
+    assert _write_request_metrics(_FakeWorkerStatus(error=ProvisioningError("연결 실패")), "job") == {}
+
+
+def test_cutover_reports_write_counts_when_worker_is_configured(engine, monkeypatch):
+    monkeypatch.setattr("app.features.workflows.runners._cutover_worker", lambda: object())
+    monkeypatch.setattr(
+        "app.features.workflows.runners._write_request_metrics",
+        lambda worker, job_id: {"write_requests": 5, "write_failed_requests": 1},
+    )
+    m = _run_cutover_with_agent_metrics(engine, monkeypatch, {}, probe_settle_s=0)
+    assert m == {"write_requests": 5, "write_failed_requests": 1}
+
+
+def test_failed_cutover_still_reports_write_counts(engine, monkeypatch):
+    def fail(*args):
+        raise RuntimeError("전환 실패")
+
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+    monkeypatch.setattr("app.features.workflows.runners._cutover_worker", lambda: object())
+    monkeypatch.setattr(
+        "app.features.workflows.runners._write_request_metrics", lambda worker, job_id: {"write_requests": 2}
+    )
+    monkeypatch.setattr("app.features.workflows.runners._request_cutover", fail)
+    reports = []
+
+    class FakeCtx:
+        def report(self, state, progress, metrics=None, message=None):
+            reports.append(metrics)
+
+    with pytest.raises(RuntimeError, match="전환 실패"):
+        run_cutover(engine.create_run(REQUEST), ctx=FakeCtx())  # type: ignore[arg-type]
+
+    assert reports[-1] == {"write_requests": 2}
+
+
+def test_simulated_cutover_does_not_read_the_worker(monkeypatch):
+    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
+    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+    monkeypatch.setenv("WORKER_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("WORKER_TOKEN", "token")
+    monkeypatch.setattr("app.features.workflows.runners._request_cutover", lambda *a: {"phase": "stabilizing"})
+    assert run_cutover(None, ctx=None)["phase"] == "stabilizing"  # type: ignore[arg-type]
 
 
 WAIT_S = 5
