@@ -42,6 +42,10 @@ class JobBusy(RuntimeError):
     """Another agent is working on the job. Try again."""
 
 
+class WorkerNotReady(RuntimeError):
+    """Cutover would fail or do harm with the Worker as it is."""
+
+
 def _secret_files(settings: Settings, job_id: str) -> tuple:
     name = f"{job_id}.properties"
     return settings.secrets_dir / name, settings.agent_secrets_dir / name
@@ -264,6 +268,18 @@ class Runner:
             job.metrics["measure_error"] = self.error_text(job.job_id, exc)
         return job
 
+    def check_worker(self) -> None:
+        """Before anything changes. The Worker API does not show the target address, so that stays a premise."""
+        try:
+            mode = WorkerClient(self.settings).status().get("mode")
+        except Exception as exc:
+            raise WorkerNotReady(f"Worker is not usable: {redact.clean(str(exc))}") from exc
+        if mode != "SOURCE":
+            raise WorkerNotReady(f"Worker mode is {mode}, expected SOURCE")
+
+    def worker_configured(self) -> bool:
+        token = self.settings.worker_token_file
+        return bool(self.settings.worker_url) and (token is None or token.is_file())
 
     def start_cutover(self, job: Job, approved_by: str) -> None:
         job.report(state="running", phase="cutover", progress=75, message="쓰기 인계 시작")
@@ -281,10 +297,11 @@ class Runner:
             ev["steps"].append({"step": name, "at": now(),
                                 "elapsed_ms": round((time.monotonic() - started) * 1000, 1), **extra})
 
-        creds = Credentials(self.settings, job)
-        worker = WorkerClient(self.settings)
+        creds = worker = None
         blocked = switched = False
         try:
+            creds = Credentials(self.settings, job)
+            worker = WorkerClient(self.settings)
             # Connections open before the hold: each new one costs 500ms or more over the VPN.
             with (db.job_lock(creds.source, job_id) as locked,
                   db.connect(creds.source_app) as app_conn,
@@ -334,7 +351,9 @@ class Runner:
             step("failed", error=error)
             if not switched:
                 # No write has reached the target yet: give writes back to the source.
-                self._resume_source(job, creds, worker, blocked, step)
+                # Without credentials or a Worker client nothing was held or blocked.
+                if creds is not None and worker is not None:
+                    self._resume_source(job, creds, worker, blocked, step)
                 job.report(state="waiting_approval", phase="cutover_ready", progress=70,
                            message=f"전환 실패, 원본으로 재개: {error}")
             else:

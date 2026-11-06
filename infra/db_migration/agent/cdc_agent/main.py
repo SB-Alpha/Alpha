@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from cdc_agent.config import get_settings
-from cdc_agent.jobs import SETUP_PHASES, JobBusy, Runner
+from cdc_agent.jobs import SETUP_PHASES, JobBusy, Runner, WorkerNotReady
 from cdc_agent.models import JOB_ID_PATTERN, CutoverRequest, Job, JobRequest
 from cdc_agent.secret_store import SecretsDisabled, SecretStore
 from cdc_agent.store import JobStore
@@ -77,6 +77,7 @@ def status() -> dict:
         "kafka": kafka_ok,
         "connect": connect_ok,
         "plugins_missing": sorted(REQUIRED_PLUGINS - plugins) if connect_ok else None,
+        "worker_configured": runner.worker_configured(),
         "jobs": {j.job_id: {"state": j.state, "phase": j.phase} for j in jobs.values()},
     }
 
@@ -108,6 +109,10 @@ def cutover(job_id: str, req: CutoverRequest) -> Job:
     job = load(job_id)
     if job.state != "waiting_approval" or job.phase != "cutover_ready":
         raise HTTPException(409, f"job is {job.state}/{job.phase}, not waiting for cutover approval")
+    try:
+        runner.check_worker()
+    except WorkerNotReady as exc:
+        raise HTTPException(409, str(exc)) from exc
     runner.start_cutover(job, req.approved_by)
     return job
 

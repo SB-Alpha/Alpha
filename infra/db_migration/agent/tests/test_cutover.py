@@ -172,6 +172,36 @@ def test_resume_steps_run_even_if_one_fails(setup, monkeypatch):
     assert calls[-2:] == [("resume", "job01-sink"), ("worker", "release")]
 
 
+def test_missing_worker_setting_leaves_the_job_waiting_instead_of_stuck(setup, monkeypatch):
+    runner, calls = setup()
+
+    def no_worker(settings):
+        raise RuntimeError("WORKER_URL is not set; cutover needs the traffic-control API")
+
+    monkeypatch.setattr(jobs, "WorkerClient", no_worker)
+    runner._cutover("job01")
+    job = runner.store.get("job01")
+
+    assert (job.state, job.phase) == ("waiting_approval", "cutover_ready")
+    assert "WORKER_URL" in job.message
+    assert [s["step"] for s in job.evidence["cutover"]["steps"]] == ["failed"]
+    assert calls == []
+
+
+def test_missing_secrets_leave_the_job_waiting_instead_of_stuck(setup, monkeypatch):
+    runner, calls = setup()
+
+    def no_secrets(settings, job):
+        raise jobs.SecretsNotReady("secrets files missing on this node: job01.properties")
+
+    monkeypatch.setattr(jobs, "Credentials", no_secrets)
+    runner._cutover("job01")
+    job = runner.store.get("job01")
+
+    assert (job.state, job.phase) == ("waiting_approval", "cutover_ready")
+    assert calls == []
+
+
 def test_cutover_errors_do_not_carry_the_password(setup, tmp_path, monkeypatch):
     runner, calls = setup()
     runner.settings.agent_secrets_dir.mkdir(exist_ok=True)
@@ -187,3 +217,32 @@ def test_cutover_errors_do_not_carry_the_password(setup, tmp_path, monkeypatch):
     shown = job.message + str(job.evidence["cutover"]["steps"])
 
     assert "marker" not in shown and "connection failed" in shown
+
+
+class StatusWorker:
+    def __init__(self, result):
+        self.result = result
+
+    def status(self):
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+@pytest.mark.parametrize("result, expected", [
+    ({"mode": "HOLD"}, "HOLD"),
+    ({"mode": "TARGET"}, "TARGET"),
+    (RuntimeError("connection refused"), "not usable"),
+])
+def test_worker_check_refuses_when_cutover_cannot_work(setup, monkeypatch, result, expected):
+    runner, _ = setup()
+    monkeypatch.setattr(jobs, "WorkerClient", lambda s: StatusWorker(result))
+
+    with pytest.raises(jobs.WorkerNotReady, match=expected):
+        runner.check_worker()
+
+
+def test_worker_check_passes_on_source(setup, monkeypatch):
+    runner, _ = setup()
+    monkeypatch.setattr(jobs, "WorkerClient", lambda s: StatusWorker({"mode": "SOURCE"}))
+    runner.check_worker()
