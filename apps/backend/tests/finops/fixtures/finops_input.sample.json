@@ -1,0 +1,34 @@
+{
+  "run_id": "mig-sample",
+  "currency": "USD",
+  "period_days": 14,
+  "current": {
+    "cloud": "aws",
+    "region": "ap-northeast-2",
+    "lines": [
+      {"item": "앱 컴퓨팅", "monthly_usd": 36.0, "source": "aws-pricing-api"},
+      {"item": "DB", "monthly_usd": 24.0, "source": "aws-pricing-api"}
+    ]
+  },
+  "candidates": [
+    {
+      "cloud": "gcp",
+      "region": "asia-northeast3",
+      "lines": [
+        {"item": "앱 컴퓨팅", "monthly_usd": 20.0, "source": "infracost"},
+        {"item": "DB", "monthly_usd": 25.0, "source": "infracost"}
+      ]
+    },
+    {
+      "cloud": "azure",
+      "region": "koreacentral",
+      "lines": [
+        {"item": "앱 컴퓨팅", "monthly_usd": 30.0, "source": "infracost"},
+        {"item": "DB", "monthly_usd": null, "source": "infracost"}
+      ]
+    }
+  ],
+  "rightsizing": [
+    {"resource": "앱 CPU", "current": "1 vCPU", "suggested": "0.5 vCPU", "evidence": "14일 CPU 사용률 p95 12%"}
+  ]
+}
