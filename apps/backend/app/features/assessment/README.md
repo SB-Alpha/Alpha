@@ -83,7 +83,9 @@ python -m app.features.assessment.cli --profile <읽기 전용 프로필> --aws-
 
 - 이미지·포트·CPU·메모리·환경 변수·비밀 참조(ARN)는 태스크 정의, digest 는 ECR, 상태 확인 경로는 컨테이너 healthCheck → 없으면 로드밸런서 대상 그룹.
 - 앱 DB 사용자는 태스크 정의의 `PGUSER` → `source.app.db_user`, `target_infra.db_user`.
-- 평문 환경 변수 중 이름이 비밀처럼 보이는 것(`PASSWORD`, `SECRET`, `TOKEN`, `API_KEY` …)은 **값을 버리고** gaps 에 남깁니다.
+- 평문 환경 변수 중 이름이 비밀처럼 보이는 것(`PASSWORD`, `SECRET`, `TOKEN`, `API_KEY`, `…_KEY` …)은 **값을 버리고** gaps 에 남깁니다.
+- 이름이 평범해도 값에 비밀이 들어 있으면(`postgres://user:비밀번호@…` 같은 접속 주소, AWS 액세스 키, 개인키, JWT, 알려진 API 토큰 형식) 똑같이 값을 버립니다. gaps 에는 이름만 남깁니다.
+- AI 보강(`ai.py`)에 보내는 계획에서는 AWS 계정 ID 를 `<aws-account>` 로 가립니다.
 - AWS 오류는 메시지 대신 오류 코드만 남깁니다.
 
 provisioning 도 같은 키 이름표(`source.credentials_ref.cloud`)를 `resolve()` 로 꺼내 원본 ECR 이미지를 복사합니다 (박준서, 11/5).

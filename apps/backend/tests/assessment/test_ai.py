@@ -49,3 +49,10 @@ def test_prompt_sends_env_names_not_values():
     plan = run(_ready_input())
     text = ai._plan_for_prompt(plan)
     assert "LOG_LEVEL" in text and '"INFO"' not in text
+
+
+def test_prompt_masks_aws_account_id():
+    plan = run(_ready_input())
+    infra = plan.target_infra.model_copy(update={"source_image": "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/a:b"})
+    text = ai._plan_for_prompt(plan.model_copy(update={"target_infra": infra}))
+    assert "123456789012" not in text and "<aws-account>.dkr.ecr" in text
