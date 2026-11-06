@@ -13,10 +13,11 @@ type Props = {
   onApproveCutover: (comment: string, acknowledgeUnknown: boolean) => void;
   onManual: (output: Record<string, unknown>, note: string) => void;
   onResume: () => void;
+  onRetryCleanup: () => void;
   onAbort: (reason: string) => void;
 };
 
-export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, onAbort }: Props) {
+export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, onRetryCleanup, onAbort }: Props) {
   const [cutoverComment, setCutoverComment] = useState("");
   const [isUnknownConfirmed, setIsUnknownConfirmed] = useState(false);
 
@@ -81,6 +82,24 @@ export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, 
               전환 승인
             </button>
           </div>
+        </div>
+      )}
+
+      {run.cleanup_message && (
+        <div
+          role={run.cleanup_state === "failed" ? "alert" : "status"}
+          className={`rounded-lg border p-3 text-sm ${
+            run.cleanup_state === "failed"
+              ? "border-rose-300 bg-rose-50 text-rose-900"
+              : "border-ink/15 bg-stone-50 text-ink/70"
+          }`}
+        >
+          <p>{run.cleanup_message}</p>
+          {run.cleanup_state === "failed" && (
+            <button type="button" disabled={isBusy} onClick={onRetryCleanup} className={`${BUTTON_SECONDARY} mt-2`}>
+              정리 다시 시도
+            </button>
+          )}
         </div>
       )}
 

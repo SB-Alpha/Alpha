@@ -45,6 +45,7 @@ class StageName(str, Enum):
 STAGE_ORDER: tuple[StageName, ...] = tuple(StageName)
 
 Gate = Literal["plan", "cutover"]
+CleanupState = Literal["running", "done", "failed"]
 
 # 이 단계를 시작하기 전에 사람의 승인이 필요합니다. ① 계획 승인 ② 전환 승인
 GATE_BEFORE: dict[StageName, Gate] = {
@@ -129,6 +130,9 @@ class RunStatus(BaseModel):
     message: str | None = None
     created_at: datetime
     updated_at: datetime
+    # 중단 뒤 외부 자원(복제 슬롯 등) 정리 상태. 정리할 것이 없으면 None 입니다.
+    cleanup_state: CleanupState | None = None
+    cleanup_message: str | None = None
 
     def stage(self, name: StageName) -> StageStatus:
         return next(s for s in self.stages if s.stage == name)

@@ -53,6 +53,8 @@ export interface RunStatus {
   created_at: string;
   updated_at: string;
   cutover_readiness?: CutoverReadiness | null; // 승인 ② 대기 중일 때만 서버가 채웁니다
+  cleanup_state?: "running" | "done" | "failed" | null; // 중단 뒤 복제 자원 정리 상태
+  cleanup_message?: string | null;
 }
 
 export type CheckStatus = "pass" | "fail" | "unknown";
@@ -134,6 +136,7 @@ export const workflows = {
   abort: (runId: string, reason?: string) =>
     post<RunStatus>(`/${encodeURIComponent(runId)}/abort`, { reason: reason || null }),
   resume: (runId: string) => post<RunStatus>(`/${encodeURIComponent(runId)}/resume`),
+  retryCleanup: (runId: string) => post<RunStatus>(`/${encodeURIComponent(runId)}/cleanup`),
   submitManual: (runId: string, stage: StageName, output: Record<string, unknown>, note?: string) =>
     post<RunStatus>(`/${encodeURIComponent(runId)}/stages/${stage}/manual`, { output, note: note || null }),
   getDiagnosis: (runId: string) => call<SelfHealingDiagnosis>(`/${encodeURIComponent(runId)}/diagnosis`),

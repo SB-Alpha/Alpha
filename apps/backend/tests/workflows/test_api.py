@@ -76,6 +76,36 @@ def test_cutover_approval_enforces_readiness_on_the_server(client):
     assert client.get(f"/runs/{run_id}").json()["cutover_readiness"] is None
 
 
+def test_abort_runs_cleanup_and_a_failed_cleanup_can_be_retried(tmp_path):
+    attempts = []
+
+    def cleanup(run) -> bool:
+        attempts.append(run.run_id)
+        if len(attempts) == 1:
+            raise RuntimeError("커넥터 서버 응답 없음")
+        return True
+
+    engine = Engine(RunStore(tmp_path / "workflows.sqlite3"), abort_cleanup=cleanup)
+    app.dependency_overrides[get_engine] = lambda: engine
+    try:
+        http = TestClient(app)
+        run_id = http.post("/runs", json=BODY).json()["run_id"]
+
+        assert http.post(f"/runs/{run_id}/cleanup").status_code == 409  # 중단 전
+
+        assert http.post(f"/runs/{run_id}/abort").json()["cleanup_state"] == "running"
+        run = http.get(f"/runs/{run_id}").json()  # TestClient 는 백그라운드 작업까지 끝낸 상태
+        assert run["cleanup_state"] == "failed"
+        assert "커넥터 서버 응답 없음" in run["cleanup_message"]
+
+        assert http.post(f"/runs/{run_id}/cleanup").json()["cleanup_state"] == "running"
+        assert http.get(f"/runs/{run_id}").json()["cleanup_state"] == "done"
+        assert http.post(f"/runs/{run_id}/cleanup").status_code == 409
+        assert attempts == [run_id, run_id]
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_abort_then_commands_conflict(client):
     run_id = client.post("/runs", json=BODY).json()["run_id"]
 

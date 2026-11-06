@@ -7,9 +7,12 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from app.features.db_migration.client import AgentError
+from app.features.workflows.context import with_stage
 from app.features.workflows.engine import Engine
 from app.features.workflows.runners import (
     _private_ip_metric,
+    clean_up_cdc,
     DISCOVERY_MERGED_MESSAGE,
     RUNNERS,
     MissingStageOutput,
@@ -521,6 +524,87 @@ def test_simulated_cutover_does_not_probe(monkeypatch):
     monkeypatch.setattr("app.features.workflows.runners.prober_from_env", lambda: pytest.fail("프로버를 켜면 안 됩니다"))
     monkeypatch.setattr("app.features.workflows.runners._request_cutover", lambda *a: {"phase": "stabilizing"})
     assert run_cutover(None, ctx=None)["phase"] == "stabilizing"  # type: ignore[arg-type]
+
+
+def _run_with_cdc_stage(engine, *, state=WorkflowState.SUCCEEDED, manual=False):
+    run = engine.create_run(REQUEST)
+    return with_stage(run, StageName.DB_MIGRATION, state=state, manual=manual)
+
+
+class _FakeCleanupAgent:
+    def __init__(self, job=None, error=None):
+        self._job = job
+        self._error = error
+
+    def get_job(self, job_id):
+        if self._error:
+            raise self._error
+        return self._job
+
+
+def _patch_cleanup(monkeypatch, agent):
+    stopped = []
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+    monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", lambda settings: agent)
+    monkeypatch.setattr(
+        "app.features.db_migration.service.stop",
+        lambda run_id, *, agent: stopped.append(run_id) or {"run_id": run_id},
+    )
+    return stopped
+
+
+@pytest.mark.parametrize("state", [WorkflowState.SUCCEEDED, WorkflowState.FAILED, WorkflowState.ABORTED])
+def test_clean_up_cdc_stops_a_job_that_is_still_before_the_cutover(engine, monkeypatch, state):
+    stopped = _patch_cleanup(monkeypatch, _FakeCleanupAgent({"phase": "cutover_ready", "state": "failed"}))
+    run = _run_with_cdc_stage(engine, state=state)
+
+    assert clean_up_cdc(run) is True
+    assert stopped == [run.run_id]
+
+
+def test_clean_up_cdc_still_stops_when_the_agent_has_no_job(engine, monkeypatch):
+    # 작업 등록 전에 중단돼도 VPN 은 만들어졌을 수 있습니다.
+    stopped = _patch_cleanup(monkeypatch, _FakeCleanupAgent(error=AgentError(404, "not found")))
+    run = _run_with_cdc_stage(engine, state=WorkflowState.ABORTED)
+
+    assert clean_up_cdc(run) is True
+    assert stopped == [run.run_id]
+
+
+@pytest.mark.parametrize("change", [{"state": WorkflowState.PENDING}, {"manual": True}])
+def test_clean_up_cdc_does_nothing_when_cdc_never_ran(engine, monkeypatch, change):
+    stopped = _patch_cleanup(monkeypatch, _FakeCleanupAgent({"phase": "streaming", "state": "running"}))
+
+    assert clean_up_cdc(_run_with_cdc_stage(engine, **change)) is False
+    assert stopped == []
+
+
+def test_clean_up_cdc_does_nothing_without_an_agent(engine, monkeypatch):
+    stopped = _patch_cleanup(monkeypatch, _FakeCleanupAgent())
+    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
+    monkeypatch.delenv("ALPHA_CDC_SIMULATION", raising=False)
+
+    assert clean_up_cdc(_run_with_cdc_stage(engine)) is False
+    assert stopped == []
+
+
+@pytest.mark.parametrize("phase", ["cutover", "stabilizing", "closed"])
+@pytest.mark.parametrize("job_state", ["running", "failed"])
+def test_clean_up_cdc_refuses_a_job_past_the_cutover(engine, monkeypatch, phase, job_state):
+    # 실패한 전환 뒤 작업을 stop 하면 VPN 이 지워져 원본 복제 슬롯을 지울 길이 끊깁니다.
+    stopped = _patch_cleanup(monkeypatch, _FakeCleanupAgent({"phase": phase, "state": job_state}))
+
+    with pytest.raises(RuntimeError, match="전환"):
+        clean_up_cdc(_run_with_cdc_stage(engine))
+    assert stopped == []
+
+
+def test_clean_up_cdc_passes_on_an_agent_read_failure(engine, monkeypatch):
+    stopped = _patch_cleanup(monkeypatch, _FakeCleanupAgent(error=AgentError(502, "unavailable")))
+
+    with pytest.raises(AgentError):
+        clean_up_cdc(_run_with_cdc_stage(engine))
+    assert stopped == []
 
 
 WAIT_S = 5

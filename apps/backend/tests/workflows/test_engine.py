@@ -296,6 +296,81 @@ def test_report_after_abort_raises(db_path):
         StoreRunContext(store, run_id, StageName.DISCOVERY).report("running", 1)
 
 
+def _aborted_run_with_cleanup(db_path, cleanup):
+    engine = Engine(RunStore(db_path), abort_cleanup=cleanup)
+    run_id = engine.create_run(REQUEST).run_id
+    return engine, run_id, engine.abort(run_id, "테스트")
+
+
+def test_abort_marks_cleanup_running_then_done(db_path):
+    seen = []
+
+    def cleanup(run: RunStatus) -> bool:
+        seen.append(run.state)
+        return True
+
+    engine, run_id, aborted = _aborted_run_with_cleanup(db_path, cleanup)
+    assert aborted.cleanup_state == "running"
+
+    engine.run_abort_cleanup(run_id)
+
+    after = engine.get(run_id)
+    assert seen == [WorkflowState.ABORTED]
+    assert after.cleanup_state == "done"
+    assert "완료" in after.cleanup_message
+    assert after.updated_at == aborted.updated_at
+
+
+def test_abort_cleanup_with_nothing_to_clean_leaves_no_note(db_path):
+    engine, run_id, _ = _aborted_run_with_cleanup(db_path, lambda run: False)
+
+    engine.run_abort_cleanup(run_id)
+
+    after = engine.get(run_id)
+    assert after.cleanup_state is None
+    assert after.cleanup_message is None
+
+
+def test_failed_abort_cleanup_is_recorded_and_can_be_retried(db_path):
+    attempts = []
+
+    def cleanup(run: RunStatus) -> bool:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("커넥터 서버 응답 없음")
+        return True
+
+    engine, run_id, _ = _aborted_run_with_cleanup(db_path, cleanup)
+
+    engine.run_abort_cleanup(run_id)
+    failed = engine.get(run_id)
+    assert failed.cleanup_state == "failed"
+    assert "커넥터 서버 응답 없음" in failed.cleanup_message
+
+    assert engine.retry_cleanup(run_id).cleanup_state == "running"
+    engine.run_abort_cleanup(run_id)
+    assert engine.get(run_id).cleanup_state == "done"
+    assert len(attempts) == 2
+
+
+def test_cleanup_retry_is_refused_unless_it_failed(db_path):
+    engine, run_id, _ = _aborted_run_with_cleanup(db_path, lambda run: True)
+    with pytest.raises(InvalidTransition):
+        engine.retry_cleanup(run_id)  # 아직 정리 중
+    engine.run_abort_cleanup(run_id)
+    with pytest.raises(InvalidTransition):
+        engine.retry_cleanup(run_id)  # 이미 끝남
+
+
+def test_abort_without_cleanup_configured_stays_as_before(db_path):
+    engine = make_engine(db_path)
+    run_id = engine.create_run(REQUEST).run_id
+
+    assert engine.abort(run_id).cleanup_state is None
+    engine.run_abort_cleanup(run_id)
+    assert engine.get(run_id).cleanup_state is None
+
+
 def test_report_after_success_updates_metrics_without_reopening_the_stage(db_path):
     store = RunStore(db_path)
     engine = Engine(store, {StageName.DISCOVERY: discovery_runner})

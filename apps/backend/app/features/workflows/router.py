@@ -22,7 +22,7 @@ from .schemas import (
     StageName,
     WorkflowState,
 )
-from .runners import RUNNERS
+from .runners import RUNNERS, clean_up_cdc
 from .store import RunNotFound, RunStore
 
 router = APIRouter(prefix="/runs", tags=["workflows"])
@@ -31,7 +31,7 @@ router = APIRouter(prefix="/runs", tags=["workflows"])
 @lru_cache
 def get_engine() -> Engine:
     # 연결된 모듈은 runners.RUNNERS 에 단계별로 등록합니다. 없는 단계는 수동 입력 대기입니다.
-    return Engine(RunStore(get_settings().workflows_db_path), RUNNERS)
+    return Engine(RunStore(get_settings().workflows_db_path), RUNNERS, abort_cleanup=clean_up_cdc)
 
 
 def _detail(run: RunStatus) -> RunDetail:
@@ -87,10 +87,23 @@ def approve_run(
 
 @router.post("/{run_id}/abort", response_model=RunDetail)
 def abort_run(
-    run_id: str, req: AbortRequest | None = None, engine: Engine = Depends(get_engine)
+    run_id: str,
+    background: BackgroundTasks,
+    req: AbortRequest | None = None,
+    engine: Engine = Depends(get_engine),
 ) -> RunDetail:
     reason = req.reason if req else None
-    return _apply(run_id, lambda: engine.abort(run_id, reason))
+    run = _apply(run_id, lambda: engine.abort(run_id, reason))
+    background.add_task(engine.run_abort_cleanup, run_id)
+    return run
+
+
+@router.post("/{run_id}/cleanup", response_model=RunDetail)
+def retry_cleanup(run_id: str, background: BackgroundTasks, engine: Engine = Depends(get_engine)) -> RunDetail:
+    """중단 뒤 정리에 실패한 run 의 외부 자원 정리를 다시 시도합니다."""
+    run = _apply(run_id, lambda: engine.retry_cleanup(run_id))
+    background.add_task(engine.run_abort_cleanup, run_id)
+    return run
 
 
 @router.post("/{run_id}/resume", response_model=RunDetail)

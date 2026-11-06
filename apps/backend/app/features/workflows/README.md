@@ -46,7 +46,8 @@ def run(inp: <Module>Input, ctx: RunContext) -> <Module>Output: ...
 | GET | `/runs` | 최근 run 목록 (`limit` 1~200) |
 | GET | `/runs/{id}` | run 상태 (`RunDetail`: `RunStatus` + 승인 ② 대기 중일 때 `cutover_readiness`) |
 | POST | `/runs/{id}/approve` | `{"gate": "plan" \| "cutover", "acknowledge_unknown": false}` 승인 후 진행. 승인 ②는 아래 판정을 통과해야 합니다 |
-| POST | `/runs/{id}/abort` | 중단 (`{"reason": ...}` 선택) |
+| POST | `/runs/{id}/abort` | 중단 (`{"reason": ...}` 선택). 이어서 백그라운드로 복제 자원을 정리합니다 |
+| POST | `/runs/{id}/cleanup` | 중단 뒤 정리에 실패한 run 의 복제 자원 정리를 다시 시도 (`cleanup_state` 가 `failed` 일 때만) |
 | POST | `/runs/{id}/resume` | 실패한 단계 재시도·끊긴 진행 재개 |
 | POST | `/runs/{id}/stages/{stage}/manual` | 다음 차례 단계 결과를 수동 입력 (`{"output": {...}}`) |
 | GET·POST | `/runs/{id}/diagnosis`, `/runs/{id}/diagnose` | 실패한 run 의 원인·복구 조치. 실패가 아니면 `409` |
@@ -61,6 +62,11 @@ def run(inp: <Module>Input, ctx: RunContext) -> <Module>Output: ...
 - 복제 지연 기준값(1MiB)은 임시값입니다. 팀 합의 후 바꿉니다.
 - 초기 복사·불일치 테이블: 쓰기 중에는 두 DB 를 다른 순간에 읽어 값이 오가므로, 에이전트가 `cutover_ready` 로 올린 뒤의 순간값으로는 막지 않습니다. 쓰기를 멈춘 전환 기준점에서 다시 검사해 다르면 전환하지 않습니다.
 - `cdc_error`: CDC 추적이 streaming 이후 끝나면 `db_migration` 단계 지표에 남아 승인을 막습니다. 끝난 단계는 다시 열지 않고 지표만 갱신합니다.
+
+## 중단과 복제 자원 정리
+- run 을 중단하면 `service.stop` 으로 커넥터, 복제 슬롯, VPN 을 정리합니다. CDC 를 수동 입력으로 넘겼거나 아직 시작하지 않았으면 할 일이 없습니다.
+- 진행 상태는 `cleanup_state`(`running`·`done`·`failed`)와 `cleanup_message` 에 남습니다. 복제 슬롯이 남으면 원본에 WAL 이 쌓이므로 `failed` 는 반드시 다시 시도하거나 직접 처리합니다.
+- 전환을 시작한 작업은 자동으로 정리하지 않습니다(`failed`). 목적지에 새 쓰기가 있을 수 있어 트래픽과 데이터를 사람이 확인해야 합니다.
 
 ## 화면 지표와 시뮬레이션
 - `secret_encryption`: 요청의 자격 증명 참조가 모두 `secret://` 이고 암호화 저장소에 실제로 있을 때만 `ENCRYPTED`. 확인할 수 없으면 "미제공" 입니다.

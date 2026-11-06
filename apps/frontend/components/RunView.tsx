@@ -120,6 +120,7 @@ export function RunView() {
               run.current_stage && act(() => workflows.submitManual(run.run_id, run.current_stage!, output, note))
             }
             onResume={() => act(() => workflows.resume(run.run_id))}
+            onRetryCleanup={() => act(() => workflows.retryCleanup(run.run_id))}
             onAbort={(reason) => act(() => workflows.abort(run.run_id, reason))}
           />
         </>

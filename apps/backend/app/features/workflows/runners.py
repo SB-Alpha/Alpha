@@ -16,9 +16,11 @@ from typing import Any
 from .context import RunAborted
 from .engine import StageRunner
 from .prober import ProbedContext, prober_from_env
-from .schemas import RunContext, RunStatus, StageName
+from .schemas import RunContext, RunStatus, StageName, WorkflowState
 
 log = logging.getLogger(__name__)
+
+_PAST_CUTOVER_PHASES = {"cutover", "stabilizing", "closed"}
 
 PROBE_SETTLE_S = 3.0
 
@@ -153,6 +155,40 @@ def run_provisioning(run: RunStatus, ctx: RunContext) -> Any:
     if ctx is not None and metrics:
         ctx.report("running", 100, metrics)
     return res
+
+
+def clean_up_cdc(run: RunStatus) -> bool:
+    """중단된 run 의 복제 자원(커넥터, 복제 슬롯, VPN)을 service.stop 으로 정리합니다. 정리할 것이 없으면 False 입니다.
+
+    CDC 추적이 이미 끝났거나 서버가 재시작되면 run 을 중단해도 정리할 주체가 없어 슬롯이 남고 원본에 WAL 이 쌓입니다.
+    """
+    stage = run.stage(StageName.DB_MIGRATION)
+    if stage.manual or stage.state == WorkflowState.PENDING:
+        return False
+
+    from app.features.db_migration import service as db_migration_service
+    from app.features.db_migration.client import AgentError, AgentSettings, CdcAgentClient
+    from app.features.db_migration.guide_workflow import to_job_id
+
+    try:
+        settings = AgentSettings.from_env()
+    except KeyError:
+        log.warning("CDC_AGENT_URL 이 없어 run %s 의 복제 자원을 정리하지 않습니다", run.run_id)
+        return False
+
+    agent = CdcAgentClient(settings)
+    try:
+        job = agent.get_job(to_job_id(run.run_id))
+    except AgentError as exc:
+        if exc.status_code != 404:
+            raise
+        job = None  # 작업 등록 전이어도 VPN 은 만들어졌을 수 있습니다.
+    # 에이전트는 전환 이후의 정리를 거부합니다. 그 상태로 stop 하면 VPN 만 지워져 원본 슬롯을 지울 길이 끊깁니다.
+    if job is not None and job.get("phase") in _PAST_CUTOVER_PHASES:
+        raise RuntimeError("전환을 시작한 작업은 자동으로 정리하지 않습니다. 트래픽과 데이터를 확인한 뒤 처리하세요")
+
+    db_migration_service.stop(run.run_id, agent=agent)
+    return True
 
 
 def _cdc_end_reason(result: Any) -> str:
