@@ -26,6 +26,24 @@ export interface TableSyncItem {
   match: boolean;
 }
 
+export interface SecurityAlertItem {
+  id: string;
+  provider: "aws" | "gcp" | "azure" | "onprem";
+  severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  resourceType: string;
+  resourceId: string;
+  threatCategory: string;
+  description: string;
+}
+
+export interface BlastRadiusInfo {
+  isCompromised: boolean;
+  quarantined: boolean;
+  riskScore: number;
+  hopDistance: number;
+  alert: SecurityAlertItem | null;
+}
+
 export interface SourceNodeData {
   serviceTitle: string;
   region: string;
@@ -35,6 +53,7 @@ export interface SourceNodeData {
   vpcId: string | null;
   sourceRows: number | null;
   isServing: boolean;
+  blastRadius?: BlastRadiusInfo | null;
 }
 
 export interface CdcArcData {

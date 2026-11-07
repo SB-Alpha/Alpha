@@ -25,6 +25,11 @@ const initialState = () => ({
     lag_updated_at: null,
     read_after_write_fence_sec: 5,
   },
+  quarantine: {
+    isolated_nodes: [],
+    reroute_target: null,
+    quarantined_at: null,
+  },
 });
 
 // 요청 집계. 저장하지 않으므로 객체가 다시 뜨면 since 가 새 시각이 되어 호출 쪽이 알아챌 수 있다.
@@ -111,37 +116,89 @@ export class Gate extends DurableObject {
 
     let origin = this.state.mode;
     let viaArbitrage = false;
+    let viaQuarantine = false;
+    let isBlocked = false;
+    let blockReason = null;
 
-    // 차익거래 라우팅: 모드가 SOURCE일 때, 쓰기가 아닌 읽기 요청이고
-    // 복제 지연이 허용 임계치 이내이면 Cloud Run(TARGET)으로 가중치 기반 라우팅
-    const arb = this.state.arbitrage;
-    if (this.state.mode === "SOURCE" && arb?.enabled && !isWrite) {
-      // 복제 지연 세이프가드: 제어 평면(CDC)의 측정 지연과 클라이언트 헤더 중 보수적인(큰) 값 선택
-      // 지연 메트릭이 15초 이상 갱신되지 않았으면 지연 상태를 모르는 것(stale -> null)으로 판단
-      const LAG_STALE_MS = 15000;
-      const isStale = !arb.lag_updated_at || (Date.now() - new Date(arb.lag_updated_at).getTime() > LAG_STALE_MS);
-      const controlLag = isStale ? null : (arb.current_lag_bytes ?? null);
-      const clientLag = lagBytes !== null && !isNaN(lagBytes) ? lagBytes : null;
-      const effectiveLag = clientLag !== null && controlLag !== null ? Math.max(controlLag, clientLag) : (controlLag ?? clientLag);
-      const maxLag = arb.max_lag_bytes ?? 1024;
+    // 보안 침해 격리(Quarantine) 라우팅:
+    // SOURCE 모드이고 격리 명단에 유효한 노드가 등록되어 있을 때
+    // 참고: 현재 게이트 아키텍처에서 노드 격리는 해당 워크로드 원본(SOURCE) 전체에 대한
+    // 안전 격리(쓰기 503 차단 및 TARGET 읽기 우회)로 동작합니다.
+    const q = this.state.quarantine;
+    const cleanNodes = Array.isArray(q?.isolated_nodes)
+      ? q.isolated_nodes.filter((n) => typeof n === "string" && n.trim().length > 0).map((n) => n.trim())
+      : [];
+    const hasQuarantine = this.state.mode === "SOURCE" && cleanNodes.length > 0;
 
-      // 1. Read-After-Write 세션 고정 세이프가드: 최근 쓰기를 수행한 클라이언트(IP)는 N초간 마스터(SOURCE)로 고정
-      const fenceSec = Number(arb.read_after_write_fence_sec) || 5;
-      const lastWrite = clientIp ? this.recentWrites.get(clientIp) : null;
-      const isRecentlyWritten = Boolean(lastWrite && Date.now() - lastWrite < fenceSec * 1000);
-
-      // Fail-closed: 최근 쓰기 세션이거나, 지연 상태를 알 수 없거나 임계치를 초과하면 절대 우회하지 않고 SOURCE(마스터)로 펜싱
-      const safe = !isRecentlyWritten && effectiveLag !== null && effectiveLag <= maxLag;
-      if (safe && Math.random() < (arb.read_target_weight ?? 0.0)) {
+    if (hasQuarantine) {
+      if (isWrite) {
+        // [안전 게이트]: 전환 전 원본 침해 격리 시 쓰기(Write)를 Read-Only 타깃으로 보내면 split-brain 및 데이터 유실 발생.
+        // 쓰기 요청은 503 Service Unavailable ("quarantine_write_blocked") 로 안전하게 차단한다.
+        isBlocked = true;
+        blockReason = "quarantine_write_blocked";
+        viaQuarantine = true;
+      } else {
+        // 읽기(Read) 요청만 안전한 대체 타깃으로 즉시 우회
         origin = "TARGET";
-        viaArbitrage = true;
+        viaQuarantine = true;
       }
+    } else {
+      // 차익거래 라우팅: 모드가 SOURCE일 때, 쓰기가 아닌 읽기 요청이고
+      // 복제 지연이 허용 임계치 이내이면 Cloud Run(TARGET)으로 가중치 기반 라우팅
+      const arb = this.state.arbitrage;
+      if (this.state.mode === "SOURCE" && arb?.enabled && !isWrite) {
+        // 복제 지연 세이프가드: 제어 평면(CDC)의 측정 지연과 클라이언트 헤더 중 보수적인(큰) 값 선택
+        // 지연 메트릭이 15초 이상 갱신되지 않았으면 지연 상태를 모르는 것(stale -> null)으로 판단
+        const LAG_STALE_MS = 15000;
+        const isStale = !arb.lag_updated_at || (Date.now() - new Date(arb.lag_updated_at).getTime() > LAG_STALE_MS);
+        const controlLag = isStale ? null : (arb.current_lag_bytes ?? null);
+        const clientLag = lagBytes !== null && !isNaN(lagBytes) ? lagBytes : null;
+        const effectiveLag = clientLag !== null && controlLag !== null ? Math.max(controlLag, clientLag) : (controlLag ?? clientLag);
+        const maxLag = arb.max_lag_bytes ?? 1024;
+
+        // 1. Read-After-Write 세션 고정 세이프가드: 최근 쓰기를 수행한 클라이언트(IP)는 N초간 마스터(SOURCE)로 고정
+        const fenceSec = Number(arb.read_after_write_fence_sec) || 5;
+        const lastWrite = clientIp ? this.recentWrites.get(clientIp) : null;
+        const isRecentlyWritten = Boolean(lastWrite && Date.now() - lastWrite < fenceSec * 1000);
+
+        // Fail-closed: 최근 쓰기 세션이거나, 지연 상태를 알 수 없거나 임계치를 초과하면 절대 우회하지 않고 SOURCE(마스터)로 펜싱
+        const safe = !isRecentlyWritten && effectiveLag !== null && effectiveLag <= maxLag;
+        if (safe && Math.random() < (arb.read_target_weight ?? 0.0)) {
+          origin = "TARGET";
+          viaArbitrage = true;
+        }
+      }
+    }
+
+    if (isBlocked) {
+      return {
+        origin: "BLOCKED",
+        ticket: null,
+        target: null,
+        viaArbitrage: false,
+        viaQuarantine: true,
+        isBlocked: true,
+        blockReason,
+      };
     }
 
     const ticket = ++this.seq;
     this.tickets.set(ticket, { origin, startedAt: Date.now() });
-    // target: 제어 명령으로 정한 GCP 쪽 주소 (없으면 null). 예전에 저장된 상태에는 이 칸이 없어서 ?? 로 맞춘다
-    return { origin, ticket, target: this.state.target_url ?? null, viaArbitrage };
+    // target: 제어 명령으로 정한 GCP 쪽 주소 (없으면 null).
+    // 격리 우회 시 reroute_target 이 올바른 URL 프로토콜(http/https)이면 우선 사용합니다.
+    const effectiveTarget = (viaQuarantine && this.state.quarantine?.reroute_target && (this.state.quarantine.reroute_target.startsWith("http://") || this.state.quarantine.reroute_target.startsWith("https://")))
+      ? this.state.quarantine.reroute_target
+      : (this.state.target_url ?? null);
+
+    return {
+      origin,
+      ticket,
+      target: effectiveTarget,
+      viaArbitrage,
+      viaQuarantine,
+      isBlocked: false,
+      blockReason: null,
+    };
   }
 
   // exit: 요청이 원본에서 응답을 받아 끝났을 때 부른다. "처리 중" 명단에서 번호표를 지우고 결과를 센다.
@@ -252,6 +309,36 @@ export class Gate extends DurableObject {
         current_lag_bytes: null,
         lag_updated_at: null,
         read_after_write_fence_sec: 5,
+      }
+    );
+  }
+
+  async setQuarantine({ isolated_nodes, reroute_target } = {}) {
+    await this.expireHold();
+    // 노드 ID 엄격 검증: string 타입이고 비어있지 않은 값만 필터링 (null, number, 빈문자열 등 거절)
+    const validNodes = Array.isArray(isolated_nodes)
+      ? isolated_nodes.filter((n) => typeof n === "string" && n.trim().length > 0).map((n) => n.trim())
+      : [];
+    const cleanTarget = typeof reroute_target === "string" && reroute_target.trim().length > 0
+      ? reroute_target.trim()
+      : null;
+
+    this.state.quarantine = {
+      isolated_nodes: validNodes,
+      reroute_target: cleanTarget,
+      quarantined_at: validNodes.length > 0 ? iso() : null,
+    };
+    this.state.updated_at = iso();
+    await this.save();
+    return ok(this.state.quarantine);
+  }
+
+  async getQuarantine() {
+    return ok(
+      this.state.quarantine ?? {
+        isolated_nodes: [],
+        reroute_target: null,
+        quarantined_at: null,
       }
     );
   }

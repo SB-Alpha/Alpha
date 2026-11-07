@@ -10,6 +10,11 @@ interface Props {
   selectedNode: "source" | "cdc" | "target" | null;
   onSelectNode: (node: "source" | "cdc" | "target" | null) => void;
   onNavigateSection?: (sectionId: string) => void;
+  isCompromised?: boolean;
+  isQuarantined?: boolean;
+  riskScore?: number;
+  onReroute?: () => void;
+  showFullTopology?: boolean;
 }
 
 export default function CanvasView({
@@ -18,6 +23,11 @@ export default function CanvasView({
   selectedNode,
   onSelectNode,
   onNavigateSection,
+  isCompromised,
+  isQuarantined,
+  riskScore,
+  onReroute,
+  showFullTopology,
 }: Props) {
   return (
     <Canvas
@@ -32,6 +42,11 @@ export default function CanvasView({
         selectedNode={selectedNode}
         onSelectNode={onSelectNode}
         onNavigateSection={onNavigateSection}
+        isCompromised={isCompromised}
+        isQuarantined={isQuarantined}
+        riskScore={riskScore}
+        onReroute={onReroute}
+        showFullTopology={showFullTopology}
       />
     </Canvas>
   );
