@@ -8,6 +8,8 @@ import pytest
 
 from app.features.provisioning.image_transfer import (
     CraneCopier,
+    ImageCopyError,
+    ManualCopyRequired,
     RegistryLogin,
     TransferResult,
     aws_credentials,
@@ -55,10 +57,31 @@ def test_parse_image_keeps_a_registry_port_and_nested_repository():
     assert (ref.registry, ref.repository, ref.tag) == ("localhost:5000", "team/app", "dev")
 
 
-@pytest.mark.parametrize("bad", ["nginx", "nginx:latest", "", f"{ECR}/", f"{ECR}/app@sha256:short"])
+@pytest.mark.parametrize("bad", ["", "/app", "team/", f"{ECR}/", f"{ECR}/app@sha256:short", "nginx@sha256:short"])
 def test_parse_image_rejects_addresses_it_cannot_copy(bad):
     with pytest.raises(ProvisioningError):
         parse_image(bad)
+
+
+@pytest.mark.parametrize(
+    ("text", "repository", "tag"),
+    [
+        ("nginx", "library/nginx", None),
+        ("nginx:1.27", "library/nginx", "1.27"),
+        ("library/nginx:1.27", "library/nginx", "1.27"),  # 이미 library/ 가 붙은 이름은 그대로
+        ("team/app:2", "team/app", "2"),  # 조직 이미지에는 library/ 를 붙이지 않는다
+    ],
+)
+def test_parse_image_treats_names_without_a_registry_as_docker_hub(text, repository, tag):
+    ref = parse_image(text)
+
+    assert (ref.registry, ref.repository, ref.tag) == ("index.docker.io", repository, tag)
+    assert ref.pull_ref == f"index.docker.io/{repository}" + (f":{tag}" if tag else "")
+
+
+def test_parse_image_keeps_a_docker_hub_digest_and_an_explicit_docker_io_host():
+    assert parse_image(f"nginx@{DIGEST}").pull_ref == f"index.docker.io/library/nginx@{DIGEST}"
+    assert parse_image("docker.io/team/app:1").registry == "docker.io"  # 저장소 주소를 직접 쓴 것은 그대로 존중
 
 
 def test_parse_ecr_host_returns_account_and_region_only_for_ecr():
@@ -266,11 +289,40 @@ def test_a_failing_copy_reports_the_tail_of_stderr_with_secrets_masked():
     assert "***" in str(error.value)
 
 
+def test_a_failing_copy_is_an_image_copy_error_so_callers_can_tell_it_from_a_setup_problem():
+    runner = FakeRunner(fail_on="copy", stderr="unauthorized")
+    with pytest.raises(ImageCopyError):
+        make_copier(runner).copy("src", "dst", LOGINS)
+
+
 def test_a_missing_crane_binary_explains_how_to_install_it():
     copier = make_copier(FakeRunner(), which=lambda name: None)
 
-    with pytest.raises(ProvisioningError, match="brew install crane"):
+    with pytest.raises(ProvisioningError, match="brew install crane") as error:
         copier.copy("src", "dst", LOGINS)
+
+    assert not isinstance(error.value, ImageCopyError)  # 설치 문제는 "수동 복사"로 넘기지 않고 그대로 알린다
+
+
+def test_existing_digest_logs_in_only_to_the_given_registry_and_reads_the_digest():
+    runner = FakeRunner()
+    digest = make_copier(runner).existing_digest(f"{AR}/app:v1", LOGINS[1:])
+
+    assert digest == DIGEST
+    assert [call["command"][1] for call in runner.calls] == ["auth", "digest"]
+    assert runner.calls[1]["command"][1:] == ["digest", f"{AR}/app:v1"]
+    assert runner.calls[0]["input"] == SECRET_PASSWORD
+
+
+def test_existing_digest_is_none_when_the_image_is_not_there_or_unreadable():
+    assert make_copier(FakeRunner(fail_on="digest", stderr="MANIFEST_UNKNOWN")).existing_digest("dst", LOGINS[1:]) is None
+    assert make_copier(FakeRunner(digest="not-a-digest")).existing_digest("dst", LOGINS[1:]) is None
+    assert make_copier(FakeRunner(fail_on="auth")).existing_digest("dst", LOGINS[1:]) is None
+
+
+def test_existing_digest_still_reports_a_missing_crane_binary():
+    with pytest.raises(ProvisioningError, match="brew install crane"):
+        make_copier(FakeRunner(), which=lambda name: None).existing_digest("dst", LOGINS[1:])
 
 
 def test_a_timeout_is_reported_as_an_error():
@@ -354,6 +406,81 @@ def test_an_ecr_source_without_a_key_stops_before_anything_is_copied():
         run_transfer(copier, aws_credentials=None)
 
     assert copier.calls == []
+
+
+class FailingCopier:
+    """복사는 항상 실패하는 가짜. 목적지에 이미 있는 이미지(existing)를 조회할 수 있다."""
+
+    def __init__(self, existing=None, error="crane copy 실패 (종료 코드 1): UNAUTHORIZED"):
+        self.existing = existing
+        self.error = error
+        self.lookups: list[tuple] = []
+
+    def copy(self, source, destination, logins):
+        raise ImageCopyError(self.error)
+
+    def existing_digest(self, destination, logins):
+        self.lookups.append((destination, list(logins)))
+        return self.existing
+
+
+def test_a_docker_hub_name_is_copied_without_any_source_login():
+    copier = FakeCopier()
+    run_transfer(copier, source_image="nginx:1.27", aws_credentials=None)
+
+    source, _, logins = copier.calls[0]
+    assert source == "index.docker.io/library/nginx:1.27"
+    assert [login.registry for login in logins] == ["asia-northeast3-docker.pkg.dev"]  # 목적지 로그인만
+
+
+def test_a_private_non_ecr_source_stops_with_manual_copy_instructions():
+    copier = FailingCopier()
+    with pytest.raises(ManualCopyRequired) as error:
+        run_transfer(copier, source_image="registry.local/team/app:1", aws_credentials=None)
+
+    message = str(error.value)
+    assert "crane copy registry.local/team/app:1" in message
+    assert f"{AR}/target-app:1" in message  # 사람이 복사해야 할 정확한 목적지 이름
+    assert "UNAUTHORIZED" in message  # 실패 사유도 보인다
+    assert "다시 실행" in message
+    assert len(copier.lookups) == 1  # 멈추기 전에 목적지에 이미 있는지 확인했다
+
+
+def test_an_image_a_person_already_copied_to_the_destination_is_used():
+    copier = FailingCopier(existing=DIGEST)
+    messages: list[str] = []
+    result = run_transfer(copier, source_image="registry.local/team/app:1", aws_credentials=None, report=messages.append)
+
+    assert result.reused is True
+    assert result.container_image == f"{AR}/target-app@{DIGEST}"
+    destination, logins = copier.lookups[0]
+    assert destination == f"{AR}/target-app:1"
+    assert [login.registry for login in logins] == ["asia-northeast3-docker.pkg.dev"]  # 목적지 로그인만 쓴다
+    assert any("목적지에 이미 있는 이미지" in message for message in messages)
+
+
+def test_a_wrong_image_already_in_the_destination_is_rejected_by_digest():
+    copier = FailingCopier(existing=OTHER_DIGEST)
+    with pytest.raises(ProvisioningError, match="digest 가 원본과 다릅니다"):
+        run_transfer(copier, source_image=f"registry.local/team/app@{DIGEST}", aws_credentials=None)
+
+
+def test_an_ecr_copy_failure_is_reported_as_is_and_never_turned_into_a_manual_step():
+    copier = FailingCopier(existing=DIGEST)
+    with pytest.raises(ImageCopyError) as error:
+        run_transfer(copier)  # 기본 원본은 ECR
+
+    assert not isinstance(error.value, ManualCopyRequired)
+    assert copier.lookups == []
+
+
+def test_a_copier_that_cannot_look_up_the_destination_also_ends_in_a_manual_step():
+    class CopyOnly:
+        def copy(self, source, destination, logins):
+            raise ImageCopyError("crane copy 실패")
+
+    with pytest.raises(ManualCopyRequired):
+        run_transfer(CopyOnly(), source_image="registry.local/team/app:1", aws_credentials=None)
 
 
 def test_a_non_ecr_source_is_copied_without_a_source_login():
@@ -459,6 +586,47 @@ def test_a_key_reference_that_is_not_secret_style_skips_the_copy_instead_of_fail
     assert "container_image" not in tf.var_values
     assert any("복사를 건너뜁니다" in (m or "") for _, _, m in ctx.calls)
     assert result.healthy is True
+
+
+def test_a_docker_hub_name_no_longer_stops_the_deploy_and_is_copied_without_a_key():
+    # #61 의 직접 입력 원본이 nginx:1.27 같은 이름을 줘도 배포가 멈추지 않는다.
+    transfer = FakeTransfer()
+    infra = {"service_name": "target-app", "source_image": "nginx:1.27"}
+    result, tf, _ = deploy(app_input(target_infra=infra, source_credentials_ref=None), transfer)
+
+    assert transfer.calls[0]["source_image"] == "nginx:1.27"
+    assert transfer.calls[0]["aws_credentials"] is None
+    assert tf.var_values["container_image"] == PINNED
+    assert result.healthy is True
+
+
+class ManualTransfer:
+    """자동 복사에 실패해 사람이 복사해야 하는 경우를 흉내 낸다."""
+
+    def __call__(self, **kwargs):
+        raise ManualCopyRequired("원본 이미지(registry.local/team/app:1)를 자동으로 복사하지 못했습니다. crane copy ...")
+
+
+def test_a_private_source_that_cannot_be_copied_stops_the_deploy_before_terraform_applies():
+    infra = {"service_name": "target-app", "source_image": "registry.local/team/app:1"}
+    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text(encoding="utf-8"))))
+
+    with pytest.raises(ManualCopyRequired, match="자동으로 복사하지 못했습니다"):
+        deploy(app_input(target_infra=infra, source_credentials_ref=None), ManualTransfer(), tf=tf)
+
+    assert "apply" not in tf.calls  # 가짜 성공 없이 앱을 만들기 전에 멈춘다
+
+
+def test_the_progress_message_says_when_an_existing_destination_image_was_used():
+    class Reuse(FakeTransfer):
+        def __call__(self, **kwargs):
+            super().__call__(**kwargs)
+            return TransferResult(container_image=PINNED, source="s", destination="d", digest=DIGEST, reused=True)
+
+    _, _, ctx = deploy(app_input(target_infra={"service_name": "target-app", "source_image": "registry.local/team/app:1"},
+                                 source_credentials_ref=None), Reuse())
+
+    assert any("목적지에 있던 이미지를 사용" in (m or "") for _, _, m in ctx.calls)
 
 
 def test_dry_run_never_copies():

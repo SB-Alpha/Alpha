@@ -26,6 +26,17 @@ _ECR_HOST = re.compile(r"^(?P<account>\d{12})\.dkr\.ecr(?:-fips)?\.(?P<region>[a
 GCP_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
 COPY_TIMEOUT_S = 900.0
 
+# 저장소 주소가 없는 이름(nginx:1.27, team/app)은 Docker Hub 로 본다.
+DOCKER_HUB = "index.docker.io"
+
+
+class ImageCopyError(ProvisioningError):
+    """crane 이 로그인·복사·조회에 실패했을 때. crane 이 설치되어 있지 않은 것 같은 환경 문제와 구분한다."""
+
+
+class ManualCopyRequired(ProvisioningError):
+    """자동으로 복사하지 못한 원본. 사람이 목적지 저장소에 직접 복사한 뒤 다시 실행해야 한다."""
+
 
 # ---------------------------------------------------------------------------
 # 이미지 주소
@@ -52,21 +63,32 @@ class ImageRef:
 
 
 def parse_image(ref: str) -> ImageRef:
-    """`저장소주소/이름[:태그][@sha256:...]` 를 나눈다. 저장소 주소가 없는 주소(예: nginx)는 받지 않는다."""
+    """`저장소주소/이름[:태그][@sha256:...]` 를 나눈다.
+
+    저장소 주소가 없는 이름은 Docker Hub 로 본다: nginx:1.27 → index.docker.io/library/nginx:1.27,
+    team/app → index.docker.io/team/app. 저장소 주소는 첫 조각에 `.` 이나 `:` 이 있거나 localhost 일 때만 인정한다.
+    """
     text = ref.strip()
     digest = None
     if "@" in text:
         text, digest = text.split("@", 1)
         if not _DIGEST.match(digest):
             raise ProvisioningError("이미지 digest 형식이 올바르지 않습니다 (sha256:<64자리 16진수>)")
+    if not text or text.startswith("/") or text.endswith("/"):
+        raise ProvisioningError(f"이미지 주소에 이름이 없습니다: {ref.strip()}")
     registry, sep, rest = text.partition("/")
-    if not sep or not rest or not ("." in registry or ":" in registry or registry == "localhost"):
-        raise ProvisioningError(f"이미지 주소에 저장소 주소가 없습니다: {ref.strip()}")
+    if not (sep and ("." in registry or ":" in registry or registry == "localhost")):
+        registry, rest = DOCKER_HUB, text
+        docker_hub = True
+    else:
+        docker_hub = False
     tag = None
     if ":" in rest.rsplit("/", 1)[-1]:
         rest, tag = rest.rsplit(":", 1)
     if not rest:
         raise ProvisioningError(f"이미지 주소에 이름이 없습니다: {ref.strip()}")
+    if docker_hub and "/" not in rest:
+        rest = f"library/{rest}"  # Docker Hub 의 공식 이미지는 library/ 아래에 있다
     return ImageRef(registry=registry, repository=rest, tag=tag or None, digest=digest)
 
 
@@ -275,11 +297,11 @@ class CraneCopier:
         try:
             done = self.runner(command, env=env, input=stdin, capture_output=True, text=True, timeout=self.timeout_s)
         except subprocess.TimeoutExpired:
-            raise ProvisioningError(f"crane {label} 가 {self.timeout_s:.0f}초 안에 끝나지 않았습니다") from None
+            raise ImageCopyError(f"crane {label} 가 {self.timeout_s:.0f}초 안에 끝나지 않았습니다") from None
         except OSError as error:
-            raise ProvisioningError(f"crane {label} 를 실행하지 못했습니다 ({type(error).__name__})") from None
+            raise ImageCopyError(f"crane {label} 를 실행하지 못했습니다 ({type(error).__name__})") from None
         if done.returncode != 0:
-            raise ProvisioningError(f"crane {label} 실패 (종료 코드 {done.returncode}): {_tail(done.stderr or '', secrets)}")
+            raise ImageCopyError(f"crane {label} 실패 (종료 코드 {done.returncode}): {_tail(done.stderr or '', secrets)}")
         return done.stdout or ""
 
     def copy(self, source: str, destination: str, logins: Sequence[RegistryLogin]) -> str:
@@ -298,8 +320,26 @@ class CraneCopier:
             self._run([binary, "copy", source, destination], env, secrets, "copy")
             digest = self._run([binary, "digest", destination], env, secrets, "digest").strip()
         if not _DIGEST.match(digest):
-            raise ProvisioningError("복사한 이미지의 digest 를 읽지 못했습니다")
+            raise ImageCopyError("복사한 이미지의 digest 를 읽지 못했습니다")
         return digest
+
+    def existing_digest(self, destination: str, logins: Sequence[RegistryLogin]) -> str | None:
+        """목적지에 이미 있는 이미지의 digest. 없거나 읽지 못하면 None. (crane 이 없으면 오류)"""
+        binary = self._executable()
+        secrets = [login.password for login in logins]
+        with tempfile.TemporaryDirectory(prefix="alpha-crane-") as config_dir:
+            env = {name: os.environ[name] for name in _CRANE_ENV if name in os.environ}
+            env["DOCKER_CONFIG"] = config_dir
+            try:
+                for login in logins:
+                    self._run(
+                        [binary, "auth", "login", login.registry, "-u", login.username, "--password-stdin"],
+                        env, secrets, "auth login", stdin=login.password,
+                    )
+                digest = self._run([binary, "digest", destination], env, secrets, "digest").strip()
+            except ImageCopyError:
+                return None
+        return digest if _DIGEST.match(digest) else None
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +353,8 @@ class TransferResult:
     source: str
     destination: str
     digest: str
+    # True 면 원본에서 복사한 것이 아니라 사람이 목적지에 미리 복사해 둔 이미지를 쓴 것이다.
+    reused: bool = False
 
 
 def transfer_image(
@@ -330,6 +372,10 @@ def transfer_image(
     """원본 이미지를 `<registry_url>/<service_name>` 으로 복사하고 digest 로 고정한 주소를 돌려준다.
 
     목적지 주소 규칙은 Terraform 의 기본값(`<registry_url>/<service_name>:latest`)과 같은 저장소 아래다.
+
+    자동으로 복사할 수 있는 원본은 ECR(원본 AWS 키 필요)과 로그인이 필요 없는 공개 저장소다. 그 밖의 비공개 저장소는
+    열쇠를 받을 곳이 아직 없어서 복사에 실패한다. 이때 "이미지가 있다고 보고 진행"하면 나중에 배포에서 뒤늦게
+    실패하므로, 목적지에 같은 이름의 이미지가 이미 있으면 그것을 쓰고 없으면 `ManualCopyRequired` 로 멈춰 사람이 복사하게 한다.
     """
     say = report or (lambda message: None)
     source = parse_image(source_image)
@@ -340,19 +386,41 @@ def transfer_image(
     destination_repo = f"{registry_url}/{service_name}"
     destination = f"{destination_repo}:{destination_tag(source)}"
 
+    is_ecr = parse_ecr_host(source.registry) is not None
     logins: list[RegistryLogin] = []
-    if parse_ecr_host(source.registry):
+    if is_ecr:
         if not aws_credentials:
             raise ProvisioningError("원본이 ECR 인데 원본 AWS 키가 없어 이미지를 읽을 수 없습니다")
         say("원본 ECR 로그인")
         logins.append(source_login(source.registry, aws_credentials))
     say("목적지 저장소 로그인")
-    logins.append(dest_login(provider, dest_registry))
+    destination_login_info = dest_login(provider, dest_registry)
+    logins.append(destination_login_info)
 
     say("이미지 복사")
-    digest = (copier or CraneCopier()).copy(source.pull_ref, destination, logins)
+    image_copier = copier or CraneCopier()
+    reused = False
+    try:
+        digest = image_copier.copy(source.pull_ref, destination, logins)
+    except ImageCopyError as error:
+        if is_ecr:
+            raise  # 열쇠를 알고 있는 원본이 실패한 것이므로 그대로 알린다
+        lookup = getattr(image_copier, "existing_digest", None)
+        existing = lookup(destination, [destination_login_info]) if lookup else None
+        if not existing:
+            raise ManualCopyRequired(
+                f"원본 이미지({source.pull_ref})를 자동으로 복사하지 못했습니다. 로그인이 필요한 비공개 저장소일 수 있습니다. "
+                f"이미지를 목적지 저장소에 직접 복사한 뒤 같은 작업을 다시 실행하세요 (목적지에 있는 이미지를 그대로 씁니다): "
+                f"crane copy {source.pull_ref} {destination} (사유: {error})"
+            ) from None
+        say("원본에서 복사하지 못해 목적지에 이미 있는 이미지를 씁니다")
+        digest, reused = existing, True
     if source.digest and digest != source.digest:
         raise ProvisioningError(f"복사한 이미지의 digest 가 원본과 다릅니다 (원본 {source.digest}, 복사본 {digest})")
     return TransferResult(
-        container_image=f"{destination_repo}@{digest}", source=source.pull_ref, destination=destination, digest=digest
+        container_image=f"{destination_repo}@{digest}",
+        source=source.pull_ref,
+        destination=destination,
+        digest=digest,
+        reused=reused,
     )

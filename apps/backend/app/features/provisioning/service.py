@@ -219,7 +219,8 @@ def _image_step(
             aws_credentials=credentials,
             report=lambda message: ctx.report("running", 10, message=message),
         )
-        ctx.report("running", 12, message=f"이미지 복사 완료 ({result.digest[:19]})")
+        done = "목적지에 있던 이미지를 사용" if getattr(result, "reused", False) else "이미지 복사 완료"
+        ctx.report("running", 12, message=f"{done} ({result.digest[:19]})")
         return {"container_image": result.container_image}
 
     return prepare
