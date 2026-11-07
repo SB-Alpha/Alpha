@@ -197,7 +197,7 @@ def _gcp_app(svc: dict, name: str, gaps: list[str]) -> tuple[AppInfo, str | None
     containers = template.get("containers") or []
     if not containers:
         gaps.append("Cloud Run 서비스에 컨테이너가 없음")
-        return AppInfo(service_name=name, cloud_run_blockers=[]), None, None
+        return AppInfo(service_name=name, container_settings=[]), None, None
     notes = [f"함께 도는 컨테이너 {len(containers) - 1}개 (사이드카 확인 필요)"] if len(containers) > 1 else []
     c = next((x for x in containers if x.get("ports")), containers[0])
     env_vars: dict[str, str] = {}
@@ -227,8 +227,8 @@ def _gcp_app(svc: dict, name: str, gaps: list[str]) -> tuple[AppInfo, str | None
         health_check_path=probe.get("path"),
         env_vars=env_vars,
         secret_refs=secret_refs,
-        cloud_run_blockers=[],  # 원본이 Cloud Run 이라 그대로 돕니다
-        cloud_run_notes=notes,
+        container_settings=[],  # 원본이 Cloud Run 이라 관리형 컨테이너가 막는 설정이 없음
+        container_notes=notes,
     )
     return info, env_vars.get("PGUSER"), env_vars.get("PGDATABASE")
 
@@ -308,16 +308,16 @@ def _azure_app(app: dict, name: str, gaps: list[str]) -> tuple[AppInfo, str | No
     containers = template.get("containers") or []
     if not containers:
         gaps.append("Container App 에 컨테이너가 없음")
-        return AppInfo(service_name=name, cloud_run_blockers=[]), None, None
+        return AppInfo(service_name=name, container_settings=[]), None, None
     c = containers[0]
-    blockers: list[str] = []
+    settings: list[str] = []
     notes: list[str] = []
     if len(containers) > 1:
         notes.append(f"함께 도는 컨테이너 {len(containers) - 1}개 (사이드카 확인 필요)")
     if (ingress.get("transport") or "").lower() == "tcp":
-        blockers.append("TCP 인그레스 (Cloud Run 은 HTTP 만 받음)")
+        settings.append("tcp_ingress")
     if not ingress:
-        blockers.append("인그레스 없음 (내부 작업 앱은 Cloud Run 서비스로 옮길 수 없음)")
+        settings.append("no_ingress")
     if template.get("volumes"):
         notes.append(f"볼륨 {len(template['volumes'])}개 (목적지에서 다시 연결 필요)")
     if c.get("command") or c.get("args"):
@@ -344,8 +344,8 @@ def _azure_app(app: dict, name: str, gaps: list[str]) -> tuple[AppInfo, str | No
         health_check_path=probe.get("path"),
         env_vars=env_vars,
         secret_refs=secret_refs,
-        cloud_run_blockers=blockers,
-        cloud_run_notes=notes,
+        container_settings=settings,
+        container_notes=notes,
     )
     return info, env_vars.get("PGUSER"), env_vars.get("PGDATABASE")
 

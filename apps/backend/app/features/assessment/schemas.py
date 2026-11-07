@@ -34,10 +34,11 @@ class AppInfo(BaseModel):
     health_check_path: str | None = None
     env_vars: dict[str, str] = Field(default_factory=dict)  # 비밀이 아닌 환경 변수 이름 → 값
     secret_refs: dict[str, str] = Field(default_factory=dict)  # 환경 변수 이름 → AWS 비밀 참조(ARN). 값 금지
-    # Cloud Run 으로 옮길 수 없는 ECS 설정 (예: privileged, UDP 포트, 호스트 경로 마운트). None = 태스크 정의를 보지 않음(직접 입력)
-    cloud_run_blockers: list[str] | None = None
-    # 옮기되 사람이 확인해야 하는 ECS 설정 (예: 시작 명령 재정의, 함께 도는 다른 컨테이너). 값은 넣지 않고 이름만
-    cloud_run_notes: list[str] = Field(default_factory=list)
+    # 목적지에 따라 막힐 수 있는 원본 설정 코드 (예: "privileged", "udp_port", "host_path_volume:data").
+    # 옮길 수 있는지는 목적지마다 targets.py 가 판정합니다. None = 태스크 정의를 보지 않음(직접 입력)
+    container_settings: list[str] | None = None
+    # 옮기되 사람이 확인해야 하는 원본 설정 (예: 시작 명령 재정의, 함께 도는 다른 컨테이너). 값은 넣지 않고 이름만
+    container_notes: list[str] = Field(default_factory=list)
 
 
 class TableInfo(BaseModel):
@@ -76,10 +77,14 @@ class InventoryForPlanning(BaseModel):
     gaps: list[str] = Field(default_factory=list)  # 조회하지 못한 항목
 
 
-class TargetSelection(BaseModel):
-    """사용자가 고른 목적지."""
+# 목적지 클라우드. workflows 의 TargetInfraType 과 같은 값. 호환 규칙이 없는 목적지(ncp)는 호환 검사가 unknown
+TargetCloud = Literal["gcp", "aws", "azure", "ncp"]
 
-    cloud: Literal["gcp"] = "gcp"
+
+class TargetSelection(BaseModel):
+    """사용자가 고른 목적지. 호환 검사·안내 문구가 이 클라우드 기준으로 바뀝니다 (targets.py)."""
+
+    cloud: TargetCloud = "gcp"
     region: str  # 예: "asia-northeast3"
 
 
@@ -104,7 +109,7 @@ class PlanCheck(BaseModel):
         "primary_keys_present",
         "table_names_supported",
         "replication_slot_available",
-        "cloud_run_compatible",
+        "target_platform_compatible",
         "image_available",
     ]
     title: str
@@ -280,6 +285,7 @@ class AssessmentInput(BaseModel):
     db_admin_ref: str | None = None  # 원본 DB 관리자 계정 이름표 (db.py 가 PG 카탈로그 조회에 씀)
     aws_region: str | None = None  # 원본 AWS 리전. 예: "ap-northeast-2". source_kind="aws" 면 필수
     target_region: str  # 목적지 리전. 예: "asia-northeast3"
+    target_cloud: TargetCloud = "gcp"  # 목적지 클라우드. workflows 의 target_infra.provider 와 같은 값
     manual: ManualSource | None = None  # source_kind="manual" 이면 필수
     cloud_source: CloudSource | None = None  # source_kind="gcp"·"azure" 면 필수
     # 원본 계정에 후보가 여러 개일 때만 지정. 비우면 하나뿐일 때 자동으로 고릅니다.

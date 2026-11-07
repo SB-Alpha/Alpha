@@ -12,10 +12,10 @@ from .schemas import MigrationPlan, PlanningInput
 
 
 def build(inp: PlanningInput) -> MigrationPlan:
-    checks = rules.run_checks(inp.inventory)
+    checks = rules.run_checks(inp.inventory, inp.target)
     infra, mapping_risks = rules.build_target_infra(inp.inventory, inp.target)
 
-    risks = rules.collect_risks(inp.inventory, checks) + mapping_risks
+    risks = rules.collect_risks(inp.inventory, checks, inp.target) + mapping_risks
     blocking = [f"{c.title}: {c.detail}" for c in checks if c.result != "pass"]
     approvable = not blocking
 
@@ -25,9 +25,9 @@ def build(inp: PlanningInput) -> MigrationPlan:
         target_infra=infra,
         checks=checks,
         risks=risks,
-        summary=rules.rule_summary(infra, checks, approvable),
+        summary=rules.rule_summary(infra, checks, approvable, inp.target),
         summary_source="rule",
-        steps=rules.build_steps(inp.inventory.app.image_uri),
+        steps=rules.build_steps(inp.inventory.app.image_uri, inp.target.cloud),
         approvable=approvable,
         blocking=blocking,
         generated_at=datetime.now(timezone.utc),

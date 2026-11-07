@@ -66,7 +66,9 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
         # 목적지 DB 사용자는 앱이 실제로 쓰는 PGUSER 를 따릅니다
         db_facts = db_facts.model_copy(update={"username": app_res.db_user})
     inventory = InventoryForPlanning(app=app_res.facts, db=db_facts, gaps=gaps)
-    plan = plan_part.build(PlanningInput(inventory=inventory, target=TargetSelection(region=inp.target_region)))
+    plan = plan_part.build(PlanningInput(
+        inventory=inventory, target=TargetSelection(cloud=inp.target_cloud, region=inp.target_region)
+    ))
     if ai_part.enabled():
         report(90, "AI 로 요약·위험 설명 보강")
         plan = ai_part.enhance(plan)  # 실패하면 규칙 결과 그대로

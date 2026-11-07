@@ -101,7 +101,7 @@ def test_gcp_reads_cloud_run_and_cloud_sql(monkeypatch, db_ok):
     assert app.facts.health_check_path == "/health"
     assert app.facts.env_vars == {"PGUSER": "guestbook", "PGDATABASE": "guestbook", "LOG_LEVEL": "INFO"}
     assert app.facts.secret_refs == {"PGPASSWORD": "guestbook-db-password:1"}
-    assert app.facts.cloud_run_blockers == []
+    assert app.facts.container_settings == []
     assert any("API_TOKEN" in g for g in app.gaps)
 
     assert db.facts.engine == "postgres" and db.facts.engine_version == "16"
@@ -161,7 +161,7 @@ def test_azure_reads_container_app_and_flexible_server(monkeypatch, db_ok):
     assert (app.facts.container_port, app.facts.cpu_units, app.facts.memory_mib) == (8080, 512, 1024)
     assert app.facts.health_check_path == "/health/live"
     assert app.facts.secret_refs == {"DB_PASSWORD": "containerapp-secret:db-password"}
-    assert app.facts.cloud_run_blockers == []
+    assert app.facts.container_settings == []
     assert db.facts.engine_version == "16" and db.facts.vcpu == 2 and db.facts.memory_gib is None
     assert db.facts.logical_replication is True and db.facts.allocated_storage_gb == 32
     assert db.source_db.host == "gb.postgres.database.azure.com" and db.facts.database_name == "guestbook"
@@ -169,13 +169,13 @@ def test_azure_reads_container_app_and_flexible_server(monkeypatch, db_ok):
     assert all("/subscriptions/sub1/resourceGroups/rg/providers/" in u for u in seen)
 
 
-def test_azure_tcp_ingress_blocks_cloud_run(monkeypatch, db_ok):
+def test_azure_tcp_ingress_is_recorded_as_a_setting(monkeypatch, db_ok):
     monkeypatch.setattr(cloud_source, "azure_token", lambda ref: "t")
     app = {"properties": {**CONTAINER_APP["properties"],
                           "configuration": {"ingress": {"targetPort": 5000, "transport": "tcp"}}}}
     _, res, _ = cloud_source.collect_azure(_azure_inp(), _fake({"/containerApps/guestbook": app,
                                                                  "/flexibleServers/gb": {}}))
-    assert res.facts.cloud_run_blockers and "TCP" in res.facts.cloud_run_blockers[0]
+    assert res.facts.container_settings == ["tcp_ingress"]
 
 
 def test_service_turns_auth_failure_into_gap(monkeypatch):

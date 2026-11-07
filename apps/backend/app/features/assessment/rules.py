@@ -5,8 +5,10 @@ from __future__ import annotations
 import math
 import re
 
+from . import targets
 from .app import PROVISIONING_INJECTED_ENV, has_secret_value, looks_secret
 from .schemas import (
+    AppInfo,
     InventoryForPlanning,
     PlanCheck,
     PlanStep,
@@ -15,7 +17,7 @@ from .schemas import (
     TargetSelection,
 )
 
-TARGET_PG_MAJOR = 16  # 목적지 Cloud SQL PostgreSQL 16 고정 (MVP 범위)
+TARGET_PG_MAJOR = 16  # 목적지 PostgreSQL 16 고정 (MVP 범위. GCP·AWS·Azure Terraform 의 db_version 기본값)
 # CDC 에이전트 사전 검사와 같은 기준 (infra/db_migration/agent/cdc_agent/db.py precheck_source:
 # server_version_num >= 160000). 더 낮은 버전을 통과시키면 승인 뒤 CDC 단계에서 막힙니다.
 MIN_SOURCE_PG_MAJOR = 16
@@ -23,9 +25,6 @@ MIN_SOURCE_PG_MAJOR = 16
 CDC_TABLE_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$")
 
 # 원본이 값을 안 줬을 때 쓰는 기본값. 쓰이면 risks 에 남깁니다.
-# Cloud Run 인스턴스 한 개의 최대 크기. 원본 Fargate 태스크가 이보다 크면 같은 크기로 옮길 수 없음
-CLOUD_RUN_MAX_VCPU = 8
-CLOUD_RUN_MAX_MEMORY_MIB = 32768
 DEFAULT_PORT = 8080
 DEFAULT_HEALTH_PATH = "/health/ready"
 DEFAULT_CPU = 1  # vCPU
@@ -74,7 +73,7 @@ def _pg_major(version: str | None) -> int | None:
     return int(head) if head.isdigit() else None
 
 
-def run_checks(inv: InventoryForPlanning) -> list[PlanCheck]:
+def run_checks(inv: InventoryForPlanning, target: TargetSelection | None = None) -> list[PlanCheck]:
     db, app = inv.db, inv.app
     checks: list[PlanCheck] = []
 
@@ -182,19 +181,9 @@ def run_checks(inv: InventoryForPlanning) -> list[PlanCheck]:
             detail=detail,
         ))
 
-    # 3-3. Cloud Run 으로 옮길 수 있는 설정인지. 태스크 정의를 본 경우에만 판정합니다 (직접 입력은 None)
-    blockers = list(app.cloud_run_blockers or [])
-    cpu = _cloud_run_cpu(app.cpu_units)
-    if cpu is not None and cpu > CLOUD_RUN_MAX_VCPU:
-        blockers.append(f"CPU {cpu} vCPU (Cloud Run 최대 {CLOUD_RUN_MAX_VCPU} vCPU)")
-    if app.memory_mib is not None and app.memory_mib > CLOUD_RUN_MAX_MEMORY_MIB:
-        blockers.append(f"메모리 {app.memory_mib} MiB (Cloud Run 최대 {CLOUD_RUN_MAX_MEMORY_MIB} MiB)")
-    if app.cloud_run_blockers is not None or blockers:
-        checks.append(PlanCheck(
-            id="cloud_run_compatible", title="Cloud Run 호환", result="fail" if blockers else "pass",
-            detail=("Cloud Run 으로 옮길 수 없는 설정: " + "; ".join(blockers)) if blockers
-            else "옮길 수 없는 ECS 설정이 없음",
-        ))
+    # 3-3. 목적지 컨테이너 플랫폼으로 옮길 수 있는 설정·크기인지. 규칙은 목적지마다 다릅니다 (targets.py).
+    # 설정은 태스크 정의를 본 경우에만 판정합니다 (직접 입력은 None). 크기는 값이 있으면 봅니다.
+    checks += _platform_check(app, target.cloud if target else "gcp")
 
     # 4. 이미지 확보 가능 (주소가 있는지까지만. 실제 pull 은 provisioning 이 확인)
     if app.image_uri:
@@ -209,6 +198,31 @@ def run_checks(inv: InventoryForPlanning) -> list[PlanCheck]:
         ))
 
     return checks
+
+
+def _platform_check(app: AppInfo, cloud: str) -> list[PlanCheck]:
+    prof = targets.profile(cloud)
+    vcpu = app.cpu_units / 1024 if app.cpu_units is not None else None
+    if prof is None:
+        if app.container_settings is None and vcpu is None and app.memory_mib is None:
+            return []
+        return [PlanCheck(
+            id="target_platform_compatible", title=f"목적지({cloud}) 호환", result="unknown",
+            detail=f"목적지 {cloud} 의 컨테이너 호환 규칙이 아직 없어 판정하지 못함",
+        )]
+    blocked, unknown = targets.judge(list(app.container_settings or []), vcpu, app.memory_mib, prof)
+    if app.container_settings is None and not blocked and not unknown:
+        return []
+    if blocked:
+        result, detail = "fail", f"{prof.app_platform} 에서 받지 못하는 설정: " + "; ".join(blocked)
+        if unknown:
+            detail += ". 확인하지 못한 설정: " + "; ".join(unknown)
+    elif unknown:
+        result, detail = "unknown", f"{prof.app_platform} 에서 되는지 확인하지 못한 설정: " + "; ".join(unknown)
+    else:
+        result, detail = "pass", f"{prof.app_platform} 에서 받지 못하는 원본 설정이 없음"
+    return [PlanCheck(id="target_platform_compatible", title=f"목적지({prof.app_platform}) 호환",
+                      result=result, detail=detail)]
 
 
 def _cloud_run_cpu(cpu_units: int | None) -> int | None:
@@ -326,7 +340,10 @@ def build_target_infra(inv: InventoryForPlanning, target: TargetSelection) -> tu
     return infra, risks
 
 
-def collect_risks(inv: InventoryForPlanning, checks: list[PlanCheck]) -> list[Risk]:
+def collect_risks(inv: InventoryForPlanning, checks: list[PlanCheck],
+                  target: TargetSelection | None = None) -> list[Risk]:
+    prof = targets.profile(target.cloud if target else "gcp")
+    platform = prof.app_platform if prof else "목적지"
     risks: list[Risk] = []
     for c in checks:
         if c.result == "fail":
@@ -337,16 +354,18 @@ def collect_risks(inv: InventoryForPlanning, checks: list[PlanCheck]) -> list[Ri
     for gap in inv.gaps:
         risks.append(Risk(level="medium", title="원본 수집 누락", detail=gap))
 
-    for note in inv.app.cloud_run_notes:
-        risks.append(Risk(level="medium", title="Cloud Run 에서 확인할 ECS 설정", detail=note))
+    for note in inv.app.container_notes:
+        risks.append(Risk(level="medium", title=f"{platform} 에서 확인할 원본 설정", detail=note))
 
     moved = sorted(k for k in inv.app.secret_refs if k not in PROVISIONING_INJECTED_ENV)
     if moved:
         risks.append(Risk(
             level="high", title="비밀값 이전 필요",
-            detail=f"비밀 {len(moved)}개({', '.join(moved)})의 값을 GCP Secret Manager 에 넣어야 합니다. "
-                   "Terraform 은 빈 비밀만 만들고 Cloud Run 은 그 최신 값을 읽으므로, "
-                   "값을 넣기 전에는 앱 배포가 실패합니다.",
+            detail=(f"비밀 {len(moved)}개({', '.join(moved)})의 값을 GCP Secret Manager 에 넣어야 합니다. "
+                    "Terraform 은 빈 비밀만 만들고 Cloud Run 은 그 최신 값을 읽으므로, "
+                    "값을 넣기 전에는 앱 배포가 실패합니다.") if prof is None or prof.cloud == "gcp" else
+                   (f"비밀 {len(moved)}개({', '.join(moved)})의 값을 {prof.secret_store} 에 넣어야 합니다. "
+                    "값을 넣기 전에는 앱이 시작하지 못할 수 있습니다."),
         ))
 
     if inv.db.database_name is None:
@@ -363,9 +382,10 @@ def collect_risks(inv: InventoryForPlanning, checks: list[PlanCheck]) -> list[Ri
                    "이전 전에 퍼블릭 액세스를 꺼야 합니다 (cdc 명세 2절, 대상 서비스 수정 T6).",
         ))
 
+    db_service = prof.db_service if prof else "목적지 DB"
     risks.append(Risk(
-        level="low", title="Cloud SQL 생성 시간",
-        detail="Cloud SQL 생성은 오래 걸릴 수 있습니다. 실제 소요 시간은 provisioning 측정값을 따릅니다.",
+        level="low", title=f"{db_service} 생성 시간",
+        detail=f"{db_service} 생성은 오래 걸릴 수 있습니다. 실제 소요 시간은 provisioning 측정값을 따릅니다.",
     ))
     return risks
 
@@ -386,25 +406,47 @@ def image_registry_label(uri: str | None) -> str:
     return first
 
 
-def build_steps(image_uri: str | None = None) -> list[PlanStep]:
+def build_steps(image_uri: str | None = None, cloud: str = "gcp") -> list[PlanStep]:
+    prof = targets.profile(cloud)
+    if prof is not None and prof.cloud == "gcp":
+        label, registry, app_platform = "GCP", "Artifact Registry", "Cloud Run"
+        apply = "terraform apply: VPC, Cloud SQL(논리 디코딩), Artifact Registry, Cloud Run, Secret Manager"
+    elif prof is not None:
+        label, registry, app_platform = prof.label, prof.registry, prof.app_platform
+        apply = (f"terraform apply: 네트워크, {prof.db_service}(논리 디코딩), {prof.registry}, "
+                 f"{prof.app_platform}, {prof.secret_store}")
+    else:
+        label = registry = app_platform = f"목적지({cloud})"
+        apply = f"terraform apply: 목적지({cloud}) 네트워크·DB(논리 디코딩)·이미지 저장소·앱·비밀 저장소"
     return [
         PlanStep(order=1, module="workflows", action="계획 승인 ①", needs_approval=True),
         PlanStep(order=2, module="provisioning",
-                 action=f"이미지 이동 {image_registry_label(image_uri)} → Artifact Registry"),
-        PlanStep(order=3, module="provisioning",
-                 action="terraform apply: VPC, Cloud SQL(논리 디코딩), Artifact Registry, Cloud Run, Secret Manager"),
-        PlanStep(order=4, module="provisioning", action="Cloud Run 상태 확인 경로 성공 확인 → TargetEnv 반환"),
+                 action=f"이미지 이동 {image_registry_label(image_uri)} → {registry}"),
+        PlanStep(order=3, module="provisioning", action=apply),
+        PlanStep(order=4, module="provisioning", action=f"{app_platform} 상태 확인 경로 성공 확인 → TargetEnv 반환"),
         PlanStep(order=5, module="db_migration", action="CDC 초기 복사 + 변경분 동기화, 행 수·데이터 대조"),
         PlanStep(order=6, module="workflows", action="전환 승인 ②", needs_approval=True),
         PlanStep(order=7, module="traffic",
-                 action="Cloudflare 보류 → 최종 변경분 반영·검증 → 경로를 GCP 로 변경 → 보류 해제"),
+                 action=f"Cloudflare 보류 → 최종 변경분 반영·검증 → 경로를 {label} 로 변경 → 보류 해제"),
     ]
 
 
-def rule_summary(infra: TargetInfra, checks: list[PlanCheck], approvable: bool) -> list[str]:
+def rule_summary(infra: TargetInfra, checks: list[PlanCheck], approvable: bool,
+                 target: TargetSelection | None = None) -> list[str]:
     passed = sum(c.result == "pass" for c in checks)
-    line1 = (f"{infra.service_name} 를 GCP {infra.region} 의 Cloud Run({infra.cpu} vCPU, {infra.memory}MiB) "
-             f"+ Cloud SQL PostgreSQL {infra.db_version} 로 옮깁니다.")
+    cloud = target.cloud if target else "gcp"
+    prof = targets.profile(cloud)
+    if prof is not None and prof.cloud == "gcp":
+        line1 = (f"{infra.service_name} 를 GCP {infra.region} 의 Cloud Run({infra.cpu} vCPU, {infra.memory}MiB) "
+                 f"+ Cloud SQL PostgreSQL {infra.db_version} 로 옮깁니다.")
+    elif prof is not None:
+        # 크기는 목적지 어댑터(provisioning)가 그 클라우드가 받는 조합으로 다시 맞춥니다
+        line1 = (f"{infra.service_name} 를 {prof.label} {infra.region} 의 {prof.app_platform}"
+                 f"(원본 기준 {infra.cpu} vCPU, {infra.memory}MiB) "
+                 f"+ {prof.db_service} PostgreSQL {infra.db_version} 로 옮깁니다.")
+    else:
+        line1 = (f"{infra.service_name} 를 목적지({cloud}) {infra.region} 로 옮깁니다 "
+                 f"(앱 {infra.cpu} vCPU, {infra.memory}MiB + PostgreSQL {infra.db_version}).")
     line2 = f"필수 조건 {passed}/{len(checks)} 통과."
     if approvable:
         line3 = "승인하면 목적지를 만들고 CDC 동기화 후 전환 승인 ②에서 다시 멈춥니다."

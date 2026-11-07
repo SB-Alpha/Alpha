@@ -99,6 +99,16 @@ def test_assessment_runs_and_waits_for_plan_approval(engine, fake_assessment):
     assert inp.db_admin_ref == REQUEST.db_admin_ref
 
 
+def test_assessment_gets_the_target_cloud_so_checks_follow_the_destination(engine, fake_assessment):
+    from app.features.workflows.schemas import TargetInfraConfig
+
+    engine.advance(engine.create_run(REQUEST).run_id)
+    aws = REQUEST.model_copy(update={"target_infra": TargetInfraConfig(provider="aws")})
+    engine.advance(engine.create_run(aws).run_id)
+
+    assert [c.target_cloud for c in fake_assessment.calls] == ["gcp", "aws"]
+
+
 def test_missing_credentials_ref_stops_without_calling_assessment(engine, fake_assessment):
     request = REQUEST.model_copy(update={"aws_credentials_ref": None})
 

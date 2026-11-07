@@ -422,6 +422,8 @@ def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
     except ImportError as exc:
         raise RuntimeError("assessment 모듈을 찾을 수 없습니다") from exc
 
+    # 목적지 클라우드에 맞춰 호환 검사·안내 문구를 고르게 합니다 (assessment targets.py)
+    target_cloud = req.target_infra.provider if req.target_infra else "gcp"
     if manual:
         # 직접 입력한 원본은 AWS 를 조회하지 않습니다. 원본에서 확인하지 않은 값이라는 표시는 assessment 가 gaps 에 남깁니다.
         inp = AssessmentInput(
@@ -430,6 +432,7 @@ def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
             manual=req.manual,
             github_repo_url=req.github_repo_url,
             target_region=req.target_region,
+            target_cloud=target_cloud,
         )
     elif cloud:
         inp = AssessmentInput(
@@ -439,6 +442,7 @@ def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
             db_admin_ref=req.db_admin_ref or req.db_credentials_ref,
             github_repo_url=req.github_repo_url,
             target_region=req.target_region,
+            target_cloud=target_cloud,
         )
     else:
         inp = AssessmentInput(
@@ -448,6 +452,7 @@ def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
             db_admin_ref=req.db_admin_ref or req.db_credentials_ref,
             aws_region=req.aws_region,
             target_region=req.target_region,
+            target_cloud=target_cloud,
             ecs_service=req.ecs_service,
             rds_instance_id=req.rds_instance_id,
         )
