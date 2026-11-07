@@ -86,6 +86,19 @@ def test_simulation_mode_full_lifecycle():
     assert final_job["metrics"]["copy_percent"] == 100
 
 
+def test_simulation_abort_ends_the_job_like_the_real_agent():
+    # 추적은 aborted 를 봐야 VPN 을 지우고 끝납니다. 등록 전 작업은 실제 에이전트처럼 404 입니다.
+    client = CdcAgentClient(AgentSettings(url="mock://simulation"))
+    with pytest.raises(AgentError) as missing:
+        client.abort("test-sim-no-job")
+    assert missing.value.status_code == 404
+
+    client.create_job({"job_id": "test-sim-abort", "source": {}, "target": {}})
+
+    assert client.abort("test-sim-abort")["state"] == "aborted"
+    assert client.get_job("test-sim-abort")["state"] == "aborted"
+
+
 def test_simulation_flag_does_not_replace_a_real_agent_url(monkeypatch):
     monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
     monkeypatch.setenv("CDC_AGENT_URL", "https://cdc.example")
