@@ -79,12 +79,21 @@ export function RunView() {
           ← 새 이전 요청
         </Link>
         {run && (
-          <Link
-            href={`/runs/${encodeURIComponent(run.run_id)}/report`}
-            className="text-xs font-medium text-ink/70 underline underline-offset-4 hover:text-ink"
-          >
-            시각적 요약 리포트 (/runs/{run.run_id}/report) →
-          </Link>
+          <div className="flex flex-wrap gap-4">
+            {/* db_migration 상태 API 를 같은 run_id 로 읽습니다. workflows 가 시작한 실행은 읽기 전용입니다. */}
+            <Link
+              href={`/db-migration/runs/${encodeURIComponent(run.run_id)}`}
+              className="text-xs font-medium text-ink/70 underline underline-offset-4 hover:text-ink"
+            >
+              CDC 상세 →
+            </Link>
+            <Link
+              href={`/runs/${encodeURIComponent(run.run_id)}/report`}
+              className="text-xs font-medium text-ink/70 underline underline-offset-4 hover:text-ink"
+            >
+              시각적 요약 리포트 (/runs/{run.run_id}/report) →
+            </Link>
+          </div>
         )}
       </div>
 

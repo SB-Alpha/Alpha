@@ -67,6 +67,8 @@ class DbInfo(BaseModel):
     # 복제 슬롯 여유 (PG 카탈로그 조회). CDC 가 슬롯을 하나 만들어야 합니다. 모르면 None
     max_replication_slots: int | None = None
     replication_slots_in_use: int | None = None
+    ha_enabled: bool | None = None  # 고가용성 여부 (Multi-AZ / REGIONAL / zone redundant)
+    backup_retention_days: int | None = None  # 자동 백업 보관 일수
 
 
 class InventoryForPlanning(BaseModel):
@@ -276,6 +278,7 @@ class AssessmentInput(BaseModel):
     - "aws"(기본): AWS 계정을 조회합니다. aws_credentials_ref · aws_region 이 필요합니다.
     - "manual": 사람이 입력한 manual 값으로 만듭니다. 원본에서 확인한 값이 아니라 gaps 에 남깁니다.
     - "gcp" / "azure": cloud_source 위치의 앱·DB 를 클라우드 API 로 조회합니다 (cloud_source.py).
+      db_instance_id·gcp_project·azure_subscription_id 는 중계 VM 으로 읽는 경로(db.py: gcp_sql · azure_pg)의 입력입니다. 아직 service 가 부르지 않습니다.
     """
 
     run_id: str | None = None
@@ -292,6 +295,9 @@ class AssessmentInput(BaseModel):
     ecs_cluster: str | None = None
     ecs_service: str | None = None
     rds_instance_id: str | None = None
+    db_instance_id: str | None = None  # 원본 DB 식별. gcp=인스턴스 이름, azure="<리소스그룹>/<서버>", 비우면 rds_instance_id
+    gcp_project: str | None = None  # 비우면 환경변수 ALPHA_GCP_PROJECT
+    azure_subscription_id: str | None = None  # 비우면 환경변수 ALPHA_AZURE_SUBSCRIPTION_ID
 
     @model_validator(mode="after")
     def _needs_values_for_kind(self) -> AssessmentInput:
@@ -329,6 +335,7 @@ class SourceNetwork(BaseModel):
     cidr: str | None = None
     route_table_ids: list[str] = Field(default_factory=list)
     db_security_group_id: str | None = None
+    allowed_cidrs: list[str] = Field(default_factory=list)  # DB 접근 허용 대역 요약 (GCP authorized networks / Azure 방화벽 / AWS SG 인바운드)
 
 
 class SourceApp(BaseModel):
@@ -369,6 +376,8 @@ class DbAssessment(BaseModel):
     facts: DbInfo = Field(default_factory=DbInfo)
     source_db: SourceDb = Field(default_factory=SourceDb)
     network: SourceNetwork = Field(default_factory=SourceNetwork)
+    region: str | None = None
+    account_id: str | None = None
     gaps: list[str] = Field(default_factory=list)
 
 
