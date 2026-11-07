@@ -134,7 +134,7 @@ def test_build_input_feeds_the_report_and_a_failed_lookup_blocks_the_saving():
     inp = estimate.build_input(_req(), aws=AwsPrices(FakePricingClient()), gcp=FakeGcp(),
                                azure=AzurePrices(fake_azure_query), today=TODAY)
     assert [c.cloud for c in inp.candidates] == ["gcp", "azure"]
-    assert inp.current.lines[0].source.startswith("aws-price-list-api 2026-11-07")
+    assert inp.current.lines[0].source.startswith("aws-price-list-query-api 2026-11-07")
     report = service.run(inp)
     gcp, azure = report.savings
     assert gcp.monthly_saving_usd is None and gcp.missing == ["gcp DB 컴퓨팅"]  # 조회 실패는 0 이 아니라 미제공
@@ -221,3 +221,54 @@ def test_estimate_api_returns_the_priced_lines_and_the_report(monkeypatch):
     data = res.json()
     assert data["input"]["current"]["cloud"] == "aws"
     assert [s["cloud"] for s in data["report"]["savings"]] == ["gcp", "azure"]
+
+
+# -- AWS 공개 가격 파일(Bulk API) 경로 -------------------------------------------------------------
+
+def _offer_product(sku, family, usagetype, **attrs):
+    return sku, {"sku": sku, "productFamily": family,
+                 "attributes": {"regionCode": "ap-northeast-2", "usagetype": usagetype, **attrs}}
+
+
+def _offer(products: list[tuple[str, dict]], prices: dict[str, str]) -> dict:
+    return {"products": dict(products), "terms": {"OnDemand": {
+        sku: {f"{sku}.T": {"priceDimensions": {f"{sku}.T.R": {"pricePerUnit": {"USD": usd}}}}} for sku, usd in prices.items()}}}
+
+
+OFFERS = {
+    "AmazonECS": _offer([
+        _offer_product("A", "Compute", "APN2-Fargate-vCPU-Hours:perCPU", cputype="perCPU"),
+        _offer_product("B", "Compute", "APN2-Fargate-ARM-vCPU-Hours:perCPU", cputype="perCPU", cpuArchitecture="ARM"),
+        _offer_product("C", "Compute", "APN2-Fargate-GB-Hours", memorytype="perGB"),
+    ], {"A": "0.04656", "B": "0.03725", "C": "0.00511"}),
+    "AmazonRDS": _offer([
+        _offer_product("D", "Database Instance", "APN2-InstanceUsage:db.t3.micro", databaseEngine="PostgreSQL",
+                       instanceType="db.t3.micro", deploymentOption="Single-AZ"),
+        _offer_product("E", "Database Instance", "APN2-UnusedBox:db.t3.micro", databaseEngine="PostgreSQL",
+                       instanceType="db.t3.micro", deploymentOption="Single-AZ"),
+        _offer_product("F", "Database Instance", "APN2-InstanceUsage:db.t3.micro", databaseEngine="MySQL",
+                       instanceType="db.t3.micro", deploymentOption="Single-AZ"),
+        _offer_product("G", "Database Storage", "APN2-RDS:GP3-Storage", databaseEngine="PostgreSQL",
+                       volumeType="General Purpose-GP3", deploymentOption="Single-AZ"),
+    ], {"D": "0.028", "E": "0.028", "F": "0.025", "G": "0.131"}),
+}
+
+
+def test_aws_public_price_files_need_no_login(monkeypatch):
+    fetched = []
+
+    def fake_get_json(url, headers=None):
+        fetched.append(url)
+        service = url.split("/aws/")[1].split("/")[0]
+        return OFFERS[service]
+
+    monkeypatch.setattr(estimate, "_get_json", fake_get_json)
+    monkeypatch.setattr(estimate, "_bulk_cache", {})
+    prices = AwsPrices()
+    cost = prices.cost(_req(), f"{prices.api_name} 2026-11-07")
+    app, db, storage = (line.monthly_usd for line in cost.lines)
+    assert app == round(730 * (1 * 0.04656 + 2 * 0.00511), 2)
+    assert db == round(730 * 0.028, 2)  # MySQL·UnusedBox 행은 빼고
+    assert storage == round(20 * 0.131, 2)
+    assert cost.lines[0].source.startswith("aws-price-list-bulk-api")
+    assert len(fetched) == 2  # 서비스·리전 파일을 한 번씩만 받아 둠

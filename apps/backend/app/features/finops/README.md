@@ -21,11 +21,11 @@
 ## 비용 산출 (`estimate.py`, `POST /finops/estimate`)
 
 크기(`CostRequest`)를 받아 항목 3개(앱 컴퓨팅 · DB 컴퓨팅 · DB 스토리지)의 월 비용을 가격 API 단가로 냅니다.
-월 환산은 730시간, 금액마다 `source` 에 API 이름과 조회 날짜를 남깁니다.
+첫 조회는 AWS RDS 가격 파일(서울 약 20MB) 때문에 20초 안팎 걸립니다. 월 환산은 730시간, 금액마다 `source` 에 API 이름과 조회 날짜를 남깁니다.
 
 | 클라우드 | 가격 API | 고르는 단가 | 인증 |
 |---|---|---|---|
-| AWS (원본) | Price List Query API (`pricing:GetProducts`, us-east-1) | Fargate Linux/x86 vCPU·GB 시간, RDS PostgreSQL Single-AZ 등급별 시간, gp3 GB-월 | boto3 기본 경로 (AWS 로그인) |
+| AWS (원본) | Price List Bulk API (리전별 공개 가격 파일, 6시간 캐시). `AwsPrices(client=boto3 pricing)` 를 주면 Query API | Fargate Linux/x86 vCPU·GB 시간, RDS PostgreSQL Single-AZ 등급별 시간, gp3 GB-월 | 없음 (Query API 는 `pricing:GetProducts`) |
 | GCP | Cloud Billing Catalog API | Cloud Run 인스턴스 기반(항상 켜짐) vCPU·GiB 초, Cloud SQL Enterprise 단일 영역 vCPU·RAM 시간, SSD GiB-월 | `ALPHA_GCP_PRICING_API_KEY` 또는 ADC |
 | Azure | Retail Prices API | Container Apps 활성 vCPU·GiB 초, PostgreSQL Flexible 등급별 시간(크기 이상 가장 작은 등급), Storage GB-월 | 없음 |
 

@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
@@ -59,7 +60,8 @@ def build_input(req: CostRequest, aws: AwsPrices | None = None, gcp: GcpPrices |
                 azure: AzurePrices | None = None, today: date | None = None) -> FinopsInput:
     """원본(AWS)과 후보들의 월 비용 항목을 가격 API 단가로 계산해 FinopsInput 으로 만듭니다."""
     stamp = (today or date.today()).isoformat()
-    current = (aws or AwsPrices()).cost(req, f"aws-price-list-api {stamp}")
+    aws = aws or AwsPrices()
+    current = aws.cost(req, f"{aws.api_name} {stamp}")
     candidates = []
     for cand in req.candidates:
         if cand.cloud == "gcp":
@@ -183,9 +185,8 @@ class AzurePrices:
         ])
 
 
-# -- AWS: Price List Query API (pricing:GetProducts, 엔드포인트는 us-east-1 이지만 모든 리전 가격을 줌) ---------
+# -- AWS: Price List Bulk API (공개 파일) 또는 Query API (pricing:GetProducts) -------------------------
 
-AWS_PRICING_REGION = "us-east-1"
 # Linux/x86 Fargate 는 운영체제·아키텍처 속성이 없어서 usagetype 으로 고릅니다 (ARM·Windows·EC2 행과 구분)
 _FARGATE_VCPU = re.compile(r"^[A-Z0-9]+-Fargate-vCPU-Hours:perCPU$")
 _FARGATE_GB = re.compile(r"^[A-Z0-9]+-Fargate-GB-Hours$")
@@ -204,15 +205,55 @@ def _aws_ondemand(item: dict) -> list[float]:
             for dim in term.get("priceDimensions", {}).values()]
 
 
+AWS_BULK = "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/{service}/current/{region}/index.json"
+_BULK_CACHE_S = 6 * 3600
+_bulk_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
+
+
+def _bulk_keep(service_code: str, product: dict) -> bool:
+    """RDS 리전 파일은 20MB 라 PostgreSQL 인스턴스·스토리지만 남겨 메모리에 둡니다."""
+    if service_code != "AmazonRDS":
+        return True
+    return (product.get("productFamily") in ("Database Instance", "Database Storage")
+            and product.get("attributes", {}).get("databaseEngine") == "PostgreSQL")
+
+
+def aws_bulk_items(service_code: str, region: str) -> list[dict]:
+    """Price List Bulk API(공개 파일, 인증 없음) 의 리전 파일을 Query API 와 같은 모양(product + terms)으로."""
+    key = (service_code, _region(region))
+    cached = _bulk_cache.get(key)
+    if cached and time.monotonic() - cached[0] < _BULK_CACHE_S:
+        return cached[1]
+    offer = _get_json(AWS_BULK.format(service=service_code, region=region))
+    ondemand = offer.get("terms", {}).get("OnDemand", {})
+    items = [{"product": product, "terms": {"OnDemand": ondemand.get(sku, {})}}
+             for sku, product in offer.get("products", {}).items() if _bulk_keep(service_code, product)]
+    _bulk_cache[key] = (time.monotonic(), items)
+    return items
+
+
+def _matches(product: dict, filters: list[dict]) -> bool:
+    for f in filters:
+        field = f["Field"]
+        value = product.get(field) if field == "productFamily" else product.get("attributes", {}).get(field)
+        if value != f["Value"]:
+            return False
+    return True
+
+
 class AwsPrices:
-    def __init__(self, client=None):
+    """단가 출처는 두 가지입니다. 기본은 공개 가격 파일(Bulk API, 로그인 불필요),
+    client(boto3 pricing) 를 주면 Query API 를 씁니다. 두 API 는 같은 가격 데이터를 같은 모양으로 줍니다."""
+
+    def __init__(self, client=None, bulk: Callable[[str, str], list[dict]] = aws_bulk_items):
         self._client = client
+        self._bulk = bulk
+        self.api_name = "aws-price-list-query-api" if client is not None else "aws-price-list-bulk-api"
 
     def _products(self, service_code: str, filters: list[dict]) -> list[dict]:
         if self._client is None:
-            import boto3  # assessment 와 같은 의존성. 키는 boto3 기본 경로(환경변수·프로필)에서 읽음
-
-            self._client = boto3.client("pricing", region_name=AWS_PRICING_REGION)
+            region = next(f["Value"] for f in filters if f["Field"] == "regionCode")
+            return [item for item in self._bulk(service_code, region) if _matches(item["product"], filters)]
         items = []
         for page in self._client.get_paginator("get_products").paginate(
                 ServiceCode=service_code, Filters=filters, FormatVersion="aws_v1"):
