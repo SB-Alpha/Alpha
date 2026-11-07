@@ -12,9 +12,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 
 # ---------------------------------------------------------------------------
 # 입력
@@ -241,6 +242,26 @@ class CloudSource(BaseModel):
     project_id: str | None = None  # GCP
     subscription_id: str | None = None  # Azure
     resource_group: str | None = None  # Azure
+
+    @field_validator("region", "app_name", "db_instance", "project_id", "subscription_id", "resource_group")
+    @classmethod
+    def _url_safe_name(cls, value: str | None) -> str | None:
+        """클라우드 API 주소 경로에 그대로 들어가는 값이라 /·?·#·% 와 공백, '.'·'..' 은 받지 않습니다."""
+        if value is None:
+            return value
+        if not value or value in (".", "..") or re.search(r"[/?#\%\s]", value):
+            raise ValueError("이름에는 / ? # % 공백을 쓸 수 없고 비어 있거나 '.'·'..' 일 수 없습니다")
+        return value
+
+    @field_validator("credentials_ref")
+    @classmethod
+    def _ref_shape(cls, value: str | None) -> str | None:
+        """비우면 GCP 는 서버 로그인(ADC)을 씁니다. 값이 있으면 secret://… 이름표여야 하고, 아니면 거부합니다."""
+        if value is None or value == "":
+            return None
+        if not value.startswith("secret://"):
+            raise ValueError("credentials_ref 는 secret://… 이름표여야 합니다 (비우면 GCP 는 서버 로그인을 씁니다)")
+        return value
 
 
 class AssessmentInput(BaseModel):

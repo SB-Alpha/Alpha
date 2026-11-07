@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import quote
 from collections.abc import Callable
 from typing import Any
 
@@ -44,6 +45,11 @@ SYSTEM_DATABASES = {"postgres", "cloudsqladmin", "azure_maintenance", "azure_sys
 GetJson = Callable[[str, dict[str, str]], dict]
 
 
+def _seg(value: str | None) -> str:
+    """주소 경로 한 칸. 스키마 검증을 거친 값이지만 직접 부를 때를 위해 한 번 더 이스케이프합니다."""
+    return quote(value or "", safe="")
+
+
 def _get_json(url: str, headers: dict[str, str]) -> dict:
     res = httpx.get(url, headers=headers, timeout=HTTP_TIMEOUT_S)
     res.raise_for_status()
@@ -51,9 +57,11 @@ def _get_json(url: str, headers: dict[str, str]) -> dict:
 
 
 def _secret(ref: str | None) -> dict | None:
-    """secret:// 이름표 → dict. 없거나 못 풀면 None (이유는 호출자가 gaps 에)."""
-    if not ref or not ref.startswith("secret://"):
+    """secret:// 이름표 → dict. 비어 있으면 None. 값이 있는데 이름표 형식이 아니면 거부합니다 (조용히 다른 로그인으로 넘어가지 않게)."""
+    if not ref:
         return None
+    if not ref.startswith("secret://"):
+        raise ValueError("자격 증명 이름표가 secret://… 형식이 아님")
     from app.core.secrets import resolve  # 지연 import
 
     data = resolve(ref)
@@ -242,7 +250,7 @@ def collect_gcp(inp: AssessmentInput, get_json: GetJson | None = None) -> tuple[
 
     app_info, pg_user, pg_db = AppInfo(service_name=src.app_name), None, None
     try:
-        svc = get_json(f"https://run.googleapis.com/v2/projects/{p}/locations/{r}/services/{src.app_name}", h)
+        svc = get_json(f"https://run.googleapis.com/v2/projects/{_seg(p)}/locations/{_seg(r)}/services/{_seg(src.app_name)}", h)
         app_info, pg_user, pg_db = _gcp_app(svc, src.app_name, app_gaps)
     except Exception as e:
         app_gaps.append(f"Cloud Run 서비스 조회 실패 ({type(e).__name__})")
@@ -251,7 +259,7 @@ def collect_gcp(inp: AssessmentInput, get_json: GetJson | None = None) -> tuple[
     source_db = SourceDb(instance_id=src.db_instance)
     network = SourceNetwork()
     try:
-        inst = get_json(f"https://sqladmin.googleapis.com/v1/projects/{p}/instances/{src.db_instance}", h)
+        inst = get_json(f"https://sqladmin.googleapis.com/v1/projects/{_seg(p)}/instances/{_seg(src.db_instance)}", h)
         version = inst.get("databaseVersion") or ""
         settings = inst.get("settings") or {}
         ip_cfg = settings.get("ipConfiguration") or {}
@@ -274,7 +282,7 @@ def collect_gcp(inp: AssessmentInput, get_json: GetJson | None = None) -> tuple[
             memory_gib=mem,
             vcpu=vcpu,
         )
-        dbs = get_json(f"https://sqladmin.googleapis.com/v1/projects/{p}/instances/{src.db_instance}/databases", h)
+        dbs = get_json(f"https://sqladmin.googleapis.com/v1/projects/{_seg(p)}/instances/{_seg(src.db_instance)}/databases", h)
         database = _pick_database([d.get("name") for d in dbs.get("items") or []], pg_db, db_gaps)
         db = db.model_copy(update={"database_name": database})
         source_db = SourceDb(instance_id=src.db_instance, host=host, port=5432, database=database,
@@ -355,11 +363,11 @@ def collect_azure(inp: AssessmentInput, get_json: GetJson | None = None) -> tupl
     get_json = get_json or _get_json
     token = azure_token(src.credentials_ref)
     h = {"Authorization": f"Bearer {token}"}
-    base = f"{AZURE_ARM}/subscriptions/{src.subscription_id}/resourceGroups/{src.resource_group}/providers"
+    base = f"{AZURE_ARM}/subscriptions/{_seg(src.subscription_id)}/resourceGroups/{_seg(src.resource_group)}/providers"
 
     app_info, pg_user, pg_db = AppInfo(service_name=src.app_name), None, None
     try:
-        app = get_json(f"{base}/Microsoft.App/containerApps/{src.app_name}?api-version={AZURE_APPS_API}", h)
+        app = get_json(f"{base}/Microsoft.App/containerApps/{_seg(src.app_name)}?api-version={AZURE_APPS_API}", h)
         app_info, pg_user, pg_db = _azure_app(app, src.app_name, app_gaps)
     except Exception as e:
         app_gaps.append(f"Container App 조회 실패 ({type(e).__name__})")
@@ -367,7 +375,7 @@ def collect_azure(inp: AssessmentInput, get_json: GetJson | None = None) -> tupl
     db = DbInfo(engine="postgres")
     source_db = SourceDb(instance_id=src.db_instance)
     network = SourceNetwork()
-    server = f"{base}/Microsoft.DBforPostgreSQL/flexibleServers/{src.db_instance}"
+    server = f"{base}/Microsoft.DBforPostgreSQL/flexibleServers/{_seg(src.db_instance)}"
     try:
         s = get_json(f"{server}?api-version={AZURE_PG_API}", h)
         props = s.get("properties") or {}

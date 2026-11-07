@@ -241,3 +241,75 @@ def test_workflows_request_passes_cloud_source_to_assessment(monkeypatch):
     runners.run_assessment(Run(), None)
     assert got["inp"].source_kind == "gcp" and got["inp"].cloud_source.app_name == "guestbook"
     assert got["inp"].db_admin_ref == "secret://r/db"
+
+
+# --- 자격 증명 이름표와 주소 경로 검증 (리뷰 반영) ---------------------------------------------------------
+
+
+def _fake_google_auth(monkeypatch):
+    """google.auth 를 가짜로 바꿔 ADC 가 불렸는지 봅니다. 토큰 발급은 실제로 하지 않습니다."""
+    import sys
+    import types
+
+    used = []
+    ga = types.ModuleType("google.auth")
+    gat = types.ModuleType("google.auth.transport")
+    gatu = types.ModuleType("google.auth.transport.urllib3")
+    ga.default = lambda scopes=None: (types.SimpleNamespace(token="adc-token", refresh=lambda r: used.append("adc")), "p")
+    gatu.Request = lambda pm: None
+    ga.transport, gat.urllib3 = gat, gatu
+    g = types.ModuleType("google")
+    g.auth = ga
+    ul = types.ModuleType("urllib3")
+    ul.PoolManager = lambda: None
+    for name, mod in {"google": g, "google.auth": ga, "google.auth.transport": gat,
+                      "google.auth.transport.urllib3": gatu, "urllib3": ul}.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    return used
+
+
+@pytest.mark.parametrize("ref", [None, ""])
+def test_gcp_blank_credentials_ref_uses_adc(monkeypatch, ref):
+    used = _fake_google_auth(monkeypatch)
+    assert cloud_source.gcp_token(ref) == "adc-token" and used == ["adc"]
+
+
+@pytest.mark.parametrize("ref", ["gcp-key", "arn:aws:secretsmanager:x", "file:///tmp/key.json"])
+def test_gcp_wrong_shaped_credentials_ref_never_falls_back_to_adc(monkeypatch, ref):
+    used = _fake_google_auth(monkeypatch)
+    with pytest.raises(ValueError):
+        cloud_source.gcp_token(ref)
+    assert used == []  # 서버 로그인으로 조용히 넘어가지 않음
+
+
+@pytest.mark.parametrize("kind", ["gcp", "azure"])
+def test_cloud_source_rejects_wrong_shaped_credentials_ref_at_the_door(kind):
+    src = {"region": "r", "app_name": "a", "db_instance": "d", "credentials_ref": "gcp-key",
+           "project_id": "p", "subscription_id": "s", "resource_group": "g"}
+    with pytest.raises(ValidationError, match="secret://"):
+        AssessmentInput(source_kind=kind, target_region="asia-northeast3", cloud_source=src)
+
+
+def test_cloud_source_blank_credentials_ref_is_none_for_gcp():
+    inp = AssessmentInput(source_kind="gcp", target_region="asia-northeast3", cloud_source={
+        "region": "r", "app_name": "a", "db_instance": "d", "project_id": "p", "credentials_ref": ""})
+    assert inp.cloud_source.credentials_ref is None
+
+
+@pytest.mark.parametrize("field,value", [
+    ("app_name", "a/../b"), ("app_name", "x?alt=media"), ("db_instance", "d#f"), ("region", "r%2F"),
+    ("project_id", "p q"), ("app_name", ".."), ("app_name", ""),
+])
+def test_cloud_source_rejects_names_that_would_change_the_api_path(field, value):
+    src = {"region": "r", "app_name": "a", "db_instance": "d", "project_id": "p", field: value}
+    with pytest.raises(ValidationError):
+        AssessmentInput(source_kind="gcp", target_region="asia-northeast3", cloud_source=src)
+
+
+def test_url_segments_are_escaped_even_when_called_directly(monkeypatch):
+    seen: list[str] = []
+    inp = _gcp_inp()
+    object.__setattr__(inp.cloud_source, "app_name", "a/../b")  # 스키마 검증을 건너뛴 직접 호출 상황
+    monkeypatch.setattr(cloud_source, "gcp_token", lambda ref: "t")
+    cloud_source.collect_gcp(inp, _fake({"/services/": CLOUD_RUN, "/databases": CLOUD_SQL_DBS, "/instances/": CLOUD_SQL}, seen))
+    assert any("/services/a%2F..%2Fb" in u for u in seen) and not any("/services/a/../b" in u for u in seen)
