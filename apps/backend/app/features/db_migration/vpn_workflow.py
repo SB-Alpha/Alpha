@@ -1,7 +1,6 @@
 """7번 공통 절차: 양쪽 게이트웨이 → OCI → 양쪽 연결 → 상태 확인.
 
 호출: ensure_vpn(VpnPlan.from_route(injected, found)). 5·6번을 통과한 뒤 호출한다.
-아직 run()에는 연결하지 않는다.
 부분 실패 시 context와 PSK를 보존한다. destroy는 구간별로 계속 시도하며 다시 호출할 수 있다.
 """
 

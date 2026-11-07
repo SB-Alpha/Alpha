@@ -82,7 +82,7 @@ def add_exception_handlers(app: FastAPI) -> None:
 
 @router.post("/runs", status_code=202)
 def start_run(body: Annotated[Any, Depends(_json_body)], client: Agent) -> dict:
-    """Save the inputs and start DB/network lookup in the background; see GET /runs/{run_id}."""
+    """Save the inputs and start the migration in the background; see GET /runs/{run_id}."""
     return {"run_id": db_workflow.run(body, agent=client)}
 
 

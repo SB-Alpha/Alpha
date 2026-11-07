@@ -190,14 +190,13 @@ def test_credentials_with_wrong_keys_do_not_leak_them():
     assert "oops-pasted-key" not in str(caught.value) and "gcp-secret-value" not in str(caught.value)
 
 
-def test_run_reports_that_later_steps_are_not_connected(credentials):
+def test_run_that_fails_before_the_vpn_keeps_its_inputs_for_a_retry(credentials):
     agent = NoJobAgent()
 
     assert _run_and_wait(INPUT, agent=agent) == "mig-001"
 
     status = db_workflow.status("mig-001", agent=agent)
     assert status.state == "failed"
-    assert status.message == db_workflow.NEXT_STEP_NOT_BUILT
     assert status.cleanup_required
     assert {"secret:source-db-admin", "secret:target-admin"} <= set(status.remaining)
     assert "mig-001" not in db_workflow._active

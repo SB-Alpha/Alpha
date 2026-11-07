@@ -12,7 +12,7 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from app.core.secrets import has_secret, put_secret
-from app.features.db_migration import db_workflow, preflight, vpn
+from app.features.db_migration import cloud_lookup, db_workflow, vpn, vpn_workflow
 from app.features.db_migration import router as db_router
 from app.features.db_migration.client import AgentSettings, CdcAgentClient
 from app.features.db_migration.input_secrets import INPUT_SECRETS
@@ -24,12 +24,11 @@ from .test_db_migration_vpn import INPUT, JOB_ID, RUN_ID
 ACCESS_KEY = "AKIAABCDEFGHIJKLMNOP"
 SECRET_KEY = "secret-key-marker-value"
 DB_PASSWORD = "db-password-marker"
-SOURCE = {k: v for k, v in INPUT["source"].items() if k != "credentials_ref"}
-SOURCE = {**SOURCE, "credentials_ref": {"cloud": "ignored", "db_admin": "ignored"}}
 START = {
-    "run_id": RUN_ID, "region": INPUT["source"]["region"], "aws_access_key_id": ACCESS_KEY,
-    "aws_secret_access_key": SECRET_KEY, "db_user": "alpha", "db_password": DB_PASSWORD,
-    "target": INPUT["target"], "source": SOURCE,
+    "run_id": RUN_ID,
+    "source": {"cloud": "aws", "region": "ap-northeast-2", "db": {"user": "alpha", "password": DB_PASSWORD}},
+    "target": {"cloud": "gcp", "region": "asia-northeast1",
+               "db": {"user": "postgres", "password": "target-admin-pw", "app_user": "app_user"}},
 }
 READY = {"state": "waiting_approval", "phase": "cutover_ready", "progress": 70}
 SWITCHED = {"state": "running", "phase": "stabilizing", "progress": 90}
@@ -60,6 +59,14 @@ class FakeAgent:
         self.calls.append(f"{method} {path}")
         if path == "/status":
             return httpx.Response(200, json=self.health)
+        if path == "/catalog":
+            query = json.loads(request.content)
+            if query["database"] is None:
+                return httpx.Response(200, json={"database": None, "tables": [],
+                                                 "databases": ["postgres" if query["host"] == "rds.example" else "app"]})
+            tables = [{"schema_name": "public", "name": "work_items", "primary_key": ["id"], "kind": "table",
+                       "is_partition": False, "can_select": True}]
+            return httpx.Response(200, json={"database": query["database"], "databases": [], "tables": tables})
         if path == "/probe":
             return httpx.Response(200, json=[{**e, "ok": True, "error": None} for e in json.loads(request.content)])
         if path.endswith("/secrets"):
@@ -94,14 +101,20 @@ class FakeAgent:
         return httpx.Response(200, json=self.job)
 
 
+def found_endpoint(cloud, region, host, cidrs, publicly_accessible=False):
+    db = cloud_lookup.FoundDb("db", host, 5432, "16", publicly_accessible, True)
+    return cloud_lookup.FoundEndpoint(cloud, region, "scope", db, cidrs, {})
+
+
+ROUTE = cloud_lookup.FoundRoute(
+    source=found_endpoint("aws", "ap-northeast-2", "rds.example", ("172.31.0.0/16",)),
+    target=found_endpoint("gcp", "asia-northeast1", "10.20.0.5", ("10.10.0.0/24", "10.20.0.0/20")),
+)
+
+
 @pytest.fixture(autouse=True)
-def _old_run_entry_is_being_rebuilt(monkeypatch):
-    """These tests drive the previous run input. Remove this when the later steps are reconnected."""
-
-    def skip(*_args, **_kwargs):
-        pytest.skip("drives the previous run input")
-
-    monkeypatch.setattr(db_workflow, "run", skip)
+def _cloud_lookup(monkeypatch):
+    monkeypatch.setattr(cloud_lookup, "find_route", lambda injected: ROUTE)
 
 
 @pytest.fixture
@@ -119,6 +132,8 @@ def env(monkeypatch, tmp_path, fake):
                         "CDC_CUTOVER_POLL_S": "0.01", "CDC_COMPLETE_POLL_S": "0.01"}.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(db_workflow, "_runs", {})
+    put_secret("cloud/aws", {"aws_access_key_id": ACCESS_KEY, "aws_secret_access_key": SECRET_KEY})
+    put_secret("cloud/gcp", {"credentials_json": "{}"})
     put_secret(f"{RUN_ID}/target-cloud", {"credentials_json": "{}"})
     put_secret(f"{RUN_ID}/target-admin", {"user": "postgres", "password": "target-admin-pw"})
     put_secret(f"{RUN_ID}/target-ddl-user", {"user": "alpha_ddl", "password": "ddl-pw"})
@@ -138,6 +153,7 @@ def env(monkeypatch, tmp_path, fake):
 def vpn_calls(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(vpn, "ensure_vpn", lambda mig, job_id: calls.append("ensure_vpn") or {"tunnel_status": {}})
+    monkeypatch.setattr(vpn_workflow, "ensure_vpn", lambda plan: calls.append("ensure_vpn") or {"tunnel_status": {}})
     monkeypatch.setattr(vpn, "destroy_vpn", lambda run_id: calls.append("destroy_vpn") or True)
     return calls
 
@@ -168,8 +184,12 @@ def failed_status(fake, **changes):
     return db_workflow.status(RUN_ID, agent=fake.client())
 
 
-def with_source(**db):
-    return {**SOURCE, "db": {**SOURCE["db"], **db}}
+def use_route(monkeypatch, *, public=False, source_cidrs=("172.31.0.0/16",), target_cidrs=("10.10.0.0/24",)):
+    route = cloud_lookup.FoundRoute(
+        source=found_endpoint("aws", "ap-northeast-2", "rds.example", source_cidrs, public),
+        target=found_endpoint("gcp", "asia-northeast1", "10.20.0.5", target_cidrs),
+    )
+    monkeypatch.setattr(cloud_lookup, "find_route", lambda injected: route)
 
 
 # ---- run
@@ -177,7 +197,7 @@ def with_source(**db):
 
 def test_run_returns_at_once_and_goes_in_order_to_cutover_ready(fake, vpn_calls, monkeypatch):
     gate = threading.Event()
-    monkeypatch.setattr(preflight, "check_agent", lambda agent: gate.wait(5))
+    monkeypatch.setattr(cloud_lookup, "find_route", lambda injected: gate.wait(5) and ROUTE)
 
     run_id = db_workflow.run(START, agent=fake.client())
 
@@ -196,8 +216,8 @@ def test_agent_is_checked_before_the_vpn(fake, vpn_calls):
 
     status = failed_status(fake)
 
-    assert status.state == "failed" and status.phase == "agent_check"
-    assert "kafka" in status.message and "io.debezium.x" in status.message
+    assert status.state == "failed" and status.phase == "inputs"
+    assert "kafka" in status.message and "connector plugins" in status.message
     assert vpn_calls == []
 
 
@@ -208,96 +228,28 @@ def test_run_id_is_made_when_not_given(fake, vpn_calls):
     db_workflow._stop_requested.add(run_id)
 
 
-def test_inputs_are_saved_only_as_references_and_replace_what_the_source_named(fake, vpn_calls, monkeypatch):
-    seen = {}
-
-    def ensure(mig, job_id):
-        seen.update(mig.source.credentials_ref.model_dump())
-        return {"tunnel_status": {}}
-
-    monkeypatch.setattr(vpn, "ensure_vpn", ensure)
-    start_to_ready(fake)
-
-    assert seen == {"cloud": f"secret://{RUN_ID}/source-cloud", "db_admin": f"secret://{RUN_ID}/source-db-admin"}
-    assert ACCESS_KEY not in repr(db_workflow.StartInput.model_validate(START))
-
-
-def test_invalid_input_names_fields_and_quotes_no_value(fake):
-    with pytest.raises(db_workflow.InvalidInput) as exc:
-        db_workflow.run({**START, "region": SECRET_KEY, "db_password": ""})
-
-    assert exc.value.fields == ["db_password", "region"]
-    assert SECRET_KEY not in str(exc.value)
-    assert fake.calls == []
-
-
-def test_no_source_and_no_lookup_is_refused():
-    with pytest.raises(db_workflow.InvalidInput, match="source"):
-        db_workflow.run({k: v for k, v in START.items() if k != "source"})
-
-
-def test_source_of_another_region_is_refused():
-    with pytest.raises(db_workflow.InvalidInput, match="source.region"):
-        db_workflow.run({**START, "region": "us-east-1"})
-
-
-def test_lookup_gets_references_and_internal_tables_are_left_out(fake, vpn_calls):
-    lookups = []
-
-    def discover(lookup):
-        lookups.append(lookup)
-        return {**SOURCE, "tables": ["public.work_items", "alpha_cdc.cutover_marker"]}
-
-    db_workflow.run({k: v for k, v in START.items() if k != "source"}, discover=discover, agent=fake.client())
-    wait_until(lambda: fake.job)
-
-    assert lookups[0].cloud_ref == f"secret://{RUN_ID}/source-cloud"
-    assert lookups[0].target_region == INPUT["target"]["region"]
-    assert ACCESS_KEY not in lookups[0].model_dump_json()
-
-
-def test_incomplete_lookup_names_fields_only(fake, vpn_calls):
-    def discover(lookup):
-        return {"db": {"host": DB_PASSWORD}}
-
-    db_workflow.run({k: v for k, v in START.items() if k != "source"}, discover=discover, agent=fake.client())
-    wait_ended()
-    status = db_workflow.status(RUN_ID, agent=fake.client())
-
-    assert status.state == "failed" and status.phase == "source_lookup"
-    assert "source.app" in status.message and DB_PASSWORD not in status.message
-    assert vpn_calls == []
-
-
 # ---- refusals before the VPN
 
 
-@pytest.mark.parametrize("changes, expected", [
-    ({"db_user": "someone_else"}, "not the account"),
-    ({"source": with_source(publicly_accessible=True)}, "public access"),
-    ({"source": {**SOURCE, "network": {**SOURCE["network"], "cidr": "10.50.0.0/24"}}}, "overlap"),
-    ({"source": {**SOURCE, "network": {**SOURCE["network"], "cidr": "10.10.0.0/16"}}}, "overlap"),
-    ({"source": {**SOURCE, "network": {**SOURCE["network"], "cidr": "not-a-cidr"}}}, "not a CIDR"),
+@pytest.mark.parametrize("route, expected", [
+    ({"public": True}, "public access"),
+    ({"source_cidrs": ("10.50.0.0/24",)}, "overlap"),
+    ({"source_cidrs": ("10.10.0.0/16",)}, "overlap"),
+    ({"source_cidrs": ("not-a-cidr",)}, "not a CIDR"),
 ])
-def test_refused_before_anything_is_built(fake, vpn_calls, changes, expected):
-    status = failed_status(fake, **changes)
+def test_refused_before_anything_is_built(fake, vpn_calls, monkeypatch, route, expected):
+    use_route(monkeypatch, **route)
 
-    assert status.state == "failed" and status.phase == "preflight" and expected in status.message
+    status = failed_status(fake)
+
+    assert status.state == "failed" and status.phase == "inputs" and expected in status.message
     assert vpn_calls == [] and "POST /jobs" not in fake.calls
 
 
-def test_unknown_public_access_goes_on(fake, vpn_calls):
-    start_to_ready(fake, source=with_source(publicly_accessible=None))
+def test_unknown_public_access_goes_on(fake, vpn_calls, monkeypatch):
+    use_route(monkeypatch, public=None)
+    start_to_ready(fake)
     assert vpn_calls == ["ensure_vpn"]
-
-
-def test_missing_reference_is_found_before_the_vpn(fake, vpn_calls):
-    target = {**INPUT["target"], "credentials_ref": {**INPUT["target"]["credentials_ref"], "admin": "secret://x/none"}}
-
-    status = failed_status(fake, target=target)
-
-    assert status.phase == "preflight" and "secret://x/none" in status.message
-    assert vpn_calls == []
 
 
 def test_another_job_on_the_same_source_is_refused(fake, vpn_calls):
@@ -335,7 +287,7 @@ def test_missing_settings_name_the_variable(fake, vpn_calls, monkeypatch):
 
     status = failed_status(fake)
 
-    assert status.phase == "preflight" and "CDC_NODE_SUBNET_CIDR" in status.message
+    assert status.phase == "inputs" and "CDC_NODE_SUBNET_CIDR" in status.message
     assert vpn_calls == []
 
 
@@ -359,21 +311,21 @@ def test_status_without_the_agent_says_unknown_and_lists_what_remains(fake, vpn_
     status = db_workflow.status(RUN_ID, agent=fake.client())
 
     assert status.state == "unknown" and status.cleanup_required
-    assert "secret:source-cloud" in status.remaining
+    assert "secret:source-db-admin" in status.remaining
 
 
 def test_failure_in_the_background_shows_the_stage_and_hides_secrets(fake, monkeypatch):
-    def broken(mig, job_id):
+    def broken(plan):
         raise RuntimeError(f"apply failed: {SECRET_KEY} AKIAZZZZZZZZZZZZZZZZ password=hunter2 {DB_PASSWORD}")
 
-    monkeypatch.setattr(vpn, "ensure_vpn", broken)
+    monkeypatch.setattr(vpn_workflow, "ensure_vpn", broken)
 
     status = failed_status(fake)
 
     assert status.state == "failed" and status.phase == "vpn" and status.cleanup_required
     for hidden in (SECRET_KEY, "AKIAZZZZZZZZZZZZZZZZ", "hunter2", DB_PASSWORD):
         assert hidden not in status.message
-    assert "apply failed" in status.message
+    assert "같은 run_id로 다시 실행" in status.message
 
 
 def test_status_and_logs_carry_no_secret(fake, vpn_calls, caplog):
@@ -538,7 +490,7 @@ def test_finish_only_after_the_cutover(fake, vpn_calls):
     start_to_ready(fake)
     with pytest.raises(db_workflow.NotAllowed, match="use stop"):
         db_workflow.finish(RUN_ID, agent=fake.client())
-    assert has_secret(f"secret://{RUN_ID}/source-cloud")
+    assert has_secret(f"secret://{RUN_ID}/source-db-admin")
 
 
 def test_finish_without_a_job_is_refused(fake):
@@ -552,7 +504,7 @@ def test_finish_closes_then_removes_the_vpn_then_the_secrets(fake, vpn_calls, mo
     put_secret(f"{RUN_ID}/vpn-context", {"json": "{}"})
 
     def destroy(run_id):
-        order.append(("vpn", f"POST /jobs/{JOB_ID}/close" in fake.calls, has_secret(f"secret://{RUN_ID}/source-cloud")))
+        order.append(("vpn", f"POST /jobs/{JOB_ID}/close" in fake.calls, has_secret(f"secret://{RUN_ID}/source-db-admin")))
 
     monkeypatch.setattr(vpn, "destroy_vpn", destroy)
 
@@ -560,7 +512,7 @@ def test_finish_closes_then_removes_the_vpn_then_the_secrets(fake, vpn_calls, mo
 
     assert order == [("vpn", True, True)]
     assert result.state == "finished" and result.vpn == "removed" and result.remaining == []
-    assert any("IAM" in step for step in result.next_steps)
+    assert any("aws" in step for step in result.next_steps)
     assert result.target_accounts == {"retired": ["alpha_sink", "alpha_ddl"]}
     assert not any(has_secret(f"secret://{RUN_ID}/{tag}") for tag in (*INPUT_SECRETS, *db_workflow.OWN_SECRETS))
     assert db_workflow.status(RUN_ID, agent=fake.client()).cleanup_required is False
@@ -573,7 +525,7 @@ def test_finish_keeps_the_vpn_and_keys_when_close_fails_and_can_be_called_again(
     result = db_workflow.finish(RUN_ID, agent=fake.client())
 
     assert result.state == "incomplete" and "destroy_vpn" not in vpn_calls
-    assert "agent_job" in result.remaining and "secret:source-cloud" in result.remaining
+    assert "agent_job" in result.remaining and "secret:source-db-admin" in result.remaining
     assert result.next_steps == []
 
     fake.close_status = None
@@ -591,7 +543,7 @@ def test_finish_keeps_the_keys_when_the_vpn_stays_and_can_be_called_again(fake, 
     result = db_workflow.finish(RUN_ID, agent=fake.client())
 
     assert result.state == "incomplete" and result.vpn == "kept" and SECRET_KEY not in result.message
-    assert {"vpn", "secret:source-cloud"} <= set(result.remaining)
+    assert {"vpn", "secret:source-db-admin"} <= set(result.remaining)
     assert db_workflow.status(RUN_ID, agent=fake.client()).cleanup_required
 
     monkeypatch.setattr(vpn, "destroy_vpn", lambda run_id: True)
@@ -610,7 +562,7 @@ def test_target_accounts_left_with_login_are_reported(fake, vpn_calls):
     # 에이전트의 비밀이 이미 지워져 다시 불러도 해결되지 않는다. 직접 할 일로 알린다.
     assert result.state == "finished" and result.remaining == []
     assert result.target_accounts["accounts"] == ["alpha_sink"]
-    assert any("IAM" in step for step in result.next_steps)
+    assert any("aws" in step for step in result.next_steps)
     assert any("alpha_sink" in step and "NOLOGIN" in step for step in result.next_steps)
 
 
@@ -635,7 +587,7 @@ def test_stop_before_the_cutover_cleans_up_everything(fake, vpn_calls):
     result = db_workflow.stop(RUN_ID, agent=fake.client())
 
     assert result.state == "finished" and "destroy_vpn" in vpn_calls and result.remaining == []
-    assert not has_secret(f"secret://{RUN_ID}/source-cloud")
+    assert not has_secret(f"secret://{RUN_ID}/source-db-admin")
 
 
 def test_stop_after_the_switch_is_refused(fake, vpn_calls):
@@ -644,7 +596,7 @@ def test_stop_after_the_switch_is_refused(fake, vpn_calls):
 
     with pytest.raises(db_workflow.NotAllowed, match="before cutover"):
         db_workflow.stop(RUN_ID, agent=fake.client())
-    assert has_secret(f"secret://{RUN_ID}/source-cloud") and "destroy_vpn" not in vpn_calls
+    assert has_secret(f"secret://{RUN_ID}/source-db-admin") and "destroy_vpn" not in vpn_calls
 
 
 def test_failed_stop_keeps_everything_and_can_be_called_again(fake, vpn_calls):
@@ -654,7 +606,7 @@ def test_failed_stop_keeps_everything_and_can_be_called_again(fake, vpn_calls):
     result = db_workflow.stop(RUN_ID, agent=fake.client())
 
     assert result.state == "incomplete" and "agent_job" in result.remaining
-    assert has_secret(f"secret://{RUN_ID}/source-cloud") and "destroy_vpn" not in vpn_calls
+    assert has_secret(f"secret://{RUN_ID}/source-db-admin") and "destroy_vpn" not in vpn_calls
 
     fake.abort_status = None
     assert db_workflow.stop(RUN_ID, agent=fake.client()).state == "finished"
@@ -663,12 +615,12 @@ def test_failed_stop_keeps_everything_and_can_be_called_again(fake, vpn_calls):
 def test_stop_during_the_vpn_stage_ends_the_run_without_a_job(fake, monkeypatch):
     building, release, calls = threading.Event(), threading.Event(), []
 
-    def ensure(mig, job_id):
+    def ensure(plan):
         building.set()
         release.wait(5)
         return {"tunnel_status": {}}
 
-    monkeypatch.setattr(vpn, "ensure_vpn", ensure)
+    monkeypatch.setattr(vpn_workflow, "ensure_vpn", ensure)
     monkeypatch.setattr(vpn, "destroy_vpn", lambda run_id: calls.append("destroy_vpn"))
     db_workflow.run(START, agent=fake.client())
     building.wait(5)
@@ -684,9 +636,8 @@ def test_stop_during_the_vpn_stage_ends_the_run_without_a_job(fake, monkeypatch)
 
 def test_target_secrets_under_another_name_are_kept_and_reported(fake, vpn_calls):
     put_secret("shared/target-admin", {"user": "postgres", "password": "shared-admin-pw"})
-    credentials = {**INPUT["target"]["credentials_ref"], "admin": "secret://shared/target-admin"}
-    target = {**INPUT["target"], "credentials_ref": credentials}
-    run_id = start_to_ready(fake, target=target)
+    put_secret(f"{RUN_ID}/other-refs", {"refs": json.dumps(["secret://shared/target-admin"])})
+    run_id = start_to_ready(fake)
     db_workflow.cutover(run_id, "pm", agent=fake.client())
     wait_ended()
 
@@ -733,13 +684,13 @@ def test_unfinished_comparison_is_told_as_a_next_step(fake, vpn_calls):
 
 def test_errors_hide_target_secrets_under_another_name(fake, monkeypatch):
     put_secret("shared/target-admin", {"user": "postgres", "password": "shared-admin-pw"})
-    credentials = {**INPUT["target"]["credentials_ref"], "admin": "secret://shared/target-admin"}
+    put_secret(f"{RUN_ID}/other-refs", {"refs": json.dumps(["secret://shared/target-admin"])})
 
-    def broken(mig, job_id):
-        raise RuntimeError("could not log in with shared-admin-pw")
+    def broken(plan):
+        raise db_workflow.VpnError("failed", "could not log in with shared-admin-pw")
 
-    monkeypatch.setattr(vpn, "ensure_vpn", broken)
-    state = failed_status(fake, target={**INPUT["target"], "credentials_ref": credentials})
+    monkeypatch.setattr(vpn_workflow, "ensure_vpn", broken)
+    state = failed_status(fake)
 
     assert state.state == "failed" and "shared-admin-pw" not in state.message
 
@@ -753,7 +704,7 @@ def test_stop_of_a_job_that_failed_after_the_switch_is_refused(fake, vpn_calls):
 
     with pytest.raises(db_workflow.NotAllowed, match="before cutover"):
         db_workflow.stop(RUN_ID, agent=fake.client())
-    assert has_secret(f"secret://{RUN_ID}/source-cloud") and "destroy_vpn" not in vpn_calls
+    assert has_secret(f"secret://{RUN_ID}/source-db-admin") and "destroy_vpn" not in vpn_calls
 
 
 def test_calls_during_a_cleanup_are_refused(fake, monkeypatch):
@@ -763,7 +714,7 @@ def test_calls_during_a_cleanup_are_refused(fake, monkeypatch):
         removing.set()
         release.wait(5)
 
-    monkeypatch.setattr(vpn, "ensure_vpn", lambda mig, job_id: {"tunnel_status": {}})
+    monkeypatch.setattr(vpn_workflow, "ensure_vpn", lambda plan: {"tunnel_status": {}})
     monkeypatch.setattr(vpn, "destroy_vpn", destroy)
     to_stabilizing(fake)
     results = []
@@ -807,13 +758,14 @@ def test_vpn_saved_without_a_db_port_can_still_be_removed():
 # ---- checks before anything is saved or built
 
 
-@pytest.mark.parametrize("field", ["db_user", "db_password"])
+@pytest.mark.parametrize("field", ["user", "password"])
 @pytest.mark.parametrize("value", [" spaced", "spaced ", "two\nlines"])
 def test_a_value_the_agent_would_refuse_is_refused_at_once(fake, vpn_calls, field, value):
     with pytest.raises(db_workflow.InvalidInput) as refused:
-        db_workflow.run({**START, field: value}, agent=fake.client())
+        db_workflow.run({**START, "source": {**START["source"], "db": {**START["source"]["db"], field: value}}},
+                        agent=fake.client())
 
-    assert refused.value.fields == [field] and value not in str(refused.value)
+    assert refused.value.fields == [f"source.db.{field}"] and value not in str(refused.value)
     assert "ensure_vpn" not in vpn_calls
 
 
@@ -830,11 +782,11 @@ def test_a_run_that_ended_is_refused_before_its_keys_are_saved(fake, vpn_calls):
     start_to_ready(fake)
     db_workflow.stop(RUN_ID, agent=fake.client())
     wait_ended()
-    assert not has_secret(f"secret://{RUN_ID}/source-cloud")
+    assert not has_secret(f"secret://{RUN_ID}/source-db-admin")
 
     with pytest.raises(db_workflow.NotAllowed, match="new run_id"):
         db_workflow.run(START, agent=fake.client())
-    assert not has_secret(f"secret://{RUN_ID}/source-cloud")
+    assert not has_secret(f"secret://{RUN_ID}/source-db-admin")
 
 
 def test_a_bad_setting_is_named_over_http_and_in_execute(http, monkeypatch):
@@ -869,9 +821,9 @@ def test_http_flow(http, fake, vpn_calls):
 
 
 def test_http_bad_input_quotes_no_value(http):
-    resp = http.post("/db-migration/runs", json={**START, "region": SECRET_KEY})
+    resp = http.post("/db-migration/runs", json={**START, "source": {**START["source"], "region": SECRET_KEY}})
 
-    assert resp.status_code == 422 and resp.json()["fields"] == ["region"]
+    assert resp.status_code == 422 and resp.json()["fields"] == ["source.region"]
     assert SECRET_KEY not in resp.text
 
 

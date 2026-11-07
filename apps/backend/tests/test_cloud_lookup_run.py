@@ -1,4 +1,4 @@
-"""새 run 입구에서 실제 조회 모듈까지 연결하고, 미구현 후속 단계를 구분한다."""
+"""새 run 입구에서 실제 조회 모듈과 실행 모델 변환까지 연결한다."""
 
 import threading
 import time
@@ -60,8 +60,8 @@ def test_run_reaches_lookup_on_all_six_routes(world, source, target):
     assert execution.target.credentials_ref.cloud == f"secret://cloud/{target}"
     assert StartCheckInput.from_route(execution).source_database is None
     status = db_workflow.status(run_id, agent=agent)
-    assert status.state == "failed" and status.message == db_workflow.NEXT_STEP_NOT_BUILT
-    assert "실행 모델로 변환했습니다" in status.message and "시작 전 검사" in status.message
+    # 조회·변환까지 끝나고 다음 단계인 시작 전 검사에서 멈춘다. 뒤 단계는 test_run_flow.py가 본다.
+    assert status.state == "failed" and "CDC_OCI_VCN_CIDR" in status.message
     assert status.metrics["target_db_network"] == "PRIVATE"
     assert not status.ready_for_cutover
     assert SECRET not in status.model_dump_json()
