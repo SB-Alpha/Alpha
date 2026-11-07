@@ -311,24 +311,26 @@ def _rollback_outcome(job: Mapping[str, Any]) -> str:
     return "rolled_back" if _worker_confirms_source() else "unknown"
 
 
-def _post_cutover(agent: Any, ctx: RunContext, job_id: str, approved_by: str, not_started: str) -> str:
-    """전환을 요청합니다. accepted(접수), refused(409 거절), lost(응답을 잃어 닿았는지 모름) 중 하나입니다."""
+def _post_cutover(
+    agent: Any, ctx: RunContext, job_id: str, approved_by: str, not_started: str
+) -> tuple[str, str | None]:
+    """전환을 요청합니다. 결과는 accepted(접수), refused(409 거절), lost(응답을 잃어 닿았는지 모름) 중 하나와 거절 사유입니다."""
     from app.features.db_migration.client import AgentError
 
     try:
         agent.cutover(job_id, approved_by=approved_by)
     except AgentError as exc:
         if exc.status_code == 409:
-            return "refused"
+            return "refused", _scrub_agent_text(exc.detail)
         if exc.status_code < 500:
             ctx.report("running", 10, {CUTOVER_OUTCOME: not_started})
             raise RuntimeError(f"에이전트가 전환 요청을 거부했습니다 (HTTP {exc.status_code})") from None
         log.warning("컷오버 요청 응답 오류, 상태로 판정합니다 (HTTP %s)", exc.status_code)
-        return "lost"
+        return "lost", None
     except Exception as exc:  # 응답만 잃었을 수 있으므로 실패로 치지 않고 상태를 봅니다.
         log.warning("컷오버 요청 응답을 받지 못했습니다, 상태로 판정합니다 (%s)", type(exc).__name__)
-        return "lost"
-    return "accepted"
+        return "lost", None
+    return "accepted", None
 
 
 def _job_progress(job: Mapping[str, Any]) -> int:
@@ -740,8 +742,10 @@ def _request_cutover(
         raise RuntimeError("CDC_AGENT_URL 환경변수가 설정되지 않아 트래픽 전환을 호출할 수 없습니다") from None
 
     agent = CdcAgentClient(settings)
+    # 에이전트는 시도마다 증적을 새로 만듭니다. 요청 전 값과 같으면 그 증적은 앞선 시도의 것입니다.
+    evidence_before = _cutover_evidence(_read_job(agent, job_id).get("evidence"))
     ctx.report("running", 10, {CUTOVER_OUTCOME: "unknown"})
-    post = _post_cutover(agent, ctx, job_id, _cutover_approver(run), not_started)
+    post, refusal = _post_cutover(agent, ctx, job_id, _cutover_approver(run), not_started)
 
     start_t = time.monotonic()
     while True:
@@ -764,7 +768,9 @@ def _request_cutover(
 
         # 2. 롤백 상태 (전환 실패 후 원본 복귀)
         # 요청 응답을 잃었으면 아직 처리 전일 수 있어 롤백으로 보지 않고 계속 봅니다. 끝까지 모르면 unknown 입니다.
-        if (state == "waiting_approval" or phase == "cutover_ready") and post != "lost":
+        # 거절됐는데 증적이 그대로면 이번 요청으로 돈 전환이 없으니 롤백이 아닙니다 (Worker 검사 거절 등).
+        attempted = post != "refused" or _cutover_evidence(job.get("evidence")) != evidence_before
+        if (state == "waiting_approval" or phase == "cutover_ready") and post != "lost" and attempted:
             outcome = _rollback_outcome(job)
             ctx.report("running", _job_progress(job), {**metrics, CUTOVER_OUTCOME: outcome})
             if outcome == "rolled_back":
@@ -774,7 +780,8 @@ def _request_cutover(
         # 3. 거절됐고 전환 단계도 아니면 이번 요청으로 시작된 전환이 없습니다.
         if post == "refused" and job and phase != "cutover":
             ctx.report("running", _job_progress(job), {**metrics, CUTOVER_OUTCOME: not_started})
-            raise RuntimeError(f"에이전트가 전환 요청을 거부했습니다 ({state}/{phase}): {msg or '상세 불명'}")
+            detail = "; ".join(text for text in (refusal, msg) if text) or "상세 불명"
+            raise RuntimeError(f"에이전트가 전환 요청을 거부했습니다 ({state}/{phase}): {detail}")
 
         # 4. 영구 실패 상태. 에이전트는 전환 단계에서 원본으로 못 돌아갈 때만 failed 를 남깁니다 (jobs.py).
         if state in ("failed", "aborted"):

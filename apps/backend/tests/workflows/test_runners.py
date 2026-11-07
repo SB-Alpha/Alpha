@@ -768,15 +768,19 @@ def _drive_cutover(engine, monkeypatch, *jobs):
     """에이전트가 jobs 를 차례로 돌려줄 때 run_cutover 를 돌립니다. (보고 목록, 반환값 또는 예외)"""
     monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
     remaining = list(jobs)
+    posted = []
 
     class FakeAgent:
         def __init__(self, settings):
             pass
 
         def cutover(self, job_id, approved_by):
+            posted.append(job_id)
             return {"accepted": True}
 
         def get_job(self, job_id):
+            if not posted:
+                return {"state": "waiting_approval", "phase": "cutover_ready"}
             return remaining.pop(0) if len(remaining) > 1 else remaining[0]
 
     monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", FakeAgent)
@@ -1561,6 +1565,68 @@ def test_cdc_end_report_hides_connection_details():
         assert "alpha_admin" not in text
         assert "password authentication failed" in text
 
+
+
+# -- 거절과 롤백 구분 -----------------------------------------------------------------
+
+
+def _refusing_agent(monkeypatch, *jobs, detail="Worker mode is TARGET, expected SOURCE"):
+    """전환을 409 로 거절합니다. get_job 은 jobs 를 차례로, 마지막 것은 계속 돌려줍니다."""
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+    remaining = list(jobs)
+
+    class RefusingAgent:
+        def __init__(self, settings):
+            pass
+
+        def cutover(self, job_id, approved_by):
+            raise AgentError(409, detail)
+
+        def get_job(self, job_id):
+            return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", RefusingAgent)
+
+
+READY_JOB = {"state": "waiting_approval", "phase": "cutover_ready", "progress": 70, "message": "승인 대기"}
+ROLLED_BACK_EVIDENCE = {"cutover": {"steps": [{"step": "hold", "at": "t1"}, {"step": "failed", "error": "marker"}]}}
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [None, ROLLED_BACK_EVIDENCE],
+    ids=["first-attempt", "retry-after-a-rollback"],
+)
+def test_worker_refusal_is_not_reported_as_a_rollback(engine, monkeypatch, evidence):
+    _refusing_agent(monkeypatch, {**READY_JOB, "evidence": evidence})
+    ctx = RecordingCtx()
+
+    with pytest.raises(RuntimeError) as caught:
+        run_cutover(engine.create_run(REQUEST), ctx=ctx, poll_interval_s=0.001)  # type: ignore[arg-type]
+
+    assert "거부" in str(caught.value)
+    assert "Worker mode is TARGET" in str(caught.value)
+    assert "롤백" not in str(caught.value)
+    assert ctx.reports[-1].metrics["cutover_outcome"] == "not_started"
+
+
+def test_refusal_reason_is_scrubbed(engine, monkeypatch):
+    _refusing_agent(monkeypatch, READY_JOB, detail=f"Worker is not usable: {AGENT_ERROR}")
+
+    with pytest.raises(RuntimeError) as caught:
+        run_cutover(engine.create_run(REQUEST), ctx=RecordingCtx(), poll_interval_s=0.001)  # type: ignore[arg-type]
+
+    _assert_no_connection_details(str(caught.value))
+    assert "Worker is not usable" in str(caught.value)
+
+
+def test_refused_because_another_attempt_rolled_back_is_still_a_rollback(engine, monkeypatch):
+    # 다른 호출이 먼저 시작해 409 를 받았고, 그 시도가 롤백한 경우입니다. 증적이 요청 전과 다릅니다.
+    _refusing_agent(monkeypatch, READY_JOB, {**READY_JOB, "evidence": ROLLED_BACK_EVIDENCE}, detail="job is running/cutover")
+    monkeypatch.setattr("app.features.workflows.runners._worker_confirms_source", lambda: True)
+
+    with pytest.raises(RuntimeError, match="롤백"):
+        run_cutover(engine.create_run(REQUEST), ctx=RecordingCtx(), poll_interval_s=0.001)  # type: ignore[arg-type]
 
 
 # -- 전환 후 CDC 추적 종료 --------------------------------------------------------------
