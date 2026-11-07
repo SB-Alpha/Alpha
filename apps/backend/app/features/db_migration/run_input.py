@@ -58,11 +58,20 @@ class _Strict(BaseModel):
 class DbAccount(_Strict):
     user: SecretStr
     password: SecretStr
+    # 서버에 DB가 하나면 생략한다. 여러 개면 조회 결과를 보고 이 값으로 고른다.
+    database: str | None = None
 
     @field_validator("user", "password")
     @classmethod
     def _single_line_secret(cls, value: SecretStr) -> SecretStr:
         if not single_line(value.get_secret_value()):
+            raise ValueError("must be a single line of text without surrounding spaces")
+        return value
+
+    @field_validator("database")
+    @classmethod
+    def _single_line_database(cls, value: str | None) -> str | None:
+        if value is not None and not single_line(value):
             raise ValueError("must be a single line of text without surrounding spaces")
         return value
 
@@ -128,6 +137,8 @@ class InjectedRun:
     source: InjectedEndpoint
     target: InjectedEndpoint
     target_app_user: str
+    source_database: str | None = None
+    target_database: str | None = None
 
 
 def input_problems(exc: ValidationError) -> list[str]:
@@ -162,6 +173,8 @@ def inject(run_id: str, inp: RunInput) -> InjectedRun:
         source=_inject_endpoint(run_id, inp.source, source_credentials, SOURCE_DB_TAG),
         target=_inject_endpoint(run_id, inp.target, target_credentials, TARGET_DB_TAG),
         target_app_user=inp.target.db.app_user,
+        source_database=inp.source.db.database,
+        target_database=inp.target.db.database,
     )
 
 
