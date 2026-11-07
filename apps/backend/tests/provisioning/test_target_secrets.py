@@ -139,6 +139,41 @@ def test_a_missing_vpn_key_is_a_warning_and_the_admin_secret_is_still_stored():
     assert any("target-cloud" in problem for problem in result.problems)
 
 
+def test_a_target_cloud_secret_entered_by_the_user_is_kept_and_not_warned_about():
+    from app.core.secrets import put_secret
+
+    refs = default_credentials_ref("mig-001")
+    put_secret(refs["cloud"], {"credentials_json": "USER-ENTERED-KEY"})
+
+    result = run(make_input(run_id="mig-001"), FakeContext(), terraform=FakeTerraform(outputs=outputs_without("vpn_credentials_json")))
+
+    assert resolve(refs["cloud"]) == {"credentials_json": "USER-ENTERED-KEY"}  # Terraform 에 키가 없으면 건드리지 않는다
+    assert not any("target-cloud" in problem for problem in result.problems)
+    assert resolve(refs["admin"])["password"] == ADMIN_PASSWORD
+
+
+def test_terraform_values_overwrite_what_the_user_entered_for_the_same_run():
+    from app.core.secrets import put_secret
+
+    refs = default_credentials_ref("mig-001")
+    put_secret(refs["admin"], {"user": "postgres", "password": "USER-ENTERED-PASSWORD"})
+    put_secret(refs["cloud"], {"credentials_json": "USER-ENTERED-KEY"})
+
+    run(make_input(run_id="mig-001"), FakeContext(), terraform=FakeTerraform())
+
+    assert resolve(refs["admin"])["password"] == ADMIN_PASSWORD  # 새로 만든 DB 의 비밀번호만 맞다
+    assert resolve(refs["cloud"]) == {"credentials_json": VPN_KEY}
+
+
+@pytest.mark.parametrize("run_id", ["a/b", "mig/../x", "A-1", "mig_1", "1abc", "a", "a" * 32, ""])
+def test_a_malformed_run_id_is_rejected_before_anything_is_stored(run_id):
+    put = RecordingPut()
+    with pytest.raises(ProvisioningError, match="run_id"):
+        store_target_secrets(sample_outputs(), run_id=run_id, put=put)
+
+    assert put.saved == []
+
+
 def test_a_store_failure_names_the_reference_and_error_type_but_not_the_value():
     put = RecordingPut(fail=RuntimeError(f"cannot write {ADMIN_PASSWORD}"))
     with pytest.raises(ProvisioningError) as error:

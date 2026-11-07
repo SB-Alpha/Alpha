@@ -188,7 +188,7 @@ def test_run_with_another_provider_writes_its_variables_and_uses_its_default_reg
 def test_an_explicit_region_beats_the_providers_default(other_provider):
     result = run(
         fake_provider_input(
-            ProvisioningInput, run_id="r", provider="other", project_id="sub-1", target_infra={"region": "elsewhere-2"}
+            ProvisioningInput, run_id="mig-001", provider="other", project_id="sub-1", target_infra={"region": "elsewhere-2"}
         ),
         FakeContext(),
         terraform=FakeTerraform(),
