@@ -13,7 +13,8 @@ export const METRIC_KEYS = {
   replicationLagBytes: "replication_lag_bytes",
   copyPercent: "copy_percent",
   tables: "tables", // { 테이블명: { source_rows, target_rows, percent, match } }
-  mismatchTables: "mismatch", // 불일치 테이블 수
+  mismatchTables: "mismatch", // 불일치 테이블 수. 전환 전에는 행 수만, 전환 시점 비교 뒤에는 내용까지 비교한 값입니다
+  verification: "verification", // 전환 시점 데이터 비교: "running" | "match" | "mismatch" | "unverifiable" | "unknown"
   failedRequests: "failed_requests",
   probeRequests: "probe_requests", // 프로버가 보낸 요청 수
   probeMaxMs: "probe_max_ms", // 가장 오래 기다린 요청
@@ -131,6 +132,9 @@ export interface CutoverStep {
 
 export type CutoverSecondsSource = "worker" | "agent";
 
+const VERIFICATIONS = ["running", "match", "mismatch", "unverifiable", "unknown"] as const;
+export type Verification = (typeof VERIFICATIONS)[number];
+
 export interface CutoverSequence {
   status: "VERIFIED" | "INCOMPLETE";
   missing: string[];
@@ -161,6 +165,12 @@ export function cutoverSteps(run: RunStatus): CutoverStep[] | null {
 export function cutoverSecondsSource(run: RunStatus): CutoverSecondsSource | null {
   const source = stringMetric(run, METRIC_KEYS.cutoverSecondsSource);
   return source === "worker" || source === "agent" ? source : null;
+}
+
+/** 전환 시점 데이터 비교 상태. 전환 전이거나 보고가 없으면 null 입니다. */
+export function verificationState(run: RunStatus): Verification | null {
+  const value = stringMetric(run, METRIC_KEYS.verification);
+  return VERIFICATIONS.find((v) => v === value) ?? null;
 }
 
 /** 전환 순서 검증 결과. 보고가 없거나 값이 다르면 null 입니다 (INCOMPLETE 로 추정하지 않음). */

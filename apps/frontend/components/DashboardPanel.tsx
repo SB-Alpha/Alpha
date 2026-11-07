@@ -15,8 +15,10 @@ import {
   servingSide,
   stageCounts,
   tableRowTotals,
+  verificationState,
+  type Verification,
 } from "@/lib/dashboard";
-import { GATE_LABEL, STAGE_LABEL } from "@/lib/labels";
+import { GATE_LABEL, STAGE_LABEL, VERIFICATION_LABEL } from "@/lib/labels";
 import type { RunStatus } from "@/lib/workflows";
 
 type Props = { run: RunStatus };
@@ -41,6 +43,14 @@ function useNow(isRunning: boolean): number {
   }, [isRunning]);
   return now;
 }
+
+const VERIFICATION_TONE: Record<Verification, Tone> = {
+  running: "neutral",
+  match: "good",
+  mismatch: "bad",
+  unverifiable: "bad",
+  unknown: "bad",
+};
 
 function countTone(value: number | null): Tone {
   if (value === null) return "neutral";
@@ -94,6 +104,7 @@ export function DashboardPanel({ run }: Props) {
   const copyPercent = numberMetric(run, METRIC_KEYS.copyPercent);
   const rows = tableRowTotals(run);
   const mismatch = numberMetric(run, METRIC_KEYS.mismatchTables);
+  const verification = verificationState(run);
   const failed = numberMetric(run, METRIC_KEYS.failedRequests);
   const cutover = numberMetric(run, METRIC_KEYS.cutoverSeconds);
   const probeRequests = numberMetric(run, METRIC_KEYS.probeRequests);
@@ -168,11 +179,21 @@ export function DashboardPanel({ run }: Props) {
           tone={rowsTone}
           hint={copyPercent === null ? undefined : `복사 ${copyPercent}%`}
         />
-        <MetricTile
-          label="불일치 테이블"
-          value={mismatch === null ? null : `${mismatch.toLocaleString("ko-KR")}개`}
-          tone={countTone(mismatch)}
-        />
+        {verification === null ? (
+          <MetricTile
+            label="행 수 불일치 테이블"
+            value={mismatch === null ? null : `${mismatch.toLocaleString("ko-KR")}개`}
+            tone={countTone(mismatch)}
+          />
+        ) : (
+          // 전환 전 행 수 비교 값이 앞 단계에 남아 있으므로 비교가 끝나기 전에는 개수를 보여 주지 않습니다.
+          <MetricTile
+            label="전환 시점 데이터 비교"
+            value={VERIFICATION_LABEL[verification]}
+            tone={VERIFICATION_TONE[verification]}
+            hint={verification === "mismatch" && mismatch !== null ? `${mismatch.toLocaleString("ko-KR")}개 테이블` : undefined}
+          />
+        )}
         <MetricTile
           label="읽기 실패 (프로버)"
           value={failed === null ? null : `${failed.toLocaleString("ko-KR")}건`}

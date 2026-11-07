@@ -61,7 +61,7 @@ def run(inp: <Module>Input, ctx: RunContext) -> <Module>Output: ...
 provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어댑터를 부릅니다. 지금은 `gcp` 만 등록돼 있고 `target_infra` 가 없는 요청도 `gcp` 입니다. 새 클라우드의 계약과 아직 GCP 에 묶인 부분은 `docs/TARGET_ADAPTER_SPEC.md` 에 있습니다.
 
 ## 승인 ② 판정
-`readiness.py` 가 복제 상태, 초기 복사, 복제 지연, 불일치 테이블, 목적지 앱 상태를 봅니다. 화면과 API 가 같은 판정을 씁니다.
+`readiness.py` 가 복제 상태, 초기 복사, 복제 지연, 행 수 불일치 테이블, 목적지 앱 상태를 봅니다. 화면과 API 가 같은 판정을 씁니다.
 
 승인 ② 화면에는 두 가지 결과가 함께 나옵니다.
 
@@ -72,7 +72,7 @@ provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어
 - 실패 항목이 있으면 `409` 로 거부합니다. `acknowledge_unknown` 으로도 넘어가지 못합니다.
 - 미제공 항목만 있으면 `acknowledge_unknown: true` 일 때만 승인합니다.
 - 복제 지연 기준값(1MiB)은 임시값입니다. 팀 합의 후 바꿉니다.
-- 초기 복사·불일치 테이블: 쓰기 중에는 두 DB 를 다른 순간에 읽어 값이 오가므로, 에이전트가 `cutover_ready` 로 올린 뒤의 순간값으로는 막지 않습니다. 쓰기를 멈춘 전환 기준점에서 다시 검사해 다르면 전환하지 않습니다.
+- 초기 복사·행 수 불일치 테이블: 쓰기 중에는 두 DB 를 다른 순간에 읽어 값이 오가므로, 에이전트가 `cutover_ready` 로 올린 뒤의 순간값으로는 막지 않습니다. 이 값은 행 수만 비교합니다. 내용 비교는 전환 시점 스냅샷으로 트래픽을 푼 뒤에 합니다 (`verification`).
 - `cdc_error`: CDC 추적이 streaming 이후 끝나면 `db_migration` 단계 지표에 남아 승인을 막습니다. 전환이 끝나 돌아온 경우는 정상 종료라 남기지 않습니다. 끝난 단계는 다시 열지 않고 지표만 갱신합니다.
 
 ## 중단과 복제 자원 정리
@@ -111,7 +111,7 @@ provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어
 | --- | --- | --- |
 | `job_ready` | 에이전트 job | `waiting_approval`/`cutover_ready` 면 `pass`, 아니면 `fail` |
 | `db_connectivity` | `measure_error`·`measured_at` | 측정 오류면 `fail`(원문은 싣지 않음), 측정 시각이 시간대가 있는 ISO 문자열이면 `pass`, 아니면 `unknown`. 합의된 기준이 없어 시각의 나이는 보지 않습니다 |
-| `data_match` | `mismatch` | 0 이면 `pass`, 0 보다 크면 `fail`. 측정 오류면 `unknown` |
+| `data_match` | `mismatch`(행 수 비교) | 0 이면 `pass`, 0 보다 크면 `fail`. 측정 오류면 `unknown` |
 | `replication_lag` | `replication_lag_bytes` | 기준이 없으면 `info`. `ALPHA_CUTOVER_MAX_LAG_BYTES` 가 있으면 `pass`/`fail`, 값이 잘못되면 `unknown` |
 | `target_ready` | `app_deploy` 의 `app_url` + `/health/ready` | 200 이면 `pass`, 아니면 `fail`. 수동 입력 주소나 https 가 아닌 주소는 호출하지 않고 `unknown` |
 | `worker_target` | `WorkerClient.get_target()` | `app_url` 과 같으면 `pass`, 저장된 주소가 다르면 `fail`. 저장된 주소가 없으면 Worker 가 설정된 기본 대상을 쓰는 것이라 `unknown`. Worker 미설정이면 `unknown` |
