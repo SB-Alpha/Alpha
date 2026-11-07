@@ -412,7 +412,8 @@ def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
     # assessment 가 discovery·planning 을 합친 모듈입니다 (PR #27). 출력은 {source, plan, gaps}.
     req = run.request
     manual = req.source_kind == "manual"
-    if not manual and not req.aws_credentials_ref:
+    cloud = req.source_kind in ("gcp", "azure")
+    if req.source_kind == "aws" and not req.aws_credentials_ref:
         raise MissingStageOutput("원본 AWS 키 이름표가 없습니다")
 
     try:
@@ -427,6 +428,15 @@ def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
             run_id=run.run_id,
             source_kind="manual",
             manual=req.manual,
+            github_repo_url=req.github_repo_url,
+            target_region=req.target_region,
+        )
+    elif cloud:
+        inp = AssessmentInput(
+            run_id=run.run_id,
+            source_kind=req.source_kind,
+            cloud_source=req.cloud_source,
+            db_admin_ref=req.db_admin_ref or req.db_credentials_ref,
             github_repo_url=req.github_repo_url,
             target_region=req.target_region,
         )
