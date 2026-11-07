@@ -26,7 +26,7 @@ type Props = {
     approver: string,
     preflight: DisplayedPreflight,
     acknowledgeUnknown: boolean,
-  ) => Promise<unknown> | void;
+  ) => Promise<boolean | void> | boolean | void;
 };
 
 /** 어느 요청의 응답인지 key 로 남깁니다. key 가 다르면 지난 점검이므로 보여주지 않습니다. */
@@ -97,8 +97,12 @@ export function CutoverApprovalPanel({ run, runId, readiness, isBusy, isTrafficU
 
   const handleApproveClick = async () => {
     try {
-      await onApprove(comment, approver, displayed, isUnknownAcknowledged);
-      setSequenceTrigger((n) => n + 1);
+      const ok = await onApprove(comment, approver, displayed, isUnknownAcknowledged);
+      // 승인 API가 성공(true)을 반환한 경우에만 전환 시뮬레이션 애니메이션을 트리거합니다.
+      // API 실패나 거부로 false가 반환되거나 오류가 발생하면 트리거하지 않습니다.
+      if (ok === true) {
+        setSequenceTrigger((n) => n + 1);
+      }
     } catch {
       // 승인이 거절되거나 실패하면 전환 시뮬레이션 애니메이션을 시작하지 않습니다.
     }

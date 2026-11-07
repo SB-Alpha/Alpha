@@ -79,26 +79,21 @@ export function PipelineDrivingScene({
         case "w":
         case "arrowup":
           keyStateRef.current.forward = true;
-          e.preventDefault();
           break;
         case "s":
         case "arrowdown":
           keyStateRef.current.backward = true;
-          e.preventDefault();
           break;
         case "a":
         case "arrowleft":
           keyStateRef.current.left = true;
-          e.preventDefault();
           break;
         case "d":
         case "arrowright":
           keyStateRef.current.right = true;
-          e.preventDefault();
           break;
         case " ":
           keyStateRef.current.brake = true;
-          e.preventDefault();
           break;
         case "c": {
           const nextMode: CameraMode =

@@ -51,13 +51,15 @@ export function RunView() {
     };
   }, [refresh]);
 
-  const act = async (command: () => Promise<RunStatus>) => {
+  const act = async (command: () => Promise<RunStatus>): Promise<boolean> => {
     setIsBusy(true);
     try {
       setRun(await command());
       setError(null);
+      return true;
     } catch (e) {
       setError(errorText(e));
+      return false;
     } finally {
       setIsBusy(false);
     }

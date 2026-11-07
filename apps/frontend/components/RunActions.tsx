@@ -15,7 +15,7 @@ type Props = {
     approver: string,
     preflight: DisplayedPreflight,
     acknowledgeUnknown: boolean,
-  ) => Promise<unknown> | void;
+  ) => Promise<boolean | void> | boolean | void;
   onManual: (output: Record<string, unknown>, note: string) => void;
   onResume: () => void;
   onRetryCleanup: () => void;
