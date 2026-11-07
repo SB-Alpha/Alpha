@@ -27,7 +27,7 @@ def build(inp: PlanningInput) -> MigrationPlan:
         risks=risks,
         summary=rules.rule_summary(infra, checks, approvable),
         summary_source="rule",
-        steps=rules.build_steps(),
+        steps=rules.build_steps(inp.inventory.app.image_uri),
         approvable=approvable,
         blocking=blocking,
         generated_at=datetime.now(timezone.utc),

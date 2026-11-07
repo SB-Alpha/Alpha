@@ -1,7 +1,12 @@
 # provisioning 단계의 입력과 출력 모양.
 from __future__ import annotations
-from typing import Any
+from typing import Any, Literal
 from pydantic import BaseModel, Field
+
+# 입력으로 받을 수 있는 목적지 이름. 등록된 이름(providers.PROVIDERS)과 같아야 하고, 같은지는 tests/provisioning/test_providers.py 가 확인한다.
+# 이 파일이 구현(providers, terraform)을 import 하지 않게 이름만 여기에 둔다.
+ProviderName = Literal["gcp"]
+DEFAULT_PROVIDER: ProviderName = "gcp"
 
 
 class ProvisioningInput(BaseModel):
@@ -9,6 +14,9 @@ class ProvisioningInput(BaseModel):
 
     run_id: str
     target_infra: dict[str, Any]
+    # 목적지 클라우드. 등록된 이름만 받는다(오타는 입력 검증에서 바로 걸린다). 비우면 gcp.
+    provider: ProviderName = DEFAULT_PROVIDER
+    # 목적지 소속 단위(GCP 프로젝트 ID, Azure 구독 ID 등). 비우면 provider 가 정한 환경변수를 읽는다.
     project_id: str | None = None
     # 계획에 기존 리소스 삭제가 들어 있어도 진행할지. 기본은 막음.
     allow_destroy: bool = False
@@ -33,9 +41,12 @@ class AppDeployInput(BaseModel):
     run_id: str
     # provisioning 때와 같은 값을 다시 넘김.
     target_infra: dict[str, Any]
+    provider: ProviderName = DEFAULT_PROVIDER  # provisioning 때와 같은 값을 다시 넘김.
     project_id: str | None = None
     allow_destroy: bool = False
     dry_run: bool = False
+
+    source_credentials_ref: str | None = None
 
     health_timeout_s: float = 120.0
     # True 면 앱이 준비된 뒤 Worker 의 GCP 쪽 원본 주소를 새 Cloud Run 주소로 바꾼다. 환경변수 WORKER_URL 이 필요하다.

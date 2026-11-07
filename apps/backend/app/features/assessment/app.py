@@ -30,7 +30,8 @@ ECR_IMAGE = re.compile(
     r"^(?P<account>\d{12})\.dkr\.ecr\.(?P<region>[a-z0-9-]+)\.amazonaws\.com/"
     r"(?P<repo>[^:@]+)(?::(?P<tag>[^@]+))?$"
 )
-URL_PATH = re.compile(r"https?://[^/\s'\"]+(/[^\s'\"|;&]*)")
+# 경로만 가져옵니다. ?쿼리·#조각은 토큰이 들어 있을 수 있어 결과·AI 프롬프트로 보내지 않음
+URL_PATH = re.compile(r"https?://[^/\s'\"]+(/[^\s'\"|;&?#]*)")
 
 
 def looks_secret(name: str) -> bool:
@@ -89,9 +90,7 @@ def collect(inp: AssessmentInput, session: AwsSession) -> AppAssessment:
     container = _pick_container(task, service)
     image = container.get("image")
     ports = container.get("portMappings") or []
-    container_port = ports[0].get("containerPort") if ports else None
-    if container_port is None:
-        gaps.append("컨테이너 포트 미확인 (portMappings 없음)")
+    container_port = _service_port(service, container, ports, gaps)
 
     cpu_units = _to_int(task.get("cpu")) or _to_int(container.get("cpu")) or None
     memory_mib = (_to_int(task.get("memory")) or _to_int(container.get("memory"))
@@ -124,8 +123,15 @@ def collect(inp: AssessmentInput, session: AwsSession) -> AppAssessment:
     if health_path is None:
         gaps.append("상태 확인 경로 미확인 (컨테이너 healthCheck·대상 그룹 모두 없음)")
 
-    # 6. 이미지 digest
-    digest = _image_digest(image, session, call, gaps)
+    # 6. 이미지 digest: 지금 실행 중인 태스크의 digest 가 우선. 없으면 태그로 ECR 조회
+    running = _running_digests(ecs, cluster, service, container.get("name"), call)
+    if len(running) == 1:
+        digest = running[0]
+    elif len(running) > 1:
+        digest = None
+        gaps.append(f"실행 중 태스크 이미지가 {len(running)}개 버전이라 하나로 고정하지 않음 (배포가 끝난 뒤 다시 조사)")
+    else:
+        digest = _image_digest(image, session, call, gaps)
 
     facts = AppInfo(
         service_name=service_name,
@@ -172,6 +178,38 @@ def _pick_container(task: dict, service: dict) -> dict:
         if c.get("portMappings") and c.get("essential", True):
             return c
     return containers[0]
+
+
+def _service_port(service: dict, container: dict, ports: list, gaps: list[str]) -> int | None:
+    """로드밸런서가 이 컨테이너에 연결한 포트 → 없으면 첫 portMapping."""
+    for lb in service.get("loadBalancers") or []:
+        if lb.get("containerName") == container.get("name") and lb.get("containerPort"):
+            return _to_int(lb["containerPort"])
+    if not ports:
+        gaps.append("컨테이너 포트 미확인 (portMappings 없음)")
+        return None
+    if len(ports) > 1:
+        gaps.append(f"포트가 {len(ports)}개인데 로드밸런서 연결이 없어 첫 번째 포트를 씀 (확인 필요)")
+    return _to_int(ports[0].get("containerPort"))
+
+
+def _running_digests(ecs, cluster: str | None, service: dict, container_name: str | None, call) -> list[str]:
+    """서비스의 RUNNING 태스크에서 이 컨테이너가 실제로 돌리는 이미지 digest 목록 (중복 제거, 정렬)."""
+    if not cluster or not container_name:
+        return []
+    listed = call("ECS 실행 중 태스크 조회", ecs.list_tasks, cluster=cluster,
+                  serviceName=service.get("serviceName"), desiredStatus="RUNNING")
+    arns = (listed or {}).get("taskArns") or []
+    if not arns:
+        return []
+    described = call("ECS 태스크 상세 조회", ecs.describe_tasks, cluster=cluster, tasks=arns[:100])
+    found = {
+        c["imageDigest"]
+        for t in (described or {}).get("tasks") or []
+        for c in t.get("containers") or []
+        if c.get("name") == container_name and c.get("imageDigest")
+    }
+    return sorted(found)
 
 
 def _to_int(value: Any) -> int | None:

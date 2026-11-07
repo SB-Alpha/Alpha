@@ -23,12 +23,10 @@ def create_app() -> FastAPI:
     db_migration.add_exception_handlers(app)
 
     from app.features.assessment.router import router as assessment_router
-    from app.features.finops.router import router as finops_router
     from app.features.workflows.router import router as workflows_router
 
     app.include_router(assessment_router)
     app.include_router(workflows_router)
-    app.include_router(finops_router)
     return app
 
 

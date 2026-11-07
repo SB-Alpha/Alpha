@@ -261,6 +261,8 @@ cd apps/backend
 uv run python scripts/register_secrets.py
 ```
 
+실행하면 원본·대상 DB 비밀번호와 AWS 키를 묻습니다. 입력은 화면에 보이지 않습니다. 저장소에는 고정 비밀번호가 없으니 DB 를 만들 때 정한 값을 그대로 넣으세요. `SOURCE_DB_PASSWORD`, `TARGET_DB_PASSWORD`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` 환경변수가 있으면 묻지 않습니다.
+
 > **출력 결과:**
 > ```text
 > [*] Registering secrets with prefix: secret://default/...

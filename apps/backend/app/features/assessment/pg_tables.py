@@ -142,6 +142,8 @@ class CatalogResult:
 
     database_name: str | None = None
     wal_level: str | None = None
+    max_replication_slots: int | None = None
+    replication_slots_in_use: int | None = None
     tables: list[TableInfo] | None = None
     gaps: list[str] = field(default_factory=list)
 
@@ -161,6 +163,9 @@ def catalog_to_dbinfo(catalog: dict, requested_database: str | None) -> CatalogR
         res.gaps.append("요청한 DB와 조회한 DB가 다름")
     if "wal_level" not in failed:
         res.wal_level = catalog.get("wal_level")
+    if "max_replication_slots" not in failed and "slots_in_use" not in failed:
+        res.max_replication_slots = catalog.get("max_replication_slots")
+        res.replication_slots_in_use = catalog.get("slots_in_use")
     if "tables" not in failed:
         res.tables = [TableInfo(schema_name=t["schema"], name=t["name"], row_count=t["row_estimate"],
                                 has_primary_key=t["has_primary_key"]) for t in catalog["tables"]]

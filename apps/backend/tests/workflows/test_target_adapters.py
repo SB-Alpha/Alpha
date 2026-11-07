@@ -174,6 +174,59 @@ def test_gcp_deploy_updates_the_worker_only_when_it_is_configured(tmp_path, monk
     assert [inp.update_worker_target for inp in seen] == [False, True]
 
 
+def _run_with_source(tmp_path, source) -> RunStatus:
+    run = _run_at_provisioning(tmp_path, MigrationRequest(**SIMPLE_BODY))
+    outputs = {"planning": {"plan": {"target_infra": TARGET_INFRA}, "source": source}}
+    return run.model_copy(update={"outputs": outputs})
+
+
+def test_the_source_key_reference_from_the_assessment_reaches_the_app_deploy_input(tmp_path, monkeypatch):
+    seen: list[Any] = []
+    monkeypatch.setattr(provisioning_service, "deploy_app", lambda inp, ctx: seen.append(inp) or {"healthy": True})
+    run = _run_with_source(tmp_path, {"credentials_ref": {"cloud": "secret://aws/source", "db_admin": "secret://db/a"}})
+
+    runners.run_app_deploy(run, RecordingContext())
+
+    assert seen[0].source_credentials_ref == "secret://aws/source"
+
+
+def test_the_source_key_reference_is_read_from_pydantic_models_too(tmp_path):
+    from app.features.assessment.schemas import SourceCredentials, SourceInfo
+
+    source = SourceInfo(credentials_ref=SourceCredentials(cloud="secret://aws/source"))
+
+    assert runners._extract_source_credentials_ref(_run_with_source(tmp_path, source)) == "secret://aws/source"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [None, {}, {"credentials_ref": None}, {"credentials_ref": {}}, {"credentials_ref": {"cloud": None}}, {"credentials_ref": {"cloud": ""}}],
+)
+def test_a_missing_source_key_reference_is_none_not_an_error(tmp_path, monkeypatch, source):
+    seen: list[Any] = []
+    monkeypatch.setattr(provisioning_service, "deploy_app", lambda inp, ctx: seen.append(inp) or {"healthy": True})
+    run = _run_with_source(tmp_path, source)
+
+    runners.run_app_deploy(run, RecordingContext())  # 조사 출력에 키 이름표가 없어도 앱 배포는 이전처럼 진행된다
+
+    assert seen[0].source_credentials_ref is None
+
+
+def test_an_adapter_receives_the_source_key_reference_as_an_argument(tmp_path, monkeypatch):
+    class FakeAzure:
+        provider = "azure"
+
+        def deploy_app(self, run_id, target_infra, config, ctx, source_credentials_ref=None):
+            return {"source_credentials_ref": source_credentials_ref}
+
+    monkeypatch.setattr(target_adapters, "TARGET_ADAPTERS", {"azure": FakeAzure()})
+    request = MigrationRequest(**SIMPLE_BODY, target_infra={"provider": "azure"})
+    run = _run_with_source(tmp_path, {"credentials_ref": {"cloud": "secret://aws/source"}})
+    run = run.model_copy(update={"request": request})
+
+    assert runners.run_app_deploy(run, RecordingContext()) == {"source_credentials_ref": "secret://aws/source"}
+
+
 def test_registering_an_adapter_routes_provisioning_without_runner_changes(tmp_path, monkeypatch):
     class FakeAzure:
         provider = "azure"
@@ -181,8 +234,8 @@ def test_registering_an_adapter_routes_provisioning_without_runner_changes(tmp_p
         def provision(self, run_id, target_infra, config, ctx):
             return {"run_id": run_id, "extra": config.extra_params}
 
-        def deploy_app(self, run_id, target_infra, config, ctx):
-            return {"healthy": True}
+        def deploy_app(self, run_id, target_infra, config, ctx, source_credentials_ref=None):
+            return {"healthy": True, "source_credentials_ref": source_credentials_ref}
 
     monkeypatch.setattr(target_adapters, "TARGET_ADAPTERS", {"azure": FakeAzure()})
     target = {"provider": "azure", "extra_params": {"sku": "Standard_B1ms"}}

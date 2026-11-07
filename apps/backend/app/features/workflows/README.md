@@ -79,6 +79,7 @@ provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어
 - run 을 중단하면 `service.stop` 으로 커넥터, 복제 슬롯, VPN 을 정리합니다. CDC 를 수동 입력으로 넘겼거나 아직 시작하지 않았으면 할 일이 없습니다.
 - 진행 상태는 `cleanup_state`(`running`·`done`·`failed`)와 `cleanup_message` 에 남습니다. 복제 슬롯이 남으면 원본에 WAL 이 쌓이므로 `failed` 는 반드시 다시 시도하거나 직접 처리합니다.
 - 전환을 시작한 작업은 자동으로 정리하지 않습니다(`failed`). 목적지에 새 쓰기가 있을 수 있어 트래픽과 데이터를 사람이 확인해야 합니다.
+- CDC 추적 스레드는 "다음 `ctx.report()` 때 멈춤" 의 예외입니다. 중단을 봐도 스스로 정리하지 않고 추적을 이어 갑니다. 정리는 `clean_up_cdc` 한 곳에서만 합니다. 정리가 작업을 멈추면 추적이 `aborted` 를 보고 VPN 을 지우고, 정리가 거부되면 복제와 VPN 이 그대로 남습니다.
 
 ## 화면 지표와 시뮬레이션
 - `secret_encryption`: 요청의 자격 증명 참조가 모두 `secret://` 이고 암호화 저장소에 실제로 있을 때만 `ENCRYPTED`. 확인할 수 없으면 "미제공" 입니다.

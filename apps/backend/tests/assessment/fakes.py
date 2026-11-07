@@ -69,6 +69,7 @@ def session(container_def: dict | None = None, *, service: dict | None = None, *
         "list_clusters": {"clusterArns": ["arn:cluster/alpha"]},
         "list_services": {"serviceArns": ["arn:service/alpha/target-app"]},
         "describe_services": {"services": [svc]},
+        "list_tasks": {"taskArns": []},
         "describe_task_definition": {"taskDefinition": {
             "cpu": "512", "memory": "1024", "containerDefinitions": [container_def or container()],
         }},

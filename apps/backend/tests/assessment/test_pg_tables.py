@@ -159,3 +159,13 @@ def test_first_query_failure_aborts_remaining():
     with pytest.raises(RuntimeError):
         pg_tables.collect_pg_catalog(Cur())
     assert len(calls) == 1
+
+
+def test_dbinfo_carries_replication_slots():
+    r = m.catalog_to_dbinfo(_cat(), "appdb")
+    assert r.max_replication_slots == 10 and r.replication_slots_in_use is not None
+
+
+def test_dbinfo_drops_slots_when_either_query_failed():
+    r = m.catalog_to_dbinfo(_cat(fail=["pg_replication_slots"]), "appdb")
+    assert r.max_replication_slots is None and r.replication_slots_in_use is None

@@ -22,6 +22,8 @@ export function cutoverOutcome(run: RunStatus): unknown {
   return run.stages.find((s) => s.stage === "cutover")?.metrics[METRIC_KEYS.cutoverOutcome];
 }
 
+const isOnSourceOutcome = (outcome: unknown) => outcome === "rolled_back" || outcome === "not_started";
+
 /**
  * 트래픽이 원본에 있다고 확인하지 못한 전환이면 true 입니다. 중단된 run 도 포함합니다.
  * 전환이 실제로 진행 중일 때는 결과가 아직 없는 것이므로, 완료된 run 과 함께 제외합니다.
@@ -30,9 +32,20 @@ export function needsManualCheck(run: RunStatus): boolean {
   const stage = run.stages.find((s) => s.stage === "cutover");
   if (run.state === "succeeded" || (run.state === "running" && stage?.state === "running")) return false;
   const outcome = cutoverOutcome(run);
-  const isOnSource = outcome === "rolled_back" || outcome === "not_started";
+  const isOnSource = isOnSourceOutcome(outcome);
   if (stage?.state === "failed") return !isOnSource;
   return outcome !== undefined && !isOnSource;
+}
+
+/**
+ * 복제를 지워도 트래픽을 잃지 않는다고 볼 수 있으면 true 입니다.
+ * 서버의 clean_up_cdc 처럼 결과가 없으면 전환 전으로 봅니다. 다만 전환이 도는 중이거나 결과 없이 실패했다면 위치를 알 수 없습니다.
+ */
+export function isTrafficOnSource(run: RunStatus): boolean {
+  const outcome = cutoverOutcome(run);
+  if (outcome !== undefined && outcome !== null) return isOnSourceOutcome(outcome);
+  const state = run.stages.find((s) => s.stage === "cutover")?.state;
+  return state !== "running" && state !== "failed";
 }
 
 // 문구는 cdc_agent/jobs.py 의 전환 동작과 맞춥니다. 경로를 바꾸기 전 실패만 자동으로 원본에 돌아갑니다.

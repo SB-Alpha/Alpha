@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { isTrafficOnSource } from "@/lib/cutover";
 import { canAbort, canClose, canRetry, dbMigration, type CdcJobSummary } from "@/lib/dbMigration";
 import { BUTTON_DANGER, BUTTON_SECONDARY } from "@/lib/ui";
 import { ApiError, type RunStatus } from "@/lib/workflows";
@@ -15,7 +16,7 @@ type Action = {
   label: string;
   confirm: string;
   buttonClass: string;
-  isAllowed: (job: CdcJobSummary) => boolean;
+  isAllowed: (job: CdcJobSummary, run: RunStatus) => boolean;
 };
 
 const ACTIONS: Action[] = [
@@ -40,7 +41,7 @@ const ACTIONS: Action[] = [
     confirm:
       "이 복제 작업만 멈추고 커넥터와 슬롯을 지웁니다. VPN 은 남고 run 은 중단되지 않습니다. 전체 정리는 '이전 중단'을 쓰세요. 계속할까요?",
     buttonClass: BUTTON_DANGER,
-    isAllowed: canAbort,
+    isAllowed: (job, run) => canAbort(job) && isTrafficOnSource(run),
   },
 ];
 
@@ -124,7 +125,7 @@ export function CdcJobControls({ run, onChanged }: Props) {
           <button
             key={action.key}
             type="button"
-            disabled={isWorking || !job || !action.isAllowed(job)}
+            disabled={isWorking || !job || !action.isAllowed(job, run)}
             onClick={() => void perform(action)}
             className={action.buttonClass}
           >
@@ -132,6 +133,11 @@ export function CdcJobControls({ run, onChanged }: Props) {
           </button>
         ))}
       </div>
+      {job && canAbort(job) && !isTrafficOnSource(run) && (
+        <p className="mt-2 text-xs text-ink/60">
+          트래픽이 원본에 있다고 확인되지 않아 강제 중단을 막았습니다. Worker 상태와 데이터를 확인한 뒤 처리하세요.
+        </p>
+      )}
     </details>
   );
 }

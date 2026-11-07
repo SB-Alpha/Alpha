@@ -218,17 +218,9 @@ def _verify_cutover_sequence(evidence: Any) -> dict[str, Any]:
     position = 0
     missing = []
     for expected in CUTOVER_SEQUENCE:
-        # PR #53에서 빠른 컷오버를 위해 validated 대신 snapshot_fixed(전환 시점 스냅샷 고정 후 비동기 검증)를 수용합니다.
-        candidates = (expected, "snapshot_fixed") if expected == "validated" else (expected,)
-        found = False
-        for cand in candidates:
-            try:
-                position = names.index(cand, position) + 1
-                found = True
-                break
-            except ValueError:
-                continue
-        if not found:
+        try:
+            position = names.index(expected, position) + 1
+        except ValueError:
             missing.append(expected)
     if missing:
         return {"cutover_sequence": "INCOMPLETE", "cutover_sequence_missing": missing}
@@ -381,6 +373,22 @@ def _extract_plan_target_infra(run: RunStatus) -> dict[str, Any]:
     return dict(target_infra)
 
 
+def _extract_source_credentials_ref(run: RunStatus) -> str | None:
+    """조사 출력의 원본 AWS 키 이름표(source.credentials_ref.cloud). 없으면 None.
+
+    app_deploy 가 원본 이미지(ECR)를 목적지 저장소로 복사할 때 원본을 읽는 데 씁니다.
+    """
+    planning_out = run.outputs.get(StageName.PLANNING.value) or {}
+    source = planning_out.get("source")
+    if hasattr(source, "model_dump"):
+        source = source.model_dump()
+    credentials = source.get("credentials_ref") if isinstance(source, dict) else None
+    if hasattr(credentials, "model_dump"):
+        credentials = credentials.model_dump()
+    ref = credentials.get("cloud") if isinstance(credentials, dict) else None
+    return ref if isinstance(ref, str) and ref else None
+
+
 def run_discovery(run: RunStatus, ctx: RunContext) -> dict[str, Any]:
     # 11/4 합의로 discovery·planning 은 assessment 하나로 합쳤습니다 (PR #27). 원본 조회 결과는
     # planning 출력의 `source` 에 있으므로 이 단계는 조회 없이 그 사실만 남기고 넘깁니다.
@@ -391,7 +399,8 @@ def run_discovery(run: RunStatus, ctx: RunContext) -> dict[str, Any]:
 def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
     # assessment 가 discovery·planning 을 합친 모듈입니다 (PR #27). 출력은 {source, plan, gaps}.
     req = run.request
-    if not req.aws_credentials_ref:
+    manual = req.source_kind == "manual"
+    if not manual and not req.aws_credentials_ref:
         raise MissingStageOutput("원본 AWS 키 이름표가 없습니다")
 
     try:
@@ -400,16 +409,26 @@ def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
     except ImportError as exc:
         raise RuntimeError("assessment 모듈을 찾을 수 없습니다") from exc
 
-    inp = AssessmentInput(
-        run_id=run.run_id,
-        github_repo_url=req.github_repo_url,
-        aws_credentials_ref=req.aws_credentials_ref,
-        db_admin_ref=req.db_admin_ref or req.db_credentials_ref,
-        aws_region=req.aws_region,
-        target_region=req.target_region,
-        ecs_service=req.ecs_service,
-        rds_instance_id=req.rds_instance_id,
-    )
+    if manual:
+        # 직접 입력한 원본은 AWS 를 조회하지 않습니다. 원본에서 확인하지 않은 값이라는 표시는 assessment 가 gaps 에 남깁니다.
+        inp = AssessmentInput(
+            run_id=run.run_id,
+            source_kind="manual",
+            manual=req.manual,
+            github_repo_url=req.github_repo_url,
+            target_region=req.target_region,
+        )
+    else:
+        inp = AssessmentInput(
+            run_id=run.run_id,
+            github_repo_url=req.github_repo_url,
+            aws_credentials_ref=req.aws_credentials_ref,
+            db_admin_ref=req.db_admin_ref or req.db_credentials_ref,
+            aws_region=req.aws_region,
+            target_region=req.target_region,
+            ecs_service=req.ecs_service,
+            rds_instance_id=req.rds_instance_id,
+        )
     res = assessment_service.run(inp, ctx)
     # IAM 감사를 하는 모듈이 아직 없어 iam_audit_status 는 보고하지 않습니다 (화면: 미제공).
     metrics = _secret_encryption_metric(run)
@@ -536,6 +555,7 @@ def run_db_migration(
     error_holder: list[Exception] = []
     latest_metrics: dict[str, Any] = {}
     latest_phase = ["init"]
+    run_aborted = threading.Event()
 
     class _ReportingProxy:
         def report(
@@ -553,11 +573,17 @@ def run_db_migration(
                     latest_phase[0] = phase
                     if phase in APP_DEPLOY_PHASES:
                         ready_event.set()
-            if ctx is not None:
+            if ctx is not None and not run_aborted.is_set():
                 # db_migration/service.py 가 종료 시점에 ctx.report("failed", ...) 또는 ctx.report("stopped", ...) 를 호출할 수 있습니다.
                 # workflows 규격상 완료/실패는 runner 반환 및 예외로 판정하므로, reportable 상태일 때만 forward 합니다.
                 if state in ("running", "waiting_approval", "paused"):
-                    ctx.report(state, progress, forwarded, message)
+                    try:
+                        ctx.report(state, progress, forwarded, message)
+                    except RunAborted:
+                        # 예외를 올리면 guide_workflow 가 복제와 VPN 을 지워 clean_up_cdc 의 전환 보호를 우회합니다.
+                        # 정리는 clean_up_cdc 만 합니다. service.stop 이 작업을 멈추면 이 추적이 그것을 보고 VPN 을 지우므로 계속 돕니다.
+                        run_aborted.set()
+                        ready_event.set()  # 기다리던 runner 가 바로 중단을 알아챕니다.
 
     # runner 가 streaming 으로 먼저 반환한 뒤의 종료는 runner 가 처리할 수 없어 지표로 남깁니다.
     handoff_lock = threading.Lock()
@@ -641,7 +667,13 @@ def run_app_deploy(run: RunStatus, ctx: RunContext) -> Any:
       - GCP_PROJECT_ID: 배포 대상 GCP 프로젝트 ID
     """
     target_infra = _extract_plan_target_infra(run)
-    return adapter_for(run.request).deploy_app(run.run_id, target_infra, run.request.target_infra, ctx)
+    return adapter_for(run.request).deploy_app(
+        run.run_id,
+        target_infra,
+        run.request.target_infra,
+        ctx,
+        source_credentials_ref=_extract_source_credentials_ref(run),
+    )
 
 
 def run_cutover(

@@ -107,7 +107,14 @@ class _MockSimulationTransport(httpx.BaseTransport):
                 job["message"] = "[Simulation] L7 traffic hold -> switch in progress"
                 return httpx.Response(202, json=job)
 
-            if sub in ("abort", "close", "retry") and method == "POST":
+            if sub == "abort" and method == "POST":
+                # 추적은 aborted 를 봐야 끝납니다. 실제 에이전트처럼 없는 작업은 404, 있으면 멈춘 작업을 돌려줍니다.
+                if job_id not in self._jobs:
+                    return httpx.Response(404, json={"detail": "not found"})
+                self._jobs[job_id].update(state="aborted", message="[Simulation] Job aborted")
+                return httpx.Response(200, json=self._jobs[job_id])
+
+            if sub in ("close", "retry") and method == "POST":
                 return httpx.Response(200, json={"status": "ok", "job_id": job_id})
 
             if sub == "secrets" and method == "PUT":

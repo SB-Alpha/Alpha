@@ -27,8 +27,14 @@ class TargetAdapter(Protocol):
         self, run_id: str, target_infra: dict[str, Any], config: TargetInfraConfig | None, ctx: RunContext
     ) -> Any: ...
 
+    # source_credentials_ref: 원본 AWS 키 이름표. 원본 이미지를 목적지 저장소로 복사할 때만 쓰고, 없을 수 있습니다.
     def deploy_app(
-        self, run_id: str, target_infra: dict[str, Any], config: TargetInfraConfig | None, ctx: RunContext
+        self,
+        run_id: str,
+        target_infra: dict[str, Any],
+        config: TargetInfraConfig | None,
+        ctx: RunContext,
+        source_credentials_ref: str | None = None,
     ) -> Any: ...
 
 
@@ -51,7 +57,12 @@ class GcpTargetAdapter:
         return provisioning_service.run(inp, ctx)
 
     def deploy_app(
-        self, run_id: str, target_infra: dict[str, Any], config: TargetInfraConfig | None, ctx: RunContext
+        self,
+        run_id: str,
+        target_infra: dict[str, Any],
+        config: TargetInfraConfig | None,
+        ctx: RunContext,
+        source_credentials_ref: str | None = None,
     ) -> Any:
         from app.features.provisioning import service as provisioning_service
         from app.features.provisioning.schemas import AppDeployInput
@@ -60,6 +71,7 @@ class GcpTargetAdapter:
             run_id=run_id,
             target_infra=target_infra,
             project_id=_project_id(config),
+            source_credentials_ref=source_credentials_ref,
             update_worker_target=bool(os.environ.get("WORKER_URL")),
         )
         return provisioning_service.deploy_app(inp, ctx)
