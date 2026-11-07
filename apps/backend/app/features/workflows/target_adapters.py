@@ -135,9 +135,65 @@ class AzureTargetAdapter:
         return provisioning_service.deploy_app(inp, ctx)
 
 
+def _aws_infra(target_infra: dict[str, Any], config: TargetInfraConfig | None) -> dict[str, Any]:
+    """조사 결과에 요청의 AWS 값을 얹는다: 리전은 요청 값이 우선이다."""
+    infra = dict(target_infra)
+    if config is not None and config.region:
+        infra["region"] = config.region
+    return infra
+
+
+class AwsTargetAdapter:
+    """ECS Fargate + ALB + RDS PostgreSQL (infra/terraform/aws).
+
+    계정 ID 는 요청의 project_id, 없으면 환경변수 AWS_ACCOUNT_ID 를 씁니다. 둘 다 없으면 시작하지 않습니다.
+    어느 계정에 만들지는 백엔드를 실행하는 환경의 AWS 로그인(환경변수, AWS_PROFILE)이 정하고,
+    계정 ID 는 그 로그인이 맞는 계정인지 확인하는 데 쓰입니다 (다르면 Terraform 이 거부합니다).
+    앱 크기(cpu/memory)는 provisioning 이 Fargate 규칙에 맞춰 바꾸고, DB 등급은 넘기지 않습니다.
+    """
+
+    provider: TargetInfraType = "aws"
+
+    def provision(
+        self, run_id: str, target_infra: dict[str, Any], config: TargetInfraConfig | None, ctx: RunContext
+    ) -> Any:
+        from app.features.provisioning import service as provisioning_service
+        from app.features.provisioning.schemas import ProvisioningInput
+
+        inp = ProvisioningInput(
+            run_id=run_id,
+            target_infra=_aws_infra(target_infra, config),
+            provider=self.provider,
+            project_id=_project_id(config),
+        )
+        return provisioning_service.run(inp, ctx)
+
+    def deploy_app(
+        self,
+        run_id: str,
+        target_infra: dict[str, Any],
+        config: TargetInfraConfig | None,
+        ctx: RunContext,
+        source_credentials_ref: str | None = None,
+    ) -> Any:
+        from app.features.provisioning import service as provisioning_service
+        from app.features.provisioning.schemas import AppDeployInput
+
+        inp = AppDeployInput(
+            run_id=run_id,
+            target_infra=_aws_infra(target_infra, config),
+            provider=self.provider,
+            project_id=_project_id(config),
+            source_credentials_ref=source_credentials_ref,
+            update_worker_target=bool(os.environ.get("WORKER_URL")),
+        )
+        return provisioning_service.deploy_app(inp, ctx)
+
+
 TARGET_ADAPTERS: Mapping[TargetInfraType, TargetAdapter] = {
     "gcp": GcpTargetAdapter(),
     "azure": AzureTargetAdapter(),
+    "aws": AwsTargetAdapter(),
 }
 
 

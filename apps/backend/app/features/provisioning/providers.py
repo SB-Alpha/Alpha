@@ -143,7 +143,86 @@ AZURE = ProviderConfig(
     adapt=azure_adapt,
 )
 
-PROVIDERS: dict[str, ProviderConfig] = {GCP.name: GCP, AZURE.name: AZURE}
+# Fargate 가 받는 (vCPU, 메모리 MiB) 조합. vCPU 마다 메모리 범위가 정해져 있다 (1 vCPU = 1024 CPU 단위).
+def _mib_range(low: int, high: int) -> tuple[int, ...]:
+    return tuple(range(low, high + 1, 1024))
+
+
+FARGATE_SIZES: tuple[tuple[float, tuple[int, ...]], ...] = (
+    (0.25, (512, 1024, 2048)),
+    (0.5, _mib_range(1024, 4096)),
+    (1.0, _mib_range(2048, 8192)),
+    (2.0, _mib_range(4096, 16384)),
+    (4.0, _mib_range(8192, 30720)),
+)
+
+
+# 조사 결과의 앱 크기를 Fargate 가 받는 조합으로 바꾸는 함수.
+# 원본이 필요로 하는 만큼을 덮는 가장 작은 조합을 고르고, 한도를 넘으면 가장 큰 조합으로 맞추고 알린다.
+# DB 등급은 넘기지 않는다 (known_variables 에 없음). 조사 결과의 등급 이름은 GCP 것이라 RDS 가 받지 못한다.
+def aws_adapt(target_infra: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    infra = dict(target_infra)
+    cpu, memory = infra.get("cpu"), infra.get("memory")
+    if cpu is None and memory is None:
+        return infra, []
+
+    wanted_cpu = _number(cpu, "cpu") if cpu is not None else 0.0
+    wanted_memory = _number(memory, "memory") if memory is not None else 0.0
+
+    chosen: tuple[float, int] | None = None
+    for vcpu, memories in FARGATE_SIZES:
+        if vcpu < wanted_cpu:
+            continue
+        fit = next((value for value in memories if value >= wanted_memory), None)
+        if fit is not None:
+            chosen = (vcpu, fit)
+            break
+
+    notes: list[str] = []
+    if chosen is None:
+        largest_cpu, largest_memories = FARGATE_SIZES[-1]
+        chosen = (largest_cpu, largest_memories[-1])
+        notes.append(
+            f"원본 앱 크기(cpu {cpu}, memory {memory} MiB)가 Fargate 한도를 넘어 cpu {chosen[0]:g}, memory {chosen[1]} MiB 로 맞췄습니다"
+        )
+    elif (wanted_cpu, wanted_memory) != chosen:
+        notes.append(
+            f"앱 크기를 Fargate 규칙에 맞췄습니다: cpu {cpu}, memory {memory} MiB -> cpu {chosen[0]:g}, memory {chosen[1]} MiB"
+        )
+    infra["cpu"], infra["memory"] = chosen
+    return infra, notes
+
+
+AWS = ProviderConfig(
+    name="aws",
+    terraform_dir=REPO_ROOT / "infra" / "terraform" / "aws",
+    terraform_dir_env=("PROVISIONING_TF_DIR_AWS",),
+    known_variables=frozenset(
+        {
+            "region",
+            "service_name",
+            "source_image",
+            "container_image",
+            "container_port",
+            "cpu",
+            "memory",
+            "health_check_path",
+            "env_vars",
+            "secret_refs",
+            "db_version",
+            "db_name",
+        }
+    ),
+    default_region="ap-northeast-2",
+    # AWS 는 '계정' 단위. 자원이 만들어질 계정은 실행 환경의 로그인이 정하고, 이 값은 로그인이 맞는 계정인지 확인하는 데 쓰인다.
+    # 그래서 GCP·Azure 와 같이 필수로 둔다 (이 컴퓨터의 기본 AWS 프로필이 다른 서비스 계정일 수 있다).
+    scope_variable="aws_account_id",
+    scope_env="AWS_ACCOUNT_ID",
+    scope_label="AWS 계정 ID",
+    adapt=aws_adapt,
+)
+
+PROVIDERS: dict[str, ProviderConfig] = {GCP.name: GCP, AZURE.name: AZURE, AWS.name: AWS}
 
 
 def get_provider(name: str) -> ProviderConfig:

@@ -34,7 +34,7 @@ assessment  ─ plan.target_infra ─▶ adapter.provision ─ {target, ...} ─
 
 | 필드 | 설명 |
 | --- | --- |
-| `provider` | `gcp`, `azure`, `ncp` 중 하나. `target_infra` 를 생략하면 `gcp` |
+| `provider` | `gcp`, `azure`, `aws`, `ncp` 중 하나. `target_infra` 를 생략하면 `gcp` |
 | `region` | 목적지 리전. `target_region` 을 비우면 이 값이 들어가고, 둘이 다르면 `422` |
 | `project_id` | 클라우드별 소속 단위. GCP 는 프로젝트 ID, 비우면 `GCP_PROJECT_ID` |
 | `extra_params` | 어댑터 전용 값. 이름에 `password`, `secret`, `token`, `api_key`, `private_key`, `credential` 이 들어가면 `secret://` 참조만 받습니다 |
@@ -50,7 +50,7 @@ class AzureTargetAdapter:
     def provision(self, run_id, target_infra, config, ctx): ...
     def deploy_app(self, run_id, target_infra, config, ctx, source_credentials_ref=None): ...
 
-TARGET_ADAPTERS = {"gcp": GcpTargetAdapter(), "azure": AzureTargetAdapter()}
+TARGET_ADAPTERS = {"gcp": GcpTargetAdapter(), "azure": AzureTargetAdapter(), "aws": AwsTargetAdapter()}
 ```
 
 | 인자 | 내용 |

@@ -263,8 +263,20 @@ def azure_login(registry: str, *, token_source: Callable[[str], str] = _az_acr_t
     return RegistryLogin(registry=registry, username=ACR_TOKEN_USER, password=token_source(registry))
 
 
+def aws_destination_login(registry: str, *, login: Callable[..., RegistryLogin] = aws_ecr_login) -> RegistryLogin:
+    """백엔드를 실행하는 환경의 AWS 로그인(환경변수, AWS_PROFILE, 역할)으로 ECR 토큰을 받는다.
+
+    원본을 읽는 키(source_credentials_ref)와는 별개다. 키를 명시하지 않으면 boto3 가 환경의 기본 자격 증명을 쓴다.
+    """
+    return login(registry, {"access_key_id": None, "secret_access_key": None, "session_token": None})
+
+
 # 목적지 클라우드마다 로그인 방법이 다르다. 새 목적지는 여기에 등록한다.
-DESTINATION_LOGINS: dict[str, Callable[[str], RegistryLogin]] = {"gcp": gcp_login, "azure": azure_login}
+DESTINATION_LOGINS: dict[str, Callable[[str], RegistryLogin]] = {
+    "gcp": gcp_login,
+    "azure": azure_login,
+    "aws": aws_destination_login,
+}
 
 
 def destination_login(provider: str, registry: str) -> RegistryLogin:
@@ -447,7 +459,8 @@ def transfer_image(
     source = parse_image(source_image)
     registry_url = registry_url.strip().rstrip("/")
     dest_registry = registry_url.partition("/")[0]
-    if not dest_registry or "/" not in registry_url:
+    # GCP 는 "호스트/프로젝트/저장소", Azure·AWS 는 호스트만 돌려준다. 어느 쪽이든 이미지는 "<registry_url>/<service_name>" 에 올린다.
+    if not dest_registry or "://" in registry_url or any(ch.isspace() for ch in registry_url):
         raise ProvisioningError("목적지 저장소 주소(registry_url)가 올바르지 않습니다")
     destination_repo = f"{registry_url}/{service_name}"
     destination = f"{destination_repo}:{destination_tag(source)}"

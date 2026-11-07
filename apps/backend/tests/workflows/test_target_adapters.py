@@ -131,7 +131,7 @@ def test_create_run_refuses_a_target_without_an_adapter(client, provider):
 
 
 def test_unknown_provider_is_rejected_by_the_schema(client):
-    assert client.post("/runs", json={**SIMPLE_BODY, "target_infra": {"provider": "aws"}}).status_code == 422
+    assert client.post("/runs", json={**SIMPLE_BODY, "target_infra": {"provider": "oracle"}}).status_code == 422
 
 
 def test_adapter_defaults_to_gcp_for_requests_without_target_infra():
@@ -261,3 +261,7 @@ def test_target_infra_extra_params_rejects_nested_raw_secrets():
         extra_params={"azure": {"client_secret": "secret://azure/cred"}, "items": [{"token": "secret://tok"}]},
     )
     assert cfg.extra_params["azure"]["client_secret"] == "secret://azure/cred"
+
+
+def test_aws_is_a_known_provider_with_an_adapter(client):
+    assert client.post("/runs", json={**SIMPLE_BODY, "target_infra": {"provider": "aws"}}).status_code == 201

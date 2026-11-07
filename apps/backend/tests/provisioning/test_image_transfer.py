@@ -490,9 +490,28 @@ def test_a_non_ecr_source_is_copied_without_a_source_login():
     assert [login.registry for login in copier.calls[0][2]] == ["asia-northeast3-docker.pkg.dev"]
 
 
-def test_transfer_rejects_a_malformed_destination_registry():
+@pytest.mark.parametrize("registry_url", ["", "https://acr.azurecr.io", "acr .azurecr.io", "/only-path"])
+def test_transfer_rejects_a_malformed_destination_registry(registry_url):
     with pytest.raises(ProvisioningError, match="registry_url"):
-        run_transfer(FakeCopier(), registry_url="no-slash")
+        run_transfer(FakeCopier(), registry_url=registry_url)
+
+
+@pytest.mark.parametrize(
+    ("registry_url", "expected_host"),
+    [
+        ("targetapp.azurecr.io", "targetapp.azurecr.io"),  # Azure: 호스트만
+        ("061292478449.dkr.ecr.ap-northeast-2.amazonaws.com", "061292478449.dkr.ecr.ap-northeast-2.amazonaws.com"),  # AWS: 호스트만
+        ("asia-northeast3-docker.pkg.dev/example-project/target-app", "asia-northeast3-docker.pkg.dev"),  # GCP: 호스트/프로젝트/저장소
+    ],
+)
+def test_the_image_goes_under_registry_url_whether_it_is_a_host_or_a_path(registry_url, expected_host):
+    copier = FakeCopier()
+
+    result = run_transfer(copier, registry_url=registry_url, service_name="target-app")
+
+    assert copier.calls[0][1].startswith(f"{registry_url}/target-app:")
+    assert result.container_image == f"{registry_url}/target-app@{DIGEST}"
+    assert copier.calls[0][2][-1].registry == expected_host  # 목적지 로그인은 호스트로 한다
 
 
 def test_transfer_reports_each_step():
@@ -796,3 +815,57 @@ def test_a_destination_without_a_registry_login_skips_the_copy_instead_of_failin
     assert transfer.calls == []
     assert "container_image" not in tf.var_values
     assert any("이미지 복사 로그인이 없어" in (m or "") for _, _, m in ctx.calls)
+
+
+# ---------------------------------------------------------------------------
+# AWS 목적지 (ECR)
+# ---------------------------------------------------------------------------
+
+
+def test_aws_destination_login_uses_the_environments_own_aws_login_not_a_key():
+    from app.features.provisioning.image_transfer import DESTINATION_LOGINS, aws_destination_login
+
+    seen = {}
+
+    def fake_login(registry, credentials):
+        seen["registry"], seen["credentials"] = registry, dict(credentials)
+        return RegistryLogin(registry, "AWS", "ecr-token")
+
+    login = aws_destination_login("061292478449.dkr.ecr.ap-northeast-2.amazonaws.com", login=fake_login)
+
+    assert (login.username, login.password) == ("AWS", "ecr-token")
+    assert seen["registry"] == "061292478449.dkr.ecr.ap-northeast-2.amazonaws.com"
+    assert set(seen["credentials"].values()) == {None}  # 키를 주지 않아야 boto3 가 환경의 기본 로그인을 쓴다
+    assert DESTINATION_LOGINS["aws"] is aws_destination_login
+
+
+def test_aws_destination_login_asks_ecr_for_the_registrys_own_account_and_region():
+    from app.features.provisioning.image_transfer import aws_destination_login
+
+    created = {}
+
+    class Client:
+        def get_authorization_token(self, registryIds):
+            created["registry_ids"] = registryIds
+            import base64
+
+            return {"authorizationData": [{"authorizationToken": base64.b64encode(b"AWS:pw-from-ecr").decode()}]}
+
+    def factory(service, **kwargs):
+        created["service"], created["kwargs"] = service, kwargs
+        return Client()
+
+    from app.features.provisioning import image_transfer
+
+    login = image_transfer.aws_ecr_login(
+        "061292478449.dkr.ecr.ap-northeast-2.amazonaws.com",
+        {"access_key_id": None, "secret_access_key": None, "session_token": None},
+        client_factory=factory,
+    )
+
+    assert created["service"] == "ecr"
+    assert created["kwargs"]["region_name"] == "ap-northeast-2"
+    assert created["kwargs"]["aws_access_key_id"] is None  # None 이면 boto3 는 기본 자격 증명 체인을 쓴다
+    assert created["registry_ids"] == ["061292478449"]
+    assert login.password == "pw-from-ecr"
+    assert aws_destination_login  # 공개 이름이 있다

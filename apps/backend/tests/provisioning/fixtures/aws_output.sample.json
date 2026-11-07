@@ -1,0 +1,21 @@
+{
+  "_note": "infra/terraform/aws/outputs.tf 의 terraform output -json 모양을 본뜬 가짜 값. 실제 AWS 출력이 아니다. VPN 키(vpn_credentials_json)는 AWS 에서 null 이다.",
+  "app_url": {"sensitive": false, "type": "string", "value": null},
+  "db_admin_password": {"sensitive": true, "type": "string", "value": "FAKE-AWS-ADMIN-PASSWORD-DO-NOT-LEAK"},
+  "db_admin_user": {"sensitive": false, "type": "string", "value": "alpha"},
+  "db_fqdn": {"sensitive": false, "type": "string", "value": "target-app-db.abcdefghijkl.ap-northeast-2.rds.amazonaws.com"},
+  "db_instance": {"sensitive": false, "type": "string", "value": "target-app-db"},
+  "db_name": {"sensitive": false, "type": "string", "value": "postgres"},
+  "db_password_secret_id": {"sensitive": false, "type": "string", "value": "target-app-db-password"},
+  "db_port": {"sensitive": false, "type": "number", "value": 5432},
+  "db_private_ip": {"sensitive": false, "type": "string", "value": "target-app-db.abcdefghijkl.ap-northeast-2.rds.amazonaws.com"},
+  "db_ssl_mode": {"sensitive": false, "type": "string", "value": "ENCRYPTED_ONLY"},
+  "db_user": {"sensitive": false, "type": "string", "value": "alpha"},
+  "db_version": {"sensitive": false, "type": "string", "value": "16"},
+  "execution_role_arn": {"sensitive": false, "type": "string", "value": "arn:aws:iam::123456789012:role/target-app-exec"},
+  "psa_range_cidr": {"sensitive": false, "type": "string", "value": "10.30.16.0/20"},
+  "registry_url": {"sensitive": false, "type": "string", "value": "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com"},
+  "subnet_cidrs": {"sensitive": false, "type": ["tuple", ["string"]], "value": ["10.30.0.0/24", "10.30.1.0/24"]},
+  "vpc_name": {"sensitive": false, "type": "string", "value": "target-app"},
+  "vpn_credentials_json": {"sensitive": true, "type": "string", "value": null}
+}
