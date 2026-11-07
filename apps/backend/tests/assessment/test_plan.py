@@ -185,6 +185,10 @@ def test_cloud_neutral_fields_are_not_gcp_terraform_variables():
     ("123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/target-app:1.0", "ECR"),
     ("registry.local:5000/work-items:1.4", "registry.local:5000"),
     ("nginx:1.27", "Docker Hub"),
+    ("library/nginx:1.27", "Docker Hub"),
+    ("bitnami/postgresql:16", "Docker Hub"),
+    ("localhost/work-items:dev", "localhost"),
+    ("ghcr.io/example/work-items:1.0", "ghcr.io"),
     (None, "원본 저장소(미제공)"),
 ])
 def test_image_move_step_names_the_real_source_registry(uri, label):

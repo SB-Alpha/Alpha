@@ -282,13 +282,19 @@ def collect_risks(inv: InventoryForPlanning, checks: list[PlanCheck]) -> list[Ri
 
 
 def image_registry_label(uri: str | None) -> str:
-    """이미지 이동 단계에 보일 원본 저장소 이름. AWS ECR 주소면 "ECR", 아니면 주소의 호스트."""
+    """이미지 이동 단계에 보일 원본 저장소 이름. AWS ECR 주소면 "ECR", 아니면 주소의 호스트.
+
+    첫 경로 조각에 `.`·`:` 이 있거나 `localhost` 일 때만 호스트로 봅니다 (docker 와 같은 규칙).
+    `library/nginx`, `bitnami/postgresql` 처럼 계정 이름만 있으면 Docker Hub 입니다.
+    """
     if not uri:
         return "원본 저장소(미제공)"
-    host = uri.split("/", 1)[0] if "/" in uri else ""
-    if ".dkr.ecr." in host:
+    first, sep, _ = uri.partition("/")
+    if not sep or not ("." in first or ":" in first or first == "localhost"):
+        return "Docker Hub"
+    if ".dkr.ecr." in first:
         return "ECR"
-    return host or "Docker Hub"
+    return first
 
 
 def build_steps(image_uri: str | None = None) -> list[PlanStep]:
