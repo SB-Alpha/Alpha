@@ -1,0 +1,187 @@
+"""run 입력의 입구. 입력을 검증하고, 클라우드 권한을 찾고, DB 계정을 이름표로 바꾼다.
+
+클라우드 API, VPN, 복제는 여기서 하지 않는다. 이 파일을 지나면 비밀값은 이름표로만 다닌다.
+"""
+
+import re
+from dataclasses import dataclass
+from typing import Any, Literal
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    SecretStr,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
+
+from app.core.secrets import put_secret, resolve
+
+from .schemas import RUN_ID_PATTERN, single_line
+
+Cloud = Literal["aws", "gcp", "azure"]
+
+CLOUD_CREDENTIAL_KEYS: dict[str, frozenset[str]] = {
+    "aws": frozenset({"aws_access_key_id", "aws_secret_access_key"}),
+    "gcp": frozenset({"credentials_json"}),
+    "azure": frozenset({"tenant_id", "client_id", "client_secret", "subscription_id"}),
+}
+REGION_PATTERNS: dict[str, re.Pattern[str]] = {
+    "aws": re.compile(r"^[a-z]{2}(-[a-z]+)+-\d+$"),
+    "gcp": re.compile(r"^[a-z]+-[a-z]+\d+$"),
+    "azure": re.compile(r"^[a-z]+\d*$"),
+}
+SOURCE_DB_TAG = "source-db-admin"
+TARGET_DB_TAG = "target-admin"
+UNKNOWN_FIELD = "unknown_field"
+
+
+class InvalidInput(ValueError):
+    """필드 이름만 담는다. pydantic 원문은 입력값을 인용할 수 있다."""
+
+    def __init__(self, fields: list[str]):
+        super().__init__(f"invalid input: {', '.join(fields)}")
+        self.fields = fields
+
+
+class MissingCredentials(RuntimeError):
+    """클라우드 권한이 저장되지 않았거나 형식이 맞지 않는다. 값과 저장된 키 이름은 담지 않는다."""
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class DbAccount(_Strict):
+    user: SecretStr
+    password: SecretStr
+
+    @field_validator("user", "password")
+    @classmethod
+    def _single_line_secret(cls, value: SecretStr) -> SecretStr:
+        if not single_line(value.get_secret_value()):
+            raise ValueError("must be a single line of text without surrounding spaces")
+        return value
+
+
+class TargetDbAccount(DbAccount):
+    app_user: str
+
+    @field_validator("app_user")
+    @classmethod
+    def _single_line_name(cls, value: str) -> str:
+        if not single_line(value):
+            raise ValueError("must be a single line of text without surrounding spaces")
+        return value
+
+
+class _Endpoint(_Strict):
+    cloud: Cloud
+    region: str
+
+    @field_validator("region")
+    @classmethod
+    def _region_of_cloud(cls, value: str, info: ValidationInfo) -> str:
+        pattern = REGION_PATTERNS.get(info.data.get("cloud", ""))
+        if pattern is not None and not pattern.fullmatch(value):
+            raise ValueError("not a region of this cloud")
+        return value
+
+
+class SourceEndpoint(_Endpoint):
+    db: DbAccount
+
+
+class TargetEndpoint(_Endpoint):
+    db: TargetDbAccount
+
+
+class RunInput(_Strict):
+    run_id: str | None = None
+    source: SourceEndpoint
+    target: TargetEndpoint
+
+    @field_validator("run_id")
+    @classmethod
+    def _run_id_format(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(RUN_ID_PATTERN, value):
+            raise ValueError("not a run id")
+        return value
+
+
+@dataclass(frozen=True)
+class InjectedEndpoint:
+    cloud: str
+    region: str
+    credentials_ref: str
+    db_admin_ref: str
+
+
+@dataclass(frozen=True)
+class InjectedRun:
+    """입력 주입의 결과. 이름표만 담으므로 로그와 스레드로 넘겨도 된다."""
+
+    run_id: str
+    source: InjectedEndpoint
+    target: InjectedEndpoint
+    target_app_user: str
+
+
+def input_problems(exc: ValidationError) -> list[str]:
+    return sorted({_field_name(error) for error in exc.errors()})
+
+
+def parse(raw: Any) -> RunInput:
+    try:
+        parsed = RunInput.model_validate(raw)
+    except ValidationError as exc:
+        raise InvalidInput(input_problems(exc)) from None
+    if parsed.source.cloud == parsed.target.cloud:
+        raise InvalidInput(["target.cloud"])
+    return parsed
+
+
+def inject(run_id: str, inp: RunInput) -> InjectedRun:
+    """권한을 모두 확인한 뒤에 DB 계정을 저장한다. 같은 run_id로 다시 부르면 계정을 덮어쓴다."""
+    source_credentials = _credentials_ref(inp.source.cloud)
+    target_credentials = _credentials_ref(inp.target.cloud)
+    return InjectedRun(
+        run_id=run_id,
+        source=_inject_endpoint(run_id, inp.source, source_credentials, SOURCE_DB_TAG),
+        target=_inject_endpoint(run_id, inp.target, target_credentials, TARGET_DB_TAG),
+        target_app_user=inp.target.db.app_user,
+    )
+
+
+def _field_name(error: Any) -> str:
+    # 모르는 필드는 이름도 값일 수 있어 위치만 남긴다.
+    location = error["loc"][:-1] + (UNKNOWN_FIELD,) if error["type"] == "extra_forbidden" else error["loc"]
+    return ".".join(str(part) for part in location) or "input"
+
+
+def _credentials_ref(cloud: str) -> str:
+    ref = f"secret://cloud/{cloud}"
+    try:
+        stored = resolve(ref)
+    except KeyError:
+        raise MissingCredentials(f"credentials for {cloud} are not registered") from None
+    expected = CLOUD_CREDENTIAL_KEYS[cloud]
+    if stored.keys() != expected or not all(stored.values()):
+        raise MissingCredentials(f"credentials for {cloud} must have exactly: {', '.join(sorted(expected))}")
+    return ref
+
+
+def _inject_endpoint(
+    run_id: str, endpoint: SourceEndpoint | TargetEndpoint, credentials_ref: str, db_tag: str
+) -> InjectedEndpoint:
+    db_admin_ref = put_secret(f"{run_id}/{db_tag}", {
+        "user": endpoint.db.user.get_secret_value(),
+        "password": endpoint.db.password.get_secret_value(),
+    })
+    return InjectedEndpoint(
+        cloud=endpoint.cloud,
+        region=endpoint.region,
+        credentials_ref=credentials_ref,
+        db_admin_ref=db_admin_ref,
+    )
