@@ -107,6 +107,40 @@ def test_blocked_summary_must_name_the_failing_check(monkeypatch):
     assert "blocking_not_named" in ai.check_notes(vague, plan, ai._plan_for_prompt(plan))
 
 
+# 실호출 평가(Sonnet 5.5)에서 나온 맞는 문장. 예전 키워드 검사가 '승인 가능' 글자만 보고 버렸던 것들
+REAL_BLOCKED_SUMMARIES = [
+    ["target-app 과 PostgreSQL 16.4 데이터베이스를 GCP asia-northeast3 의 Cloud Run 과 Cloud SQL 로 옮기는 계획입니다.",
+     "승인 불가 상태입니다. 4개 필수 조건 중 3개가 통과했고, 막힌 조건은 '논리 복제 설정'(논리 복제 설정 미제공)입니다.",
+     "논리 복제 설정이 확인되어 승인 가능해지면 이미지 이동과 terraform apply, CDC 동기화가 진행됩니다."],
+    ["target-app 을 GCP asia-northeast3 의 Cloud Run 과 Cloud SQL 로 옮기는 계획입니다.",
+     "현재 승인 불가 상태입니다. 필수 조건 4개 중 3개만 통과했고, 막힌 조건은 '논리 복제 설정' 입니다.",
+     "논리 복제 설정이 확인되어 승인 가능 상태가 되면 이미지 이동, terraform apply, CDC 복사가 진행됩니다."],
+]
+
+
+@pytest.mark.parametrize("summary", REAL_BLOCKED_SUMMARIES)
+def test_conditional_future_approval_is_not_a_contradiction(summary):
+    plan = _blocked_plan()
+    assert _counts(plan) == (3, 4)
+    notes = AiNotes(summary=summary)
+    assert ai.check_notes(notes, plan, ai._plan_for_prompt(plan)) == []
+
+
+@pytest.mark.parametrize("lie", ["지금 바로 승인 가능합니다.", "필수 조건을 모두 통과했습니다.", "이 계획은 승인할 수 있습니다."])
+def test_asserting_approval_on_a_blocked_plan_is_rejected(lie):
+    plan = _blocked_plan()
+    good = _good_blocked(plan)
+    notes = good.model_copy(update={"summary": [good.summary[0], good.summary[1], good.summary[2] + " " + lie]})
+    assert "verdict_says_pass" in ai.check_notes(notes, plan, ai._plan_for_prompt(plan))
+
+
+def test_wrong_count_written_as_n_of_m_is_rejected():
+    plan = _blocked_plan()
+    good = _good_blocked(plan)
+    wrong = good.model_copy(update={"summary": [good.summary[0], "필수 조건 4개 중 4개가 통과했습니다.", good.summary[2]]})
+    assert "check_count_mismatch" in ai.check_notes(wrong, plan, ai._plan_for_prompt(plan))
+
+
 def test_number_not_in_input_is_rejected(monkeypatch):
     plan = _blocked_plan()
     good = _good_blocked(plan)

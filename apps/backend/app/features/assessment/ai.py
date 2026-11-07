@@ -33,11 +33,18 @@ MAX_TITLE_CHARS = 80
 MAX_DETAIL_CHARS = 400
 AWS_ACCOUNT = re.compile(r"(?<!\d)\d{12}(?!\d)")
 NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
-RATIO = re.compile(r"(?<![\d.])(\d+)\s*/\s*(\d+)(?![\d.])")
+RATIO = re.compile(r"(?<![\d.])(\d+)\s*/\s*(\d+)(?![\d.])")  # 통과/전체
+COUNT_OF = re.compile(r"(\d+)\s*개\s*중\s*(\d+)\s*개")  # 전체 중 통과
 
 # 판정 문구. 승인 불가 계획은 요약에 '불가' 문구가 꼭 있어야 하고, 승인 가능 계획에는 있으면 안 됩니다.
 BLOCKED_PHRASES = ("승인 불가", "승인할 수 없", "승인이 불가")
-PASS_ALL_PHRASES = ("모두 통과", "전부 통과", "모두 충족", "승인할 수 있", "승인 가능")
+# 승인 불가 계획에서 '지금 승인할 수 있다'고 단정하는 문장만 잡습니다.
+# "확인되어 승인 가능해지면" 같은 조건문은 맞는 설명이라 걸리지 않게 합니다 (실호출 평가에서 오탐으로 확인).
+PASS_ALL = re.compile(
+    r"필수 조건(?:을|이|은)?\s*(?:모두|전부)\s*(?:통과|충족)"
+    r"|승인(?:이)?\s*가능(?:합니다|입니다|한 상태입니다|\.)"
+    r"|승인할 수 있(?:습니다|다\.|어요)"
+)
 
 SYSTEM = (
     "너는 AWS → GCP 이전 계획을 승인자에게 설명하는 도우미다. <plan_json> 은 규칙 코드가 이미 판정한 결과다.\n"
@@ -59,7 +66,8 @@ PROBLEM_HINTS = {
     "risk_note_too_long": f"risk_notes 의 title 은 {MAX_TITLE_CHARS}자, detail 은 {MAX_DETAIL_CHARS}자 이내여야 한다.",
     "verdict_says_blocked": "approvable 이 true 인데 '승인 불가' 처럼 썼다.",
     "verdict_missing_blocked": "approvable 이 false 인데 요약에 '승인 불가' 가 없다.",
-    "verdict_says_pass": "approvable 이 false 인데 '모두 통과' · '승인 가능' 처럼 썼다.",
+    "verdict_says_pass": "approvable 이 false 인데 '필수 조건 모두 통과' · '승인 가능합니다' 처럼 지금 승인할 수 있다고 썼다. "
+                         "조건이 풀린 뒤의 일은 '~되면' 으로 써라.",
     "blocking_not_named": "막힌 조건(result 가 pass 가 아닌 checks)의 title 이 요약에 없다.",
     "check_count_mismatch": "필수 조건 개수는 check_counts 의 passed/total 과 같아야 한다.",
     "unknown_number": "<plan_json> 에 없는 숫자를 썼다.",
@@ -131,7 +139,7 @@ def check_notes(notes: AiNotes, plan: MigrationPlan, prompt: str) -> list[str]:
 
     text = " ".join(summary)
     says_blocked = any(p in text for p in BLOCKED_PHRASES)
-    says_pass_all = any(p in text for p in PASS_ALL_PHRASES)
+    says_pass_all = PASS_ALL.search(text) is not None
     if plan.approvable and says_blocked:
         problems.append("verdict_says_blocked")
     if not plan.approvable and not says_blocked:
@@ -143,9 +151,11 @@ def check_notes(notes: AiNotes, plan: MigrationPlan, prompt: str) -> list[str]:
         if bad and not any(t in _norm(text) for t in bad):
             problems.append("blocking_not_named")
 
-    # 'N/M 통과' 처럼 쓴 조건 개수는 실제 개수와 같아야 함 (다른 곳에 있는 숫자라 숫자 대조만으로는 못 잡음)
+    # 'N/M 통과' · 'M개 중 N개' 처럼 쓴 조건 개수는 실제 개수와 같아야 함 (다른 곳에 있는 숫자라 숫자 대조만으로는 못 잡음)
     passed, total = sum(c.result == "pass" for c in plan.checks), len(plan.checks)
-    if any((int(a), int(b)) != (passed, total) for a, b in RATIO.findall(text)):
+    ratios = [(int(a), int(b)) for a, b in RATIO.findall(text)]
+    ratios += [(int(b), int(a)) for a, b in COUNT_OF.findall(text)]
+    if any(r != (passed, total) for r in ratios):
         problems.append("check_count_mismatch")
 
     sentences = summary + [f"{n.title} {n.detail}" for n in notes.risk_notes]
