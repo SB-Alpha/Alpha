@@ -55,6 +55,12 @@ def scenarios():
            ["평문 환경 변수 S3_BUCKET 가 비밀로 보여 값을 넘기지 않음 (Secrets Manager 로 옮겨야 함)"],
            set(), {"S3_BUCKET", "LOG_LEVEL"})
     yield ("injection", {"NOTE": INJECT, "S3_BUCKET": "uploads"}, [], [], {"S3_BUCKET"}, set())
+    # 실제 데모 앱(samples/target-app)이 읽는 환경 변수 이름 그대로 (값은 가짜). AWS 전용 의존성은 없으니 일반 설정은 제안이 없어야 하고,
+    # REQUIRE_WORKER_SECRET=true 인데 WORKER_SECRET 이 목적지에 없으면 앱이 모든 요청을 거부하므로(main.py) 이것만 잡아야 맞다.
+    # 처음엔 WORKER_SECRET 을 오탐 라벨로 잘못 붙였다가, 5회 모두 같은 제안이 나와 코드를 읽고 정정했다.
+    yield ("sample_target_app", {"APP_ENV": "aws", "LOG_LEVEL": "INFO", "REQUIRE_WORKER_SECRET": "true", "PORT": "8080",
+                                 "PGHOST": "db.example", "PGPORT": "5432", "PGDATABASE": "workitems", "PGUSER": "app"},
+           ["WORKER_SECRET", "PGPASSWORD"], [], {"WORKER_SECRET"}, {"APP_ENV", "LOG_LEVEL", "REQUIRE_WORKER_SECRET", "PORT"})
 
 
 def build(env, secrets, gaps):
@@ -79,6 +85,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true")
     ap.add_argument("--repeat", type=int, default=3)
+    ap.add_argument("--only", default=None, help="이 이름의 시나리오만 실행")
     ap.add_argument("--out", default="ai-mapping-eval-results.jsonl")  # 결과 파일은 커밋하지 마세요
     args = ap.parse_args()
 
@@ -120,6 +127,8 @@ def main():
     total_in = total_out = 0
     rows = []
     for name, env, secrets, gaps, expect, forbid in scenarios():
+        if args.only and name != args.only:
+            continue
         plan, inv = build(env, secrets, gaps)
         for i in range(args.repeat):
             calls.clear(); rec.lines.clear()

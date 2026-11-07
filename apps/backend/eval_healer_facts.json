@@ -1,0 +1,222 @@
+[
+ {
+  "scenario": "verification_mismatch",
+  "cond": "with_facts",
+  "i": 0,
+  "by": "ai",
+  "category": "schema",
+  "root_cause": "cutover 단계의 snapshot_compare 단계에서 소스와 타깃 간 데이터 불일치 3건이 검출되어 전환 후 검증(verification=mismatch)이 실패했습니다. traffic_mode가 이미 TARGET으로 전환된 상태(stage_progress 70)이므로, 전환 직전까지 반영되지 않은 변경분 또는 타깃 측 스키마·제약 차이로 인한 데이터 정합성 문제로 추정됩니다(측정값만으로는 원인 확정 불가).",
+  "plan": [
+   "1. 트래픽을 즉시 소스로 되돌리거나 타깃 쓰기를 차단하여 불일치가 확산되지 않도록 한 뒤, snapshot_compare 결과에서 불일치 3건의 대상 테이블과 행(PK)을 식별하십시오.",
+   "2. 해당 행을 소스와 비교해 hold(40ms) 이후 미반영 변경분인지, 타깃의 스키마·제약(타입, 기본값, 트리거, 문자셋 등) 차이로 인한 변환 오류인지 확인하고, 원인에 맞게 누락 데이터를 재동기화하거나 스키마를 수정하십시오.",
+   "3. 복제 지연이 0인지 확인한 후 쓰기 hold 시간을 충분히 확보하여 cutover 단계를 재실행하고, snapshot_compare에서 mismatch가 0이 된 것을 확인한 뒤 트래픽을 TARGET으로 최종 전환하십시오."
+  ],
+  "fact_tokens_cited": [
+   "3",
+   "snapshot",
+   "mismatch",
+   "불일치"
+  ],
+  "stop": "end_turn"
+ },
+ {
+  "scenario": "verification_mismatch",
+  "cond": "with_facts",
+  "i": 1,
+  "by": "ai",
+  "category": "schema",
+  "root_cause": "cutover 단계의 snapshot_compare 검증에서 원본과 대상 간 데이터 불일치 3건(mismatch: 3)이 발견되어 전환 후 검증(verification: mismatch)이 실패했습니다. 트래픽이 이미 TARGET으로 전환된 상태(traffic_mode: TARGET)여서, 쓰기 홀드 전 미반영 변경분 또는 대상 DB의 스키마/제약 차이로 일부 레코드가 다르게 적재되었을 가능성이 있습니다.",
+  "plan": [
+   "즉시 트래픽을 원본(SOURCE)으로 롤백하거나 대상 쓰기를 동결하여, 불일치 상태에서 신규 데이터가 더 쌓이는 것을 차단합니다.",
+   "snapshot_compare 결과에서 불일치 3건의 테이블·키를 식별한 뒤, 원본과 대상의 해당 행과 스키마(컬럼 타입, 기본값, 제약조건, 문자셋)를 비교하여 누락된 변경분인지 구조 차이인지 판별합니다.",
+   "원인에 맞게 대상 스키마를 보정하거나 누락 레코드를 재동기화하고, 복제 지연이 0인 것을 확인한 다음 hold → snapshot_compare 순으로 cutover를 재실행하여 mismatch 0을 검증합니다."
+  ],
+  "fact_tokens_cited": [
+   "3",
+   "snapshot",
+   "mismatch",
+   "불일치"
+  ],
+  "stop": "end_turn"
+ },
+ {
+  "scenario": "verification_mismatch",
+  "cond": "without_facts",
+  "i": 0,
+  "by": "ai",
+  "category": "schema",
+  "root_cause": "cutover 단계에서 전환 후 데이터 검증 결과 원본과 대상 DB 간 데이터 불일치가 확인되어 단계가 실패했습니다. 제공된 측정값(failed_stage_facts)이 없어 불일치 건수나 복제 지연 수치는 확인할 수 없으므로, 전환 직전 미반영 변경분 또는 스키마·제약 차이로 인한 적재 누락 가능성을 우선 의심해야 합니다.",
+  "plan": [
+   "1. 원본과 대상 DB의 테이블별 행 수·체크섬을 비교하여 불일치가 발생한 테이블과 레코드 범위를 특정하고, 복제 로그에서 전환 시점의 미반영 변경분이나 오류 레코드가 있는지 확인합니다.",
+   "2. 불일치 테이블의 스키마(컬럼 타입, 문자셋, 제약조건, 트리거, 시퀀스)를 원본과 대조하여 차이를 수정하고, 누락·변형된 데이터는 재동기화(부분 재적재 또는 CDC 재적용)합니다.",
+   "3. 원본 쓰기를 중단한 상태에서 복제 지연이 0인지 확인한 뒤 cutover 단계를 재실행하고, 전환 후 데이터 검증이 통과하는지 확인합니다. 통과하지 않으면 원본으로 롤백합니다."
+  ],
+  "fact_tokens_cited": [
+   "3",
+   "불일치"
+  ],
+  "stop": "end_turn"
+ },
+ {
+  "scenario": "verification_mismatch",
+  "cond": "without_facts",
+  "i": 1,
+  "by": "ai",
+  "category": "schema",
+  "root_cause": "cutover 단계에서 전환 후 원본과 대상 DB 간 데이터 검증 결과가 불일치하여 실패했습니다. 측정값(failed_stage_facts)이 제공되지 않아 정확한 불일치 테이블·건수는 확인되지 않았으며, 전환 직전 미반영 변경분(복제 지연) 또는 스키마/제약 조건 차이로 인한 데이터 누락·변형이 유력한 원인으로 추정됩니다.",
+  "plan": [
+   "1. 전환 후 검증 리포트를 확인하여 불일치가 발생한 테이블과 행 수(row count), 체크섬 차이를 식별하고, 원본 쓰기 중단(write freeze) 시점과 복제 지연이 0으로 수렴했는지 확인합니다.",
+   "2. 불일치 테이블의 스키마(컬럼 타입, 문자셋/콜레이션, PK·FK·UNIQUE 제약, 트리거, 시퀀스 값)를 원본과 비교하여 차이를 수정하고, 누락·변형된 데이터는 원본 기준으로 재동기화합니다.",
+   "3. 필요 시 원본으로 트래픽을 롤백한 상태에서 복제 지연이 0임을 확인한 뒤 cutover 단계를 재실행하고, 데이터 검증이 모두 일치하는지 확인합니다."
+  ],
+  "fact_tokens_cited": [
+   "3",
+   "불일치"
+  ],
+  "stop": "end_turn"
+ },
+ {
+  "scenario": "lag_timeout",
+  "cond": "with_facts",
+  "i": 0,
+  "by": "ai",
+  "category": "network",
+  "root_cause": "db_migration 단계의 CDC 스트리밍(phase=streaming) 중 복제 지연이 52428800 바이트(약 50MB)에 머물러 있습니다. 타깃이 소스 변경분을 제한 시간 안에 따라잡지 못해 대기 시간이 초과됐고, 진행률 70%에서 실패했습니다. 소스↔타깃 간 네트워크 대역폭·지연 문제 또는 소스 쓰기량 과다가 직접 원인으로 추정됩니다.",
+  "plan": [
+   "1. 소스와 타깃 간 네트워크 상태를 점검합니다. VPN/전용선 대역폭, 패킷 손실, 지연을 확인하고, 복제 인스턴스와 타깃 DB의 CPU·IOPS 포화 여부를 모니터링 지표로 확인합니다.",
+   "2. 복제 지연을 줄이는 조치를 적용합니다. 소스의 대량 배치 작업이나 쓰기 부하를 일시 중지 또는 저부하 시간대로 조정하고, 필요하면 복제 인스턴스 사양을 상향하거나 병렬 적용 설정을 늘립니다. CDC 따라잡기 대기 타임아웃 값도 상향합니다.",
+   "3. replication_lag_bytes가 지속적으로 감소하는지 확인한 뒤 db_migration 단계를 streaming 단계부터 재시도합니다. 지연이 0에 근접하면 전환(cutover)으로 진행합니다."
+  ],
+  "fact_tokens_cited": [
+   "52428800",
+   "50",
+   "MB",
+   "지연",
+   "lag"
+  ],
+  "stop": "end_turn"
+ },
+ {
+  "scenario": "lag_timeout",
+  "cond": "with_facts",
+  "i": 1,
+  "by": "ai",
+  "category": "network",
+  "root_cause": "db_migration 단계의 CDC 스트리밍(phase=streaming) 중 복제 지연이 52428800 바이트(약 50MB)로 해소되지 않아, 대상 DB가 소스 변경분을 제한 시간 내에 따라잡지 못하고 타임아웃이 발생했습니다(진행률 70%). 소스-대상 간 네트워크 대역폭·연결 지연 또는 소스 측 쓰기 부하 과다가 원인으로 추정되며, 정확한 원인 확정에는 추가 확인이 필요합니다.",
+  "plan": [
+   "1. 소스-대상 간 네트워크 경로(VPN/전용선 대역폭, 패킷 손실, 지연 시간)와 CDC 복제 인스턴스의 CPU·메모리·I/O 사용률을 점검하여 병목 지점을 확인합니다.",
+   "2. 소스 DB의 쓰기 부하를 일시적으로 줄이거나(배치 작업 중지 등) 복제 인스턴스 사양·병렬 적용 스레드 수를 상향하고, CDC 따라잡기 대기 타임아웃 값을 늘립니다.",
+   "3. replication_lag_bytes가 지속적으로 감소하는지 모니터링하며 db_migration 단계를 재시도하고, 지연이 0에 근접했을 때 전환(cutover)을 진행합니다."
+  ],
+  "fact_tokens_cited": [
+   "52428800",
+   "50",
+   "MB",
+   "지연",
+   "lag"
+  ],
+  "stop": "end_turn"
+ },
+ {
+  "scenario": "lag_timeout",
+  "cond": "without_facts",
+  "i": 0,
+  "by": "ai",
+  "category": "network",
+  "root_cause": "db_migration 단계에서 CDC(변경 데이터 캡처) 복제가 정해진 대기 시간 안에 원본 DB의 변경분을 따라잡지 못해 시간 초과로 실패했습니다. 입력에 복제 지연 수치(failed_stage_facts)가 없어 정확한 원인은 확정할 수 없으나, 원본-대상 간 네트워크 대역폭·지연 부족 또는 원본의 쓰기 부하 과다로 복제 지연이 해소되지 않은 것으로 추정됩니다.",
+  "plan": [
+   "1. 복제 태스크 모니터링(예: CDC 지연 지표, replication lag)과 원본 DB의 쓰기 TPS를 확인하고, 원본-대상 간 VPN/전용선 대역폭·지연 및 패킷 손실 여부를 점검합니다.",
+   "2. 복제 인스턴스 사양 상향 또는 병렬 적용 스레드 확대 등 복제 처리량을 늘리고, 필요 시 원본의 배치·대량 쓰기 작업을 일시 중지하거나 저부하 시간대로 일정을 조정합니다.",
+   "3. CDC 따라잡기 대기 시간(timeout) 설정을 현실적인 값으로 늘린 뒤, 지연이 0에 수렴하는 것을 확인하고 db_migration 단계를 재실행합니다."
+  ],
+  "fact_tokens_cited": [
+   "지연",
+   "lag"
+  ],
+  "stop": "end_turn"
+ },
+ {
+  "scenario": "lag_timeout",
+  "cond": "without_facts",
+  "i": 1,
+  "by": "ai",
+  "category": "network",
+  "root_cause": "db_migration 단계에서 CDC(변경 데이터 캡처) 복제가 정해진 대기 시간 안에 원본 DB의 변경분을 따라잡지 못해 시간 초과로 실패했습니다. 측정값(failed_stage_facts)이 제공되지 않아 복제 지연 규모를 확정할 수는 없으며, 원본-대상 간 네트워크 대역폭·지연 또는 원본의 높은 쓰기 부하가 주요 원인으로 추정됩니다.",
+  "plan": [
+   "1. 원본 DB와 대상 DB 사이의 네트워크 연결 상태(VPN/전용선 대역폭, 지연, 패킷 손실)와 CDC 복제 태스크의 현재 지연(replication lag) 및 오류 로그를 확인합니다.",
+   "2. 원본 DB의 쓰기 부하가 높은 경우 피크 시간을 피해 작업을 재조정하거나, 복제 인스턴스 사양·병렬도를 상향하고 CDC 따라잡기 대기 시간(timeout) 설정을 늘립니다.",
+   "3. 복제 지연이 안정적으로 감소하여 0에 근접하는 것을 확인한 뒤 db_migration 단계를 재시도합니다."
+  ],
+  "fact_tokens_cited": [
+   "지연",
+   "lag"
+  ],
+  "stop": "end_turn"
+ },
+ {
+  "scenario": "sequence_incomplete",
+  "cond": "with_facts",
+  "i": 0,
+  "by": "ai",
+  "category": "schema",
+  "root_cause": "전환(cutover) 시퀀스에서 hold(30ms)와 sink_stop(200ms) 단계만 기록되고 필수 단계인 sequence_sync가 누락되어 cutover_sequence가 INCOMPLETE 상태로 남았습니다. 이 때문에 전환 증적이 완전하지 않다고 판정되어 단계 진행률 70%에서 실패했습니다. DB 시퀀스 동기화 단계가 실행되지 않았거나 그 결과가 증적에 남지 않은 것으로 판단됩니다.",
+  "plan": [
+   "1. cutover 실행 로그와 오케스트레이터 설정에서 sequence_sync 단계가 비활성화·건너뛰기·오류로 중단되었는지 확인하고, 소스와 타깃 DB의 시퀀스(auto-increment) 현재값을 비교해 실제 불일치 여부를 점검합니다.",
+   "2. 타깃 DB 시퀀스 값을 소스의 최신값 이상으로 동기화(sequence_sync)하고, 그 결과(동기화된 시퀀스 목록과 값)가 전환 증적에 기록되도록 해당 단계 설정을 보완합니다.",
+   "3. sink_stop 이후 상태가 유지되고 있는지 확인한 다음 cutover 단계를 재실행하고, cutover_sequence가 COMPLETE로 표시되는지와 전환 후 검증이 통과하는지 확인합니다."
+  ],
+  "fact_tokens_cited": [
+   "sequence_sync",
+   "시퀀스"
+  ],
+  "stop": "end_turn"
+ },
+ {
+  "scenario": "sequence_incomplete",
+  "cond": "with_facts",
+  "i": 1,
+  "by": "ai",
+  "category": "schema",
+  "root_cause": "전환(cutover) 절차 중 sequence_sync 단계가 수행되지 않아 cutover_sequence가 INCOMPLETE 상태로 남았고, 전환 증적이 불완전하다고 판정되었습니다. 기록된 단계는 hold(30ms)와 sink_stop(200ms)뿐이며, 진행률은 70%에서 멈췄습니다.",
+  "plan": [
+   "1. 전환 실행 로그를 확인하여 sink_stop 이후 sequence_sync 단계가 누락되거나 중단된 원인(스크립트 오류, 권한 부족, 타임아웃 등)을 파악합니다.",
+   "2. 소스 DB와 타깃 DB의 시퀀스/자동증가 값을 비교한 뒤 타깃 시퀀스를 소스의 최신 값 이상으로 동기화하고, 이 작업을 증적으로 기록합니다.",
+   "3. 쓰기 hold 상태를 유지한 채 cutover 단계를 재실행하여 sequence_sync를 포함한 모든 단계가 완료되었는지 확인합니다. cutover_sequence가 COMPLETE로 바뀐 것을 확인한 후 전환 후 검증을 진행합니다."
+  ],
+  "fact_tokens_cited": [
+   "sequence_sync",
+   "시퀀스"
+  ],
+  "stop": "end_turn"
+ },
+ {
+  "scenario": "sequence_incomplete",
+  "cond": "without_facts",
+  "i": 0,
+  "by": "ai",
+  "category": "unknown",
+  "root_cause": "cutover 단계가 '전환 증적이 완전하지 않음' 오류로 실패했습니다. 전환 단계별 기록이나 전환 후 검증 결과 같은 증적 일부가 수집·기록되지 않은 것으로 보이지만, 측정값(failed_stage_facts)이 없어 어떤 증적이 왜 빠졌는지는 특정할 수 없습니다.",
+  "plan": [
+   "1. cutover 단계의 실행 로그와 증적 저장소를 확인해 빠진 항목(복제 단계, 복제 지연 바이트, 전환 단계별 소요 시간·불일치 수, 전환 후 검증 결과 중 무엇인지)을 특정하십시오.",
+   "2. 빠진 증적이 수집 실패(권한 오류, 저장소 쓰기 실패, 검증 작업 미실행 등) 때문인지 확인하고 원인을 조치하십시오. 필요하면 소스·타깃 간 데이터 정합성 검증을 수동으로 실행해 증적을 보완하십시오.",
+   "3. 증적 수집 설정이 정상인지 확인한 뒤 cutover 단계를 재실행하고, 모든 증적 항목이 기록되어 검증을 통과하는지 확인하십시오."
+  ],
+  "fact_tokens_cited": [],
+  "stop": "end_turn"
+ },
+ {
+  "scenario": "sequence_incomplete",
+  "cond": "without_facts",
+  "i": 1,
+  "by": "ai",
+  "category": "unknown",
+  "root_cause": "cutover 단계가 '전환 증적이 완전하지 않음' 오류로 실패했습니다. 전환 증적(측정값·검증 결과)이 누락되었고 failed_stage_facts도 제공되지 않아, 도구 누락·자격 증명·네트워크·스키마 중 어느 원인인지 현재 정보만으로는 특정할 수 없습니다.",
+  "plan": [
+   "1. cutover 단계의 상세 실행 로그를 확보해 증적 수집이 중단된 지점을 확인합니다. 복제 phase, replication_lag_bytes, cutover_steps(단계별 소요 시간·불일치 수), verification 결과 중 무엇이 누락되었는지 점검합니다.",
+   "2. 누락 원인을 분류해 해당 조치를 수행합니다. 수집 도구 미설치·권한 오류·연결 타임아웃·스키마 불일치 중 어느 경우인지 판별해 바로잡고, 소스·타깃 간 데이터 정합성(행 수·체크섬)을 수동으로 검증해 전환 상태를 확정합니다.",
+   "3. 원본 시스템이 정상 서비스 중인지 확인한 뒤 cutover 단계를 재실행합니다. 재실행 결과에 모든 증적(복제 지연, 단계별 소요 시간, 불일치 수, 검증 결과)이 빠짐없이 기록되었는지 확인하고, 증적이 완전할 때만 전환 완료로 승인합니다."
+  ],
+  "fact_tokens_cited": [],
+  "stop": "end_turn"
+ }
+]

@@ -55,8 +55,14 @@ def run(inp: <Module>Input, ctx: RunContext) -> <Module>Output: ...
 | POST | `/runs/{id}/stages/{stage}/manual` | 다음 차례 단계 결과를 수동 입력 (`{"output": {...}}`) |
 | GET | `/runs/{id}/diagnosis` | 실패한 run 의 원인·복구 조치. 전에 풀린 같은 장애면 기억(ReasoningBank)으로 답합니다. 실패가 아니면 `409` |
 | POST | `/runs/{id}/diagnose` | 기억을 건너뛰고 새로 진단 (화면의 [AI 재진단]) |
+| GET | `/runs/{id}/timings` | 단계별 실제 소요 시간(초). 잰 단계의 합과 사람이 승인을 기다린 시간도 함께. 못 잰 단계는 값 없이 `note` 만 (예측하지 않음) |
+| GET | `/runs/stats/timings` | 지난 실행들의 단계별 소요 시간 분포(최소·중앙값·최대·표본 수). 끝까지 성공한 실제 실행만 (모의·수동 입력 run 제외) |
 
 상태가 맞지 않는 명령은 `409`, 없는 run은 `404`, 잘못된 입력은 `422`입니다.
+
+## 소요 시간 (`timings.py`)
+저장된 run 기록(`StageStatus.updated_at`, 승인 기록 `at`)에서 계산하며 예측하지 않습니다. 한 단계의 시작은 앞 단계가 끝난 시각이고, 승인 ①·② 앞 단계는 승인한 시각부터 잽니다 (기다린 시간은 `approval_wait_seconds` 로 따로). 수동 입력 단계·시각이 없거나 순서가 맞지 않는 단계는 값 없이 이유만 남깁니다. 같은 단계를 다시 시도했으면 실패한 시도의 시간도 들어갑니다 (시도별 시각은 저장하지 않음).
+`/runs/stats/timings` 는 "예상"이 아니라 "과거 N회 실측" 으로 보여 주세요. 데이터 크기·클라우드 상태에 따라 달라집니다.
 
 ## 목적지 어댑터 (`target_adapters.py`)
 provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어댑터를 부릅니다. 지금은 `gcp` 만 등록돼 있고 `target_infra` 가 없는 요청도 `gcp` 입니다. 새 클라우드의 계약과 아직 GCP 에 묶인 부분은 `docs/TARGET_ADAPTER_SPEC.md` 에 있습니다.
