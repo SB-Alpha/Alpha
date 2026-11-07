@@ -2,7 +2,8 @@
 
 흐름: source_kind 로 원본 읽기 → 합쳐서 plan.py 판정 → AssessmentOutput (어느 쪽이든 같은 형식)
 - aws(기본): AWS 세션 → db.py(김준석) · app.py(이주호) 동시 조회
-- manual: manual.py 가 사람이 입력한 값으로 같은 형식을 만듦 (GCP·Azure·온프레미스 원본용)
+- gcp · azure: 관리형 PostgreSQL 은 db.py 가 조회(AWS 세션 없음). 앱 정보는 조회하지 않고 manual.app 이 있으면 그 값을 씀
+- manual: manual.py 가 사람이 입력한 값으로 같은 형식을 만듦 (온프레미스 등 자동 조회가 없는 원본용)
 """
 
 from __future__ import annotations
@@ -50,6 +51,10 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
         report(20, "직접 입력한 원본 정보 정리")
         db_res, app_res = manual_part.collect(inp)
         region = inp.manual.region if inp.manual else None
+    elif inp.source_kind in ("gcp", "azure"):
+        report(20, f"원본 {inp.source_kind.upper()} DB 조회")
+        db_res, app_res = _collect_managed_db(inp, gaps)
+        region = db_res.region or (inp.manual.region if inp.manual else None)
     else:
         region = inp.aws_region
         db_res, app_res = _collect_aws(inp, session, report, gaps)
@@ -67,7 +72,7 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
         plan = ai_part.enhance(plan)  # 실패하면 규칙 결과 그대로
 
     source = SourceInfo(
-        account_id=app_res.account_id,
+        account_id=app_res.account_id or db_res.account_id,  # aws 는 STS, gcp·azure 는 프로젝트·구독 (수집기가 채움)
         region=region,
         db=db_res.source_db,
         network=db_res.network,
@@ -80,6 +85,25 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
     # 단계 성공은 run() 반환으로 workflows 가 정합니다. report 는 진행 중 상태만 (PR #22 RunContext)
     report(100, "계획 생성 완료")
     return AssessmentOutput(source=source, plan=plan, gaps=gaps)
+
+
+def _collect_managed_db(inp: AssessmentInput, gaps: list[str]):
+    """GCP·Azure 관리형 PostgreSQL 원본 (source_kind="gcp"|"azure").
+
+    DB·네트워크는 db.py 가 읽습니다(AWS 세션 필요 없음). 앱(이미지·포트·환경 변수)은 ECS 같은 조회가 없어
+    manual.app 이 있으면 그 값을 쓰고, 없으면 이름만 둔 빈 결과로 둡니다 (이미지 확인이 안 되어 승인은 나지 않음).
+    """
+    db_res = _safe("DB·네트워크 조회", lambda: db_part.collect(inp, None), DbAssessment(), gaps)
+    if inp.manual is not None:
+        app_res = _safe("직접 입력 앱 정리", lambda: manual_part.collect(inp)[1],
+                        AppAssessment(facts=AppInfo(service_name=app_part.fallback_name(inp))), gaps)
+    else:
+        app_res = AppAssessment(
+            facts=AppInfo(service_name=app_part.fallback_name(inp)),
+            gaps=[f"{inp.source_kind.upper()} 원본은 앱(이미지·포트·환경 변수)을 조회하지 않음: "
+                  "manual.app 으로 입력해야 이미지 확인과 승인이 가능"],
+        )
+    return db_res, app_res
 
 
 def _collect_aws(inp: AssessmentInput, session: AwsSession | None, report, gaps: list[str]):
