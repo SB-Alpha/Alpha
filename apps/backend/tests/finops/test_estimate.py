@@ -1,0 +1,203 @@
+"""가격 API 응답 모양을 흉내 낸 가짜 응답으로 비용 산출을 확인합니다. 실제 네트워크는 쓰지 않습니다."""
+
+import json
+from datetime import date
+
+import pytest
+
+from app.features.finops import estimate, service
+from app.features.finops.estimate import AwsPrices, AzurePrices, Candidate, CostRequest
+
+TODAY = date(2026, 11, 7)
+
+
+def _req(**overrides) -> CostRequest:
+    base = dict(source_region="ap-northeast-2", app_vcpu=1, app_memory_mib=2048, db_instance_class="db.t3.micro",
+                db_vcpu=2, db_memory_gib=1, db_storage_gb=20,
+                candidates=[Candidate(cloud="gcp", region="asia-northeast3"),
+                            Candidate(cloud="azure", region="koreacentral")])
+    return CostRequest(**{**base, **overrides})
+
+
+# -- AWS: Price List API 응답 모양 (PriceList 원소는 JSON 문자열) ------------------------------------
+
+def _aws_item(usagetype: str, usd: str) -> str:
+    return json.dumps({
+        "product": {"attributes": {"usagetype": usagetype}},
+        "terms": {"OnDemand": {"SKU.T": {"priceDimensions": {"SKU.T.R": {"unit": "Hrs", "pricePerUnit": {"USD": usd}}}}}},
+    })
+
+
+AWS_ROWS = {
+    ("AmazonECS", "cputype"): [_aws_item("APN2-Fargate-vCPU-Hours:perCPU", "0.0465600000"),
+                               _aws_item("APN2-Fargate-ARM-vCPU-Hours:perCPU", "0.0372500000"),
+                               _aws_item("APN2-ECS-EC2-vCPU-Hours", "0.0100000000")],
+    ("AmazonECS", "memorytype"): [_aws_item("APN2-Fargate-GB-Hours", "0.0051100000"),
+                                  _aws_item("APN2-Fargate-ARM-GB-Hours", "0.0040900000")],
+    ("AmazonRDS", "Database Instance"): [_aws_item("APN2-InstanceUsage:db.t3.micro", "0.0280000000"),
+                                         _aws_item("APN2-UnusedBox:db.t3.micro", "0.0280000000")],
+    ("AmazonRDS", "Database Storage"): [_aws_item("APN2-RDS:GP3-Storage", "0.1310000000")],
+}
+
+
+class FakePricingClient:
+    def __init__(self, rows=AWS_ROWS):
+        self.rows, self.calls = rows, []
+
+    def get_paginator(self, name):
+        assert name == "get_products"
+        return self
+
+    def paginate(self, ServiceCode, Filters, FormatVersion):
+        self.calls.append((ServiceCode, {f["Field"]: f["Value"] for f in Filters}))
+        fields = {f["Field"]: f["Value"] for f in Filters}
+        key = (ServiceCode, fields.get("productFamily") or next(k for k in ("cputype", "memorytype") if k in fields))
+        yield {"PriceList": self.rows.get(key, [])}
+
+
+def test_aws_prices_pick_linux_fargate_and_single_az_rds():
+    cost = AwsPrices(FakePricingClient()).cost(_req(), "aws-price-list-api 2026-11-07")
+    app, db, storage = (line.monthly_usd for line in cost.lines)
+    assert app == round(730 * (1 * 0.04656 + 2 * 0.00511), 2)  # ARM·EC2 행은 고르지 않음
+    assert db == round(730 * 0.028, 2)  # UnusedBox 행은 빼고 한 건
+    assert storage == round(20 * 0.131, 2)
+    assert all("aws-price-list-api 2026-11-07" in line.source for line in cost.lines)
+
+
+def test_aws_ambiguous_price_is_not_guessed():
+    rows = {**AWS_ROWS, ("AmazonRDS", "Database Instance"): [
+        _aws_item("APN2-InstanceUsage:db.t3.micro", "0.028"), _aws_item("APN2-InstanceUsage:db.t3.micro", "0.031")]}
+    db = AwsPrices(FakePricingClient(rows)).cost(_req(), "aws").lines[1]
+    assert db.monthly_usd is None and "조회 실패: PriceUnavailable" in db.source
+
+
+def test_aws_unknown_instance_class_is_not_provided():
+    db = AwsPrices(FakePricingClient()).cost(_req(db_instance_class=None), "aws").lines[1]
+    assert db.monthly_usd is None and "등급 미제공" in db.source
+
+
+# -- Azure: Retail Prices API 응답 모양 ------------------------------------------------------------
+
+def _az(meter: str, price: float, kind: str = "Consumption", product: str = "p") -> dict:
+    return {"retailPrice": price, "type": kind, "productName": product, "meterName": meter}
+
+
+def fake_azure_query(odata_filter: str) -> list[dict]:
+    if "Standard vCPU Active Usage" in odata_filter:
+        return [_az("Standard vCPU Active Usage", 0.000024)]
+    if "Standard Memory Active Usage" in odata_filter:
+        return [_az("Standard Memory Active Usage", 0.000003)]
+    if "armSkuName eq 'B2S'" in odata_filter:
+        return [_az("B2S", 0.104), _az("B2S", 1240.0, kind="Reservation")]  # 예약 행은 기간 전체 금액
+    if "Flex Server Storage" in odata_filter:
+        return [_az("Storage Data Stored", 0.131)]
+    return []
+
+
+def test_azure_prices_use_consumption_rows_only():
+    cost = AzurePrices(fake_azure_query).cost(_req(), "koreacentral", "azure-retail-prices-api 2026-11-07")
+    app, db, storage = (line.monthly_usd for line in cost.lines)
+    assert app == round(730 * 3600 * (1 * 0.000024 + 2 * 0.000003), 2)
+    assert db == round(730 * 0.104, 2)
+    assert storage == round(20 * 0.131, 2)
+    assert "B2S" in cost.lines[1].source
+
+
+@pytest.mark.parametrize(("vcpu", "mem", "sku"), [
+    (1, 1, "B1MS"), (2, 1, "B2S"), (2, 8, "Standard_B2ms"), (4, 8, "Standard_D4ds_v5"), (64, 512, None), (None, 4, None),
+])
+def test_azure_db_size_maps_to_the_smallest_sku_that_fits(vcpu, mem, sku):
+    assert estimate.azure_pg_sku(vcpu, mem) == sku
+
+
+def test_region_names_are_checked_before_going_into_a_filter():
+    def must_not_run(_):
+        raise AssertionError("query must not run")
+
+    line = AzurePrices(must_not_run).cost(_req(app_vcpu=1), "x' or 1 eq 1", "azure").lines[0]
+    assert line.monthly_usd is None and "ValueError" in line.source
+
+
+# -- 전체 흐름 ----------------------------------------------------------------------------------
+
+class FakeGcp:
+    def cost(self, req, region, source):
+        from app.features.finops.schemas import CloudCost, CostLine
+        return CloudCost(cloud="gcp", region=region, lines=[
+            CostLine(item=estimate.APP, monthly_usd=50.0, source=source),
+            CostLine(item=estimate.DB, monthly_usd=None, source=f"{source} (조회 실패: RuntimeError)"),
+            CostLine(item=estimate.STORAGE, monthly_usd=3.4, source=source),
+        ])
+
+
+def test_build_input_feeds_the_report_and_a_failed_lookup_blocks_the_saving():
+    inp = estimate.build_input(_req(), aws=AwsPrices(FakePricingClient()), gcp=FakeGcp(),
+                               azure=AzurePrices(fake_azure_query), today=TODAY)
+    assert [c.cloud for c in inp.candidates] == ["gcp", "azure"]
+    assert inp.current.lines[0].source.startswith("aws-price-list-api 2026-11-07")
+    report = service.run(inp)
+    gcp, azure = report.savings
+    assert gcp.monthly_saving_usd is None and gcp.missing == ["gcp DB 컴퓨팅"]  # 조회 실패는 0 이 아니라 미제공
+    assert azure.complete and azure.monthly_saving_usd is not None
+
+
+def test_unsupported_cloud_is_reported_as_not_provided():
+    inp = estimate.build_input(_req(candidates=[Candidate(cloud="oci", region="ap-seoul-1")]),
+                               aws=AwsPrices(FakePricingClient()), today=TODAY)
+    assert all(line.monthly_usd is None for line in inp.candidates[0].lines)
+
+
+# -- GCP: Cloud Billing Catalog 응답 모양 -------------------------------------------------------------
+
+def _sku(description: str, region: str, units: str, nanos: int, tiers: int = 1) -> dict:
+    rates = [{"startUsageAmount": 0, "unitPrice": {"units": units, "nanos": nanos}}]
+    if tiers == 2:
+        rates = [{"startUsageAmount": 0, "unitPrice": {"units": "0", "nanos": 0}}, *rates]
+    return {"description": description, "serviceRegions": [region], "category": {"usageType": "OnDemand"},
+            "pricingInfo": [{"pricingExpression": {"tieredRates": rates}}]}
+
+
+GCP_SKUS = {
+    estimate.GCP_CLOUD_RUN: [
+        _sku("Services CPU (Instance-based billing) in asia-northeast3", "asia-northeast3", "0", 21600),
+        _sku("Services Memory (Instance-based billing) in asia-northeast3", "asia-northeast3", "0", 2400),
+        _sku("Instances CPU in asia-northeast3", "asia-northeast3", "0", 99999),  # 다른 자원
+        _sku("Services CPU (Instance-based billing) in asia-northeast1", "asia-northeast1", "0", 18000),
+    ],
+    estimate.GCP_CLOUD_SQL: [
+        _sku("Cloud SQL for PostgreSQL: Zonal - vCPU in Seoul", "asia-northeast3", "0", 53700000),
+        _sku("Cloud SQL for Postgres: Zonal - RAM in Seoul", "asia-northeast3", "0", 9100000),
+        _sku("Cloud SQL for PostgreSQL: Zonal - Standard storage in Seoul", "asia-northeast3", "0", 221000000),
+        _sku("Cloud SQL for PostgreSQL: Regional - vCPU in Seoul", "asia-northeast3", "0", 107400000),  # HA
+        _sku("FDC Trial in Seoul: Cloud SQL for PostgreSQL: Zonal - vCPU", "asia-northeast3", "0", 53700000),
+    ],
+}
+
+
+def test_gcp_prices_pick_instance_based_cloud_run_and_zonal_cloud_sql():
+    calls = []
+
+    def list_skus(service):
+        calls.append(service)
+        return GCP_SKUS[service]
+
+    cost = estimate.GcpPrices(list_skus).cost(_req(db_memory_gib=8), "asia-northeast3", "gcp")
+    app, db, storage = (line.monthly_usd for line in cost.lines)
+    assert app == round(730 * 3600 * (1 * 0.0000216 + 2 * 0.0000024), 2)
+    assert db == round(730 * (2 * 0.0537 + 8 * 0.0091), 2)
+    assert storage == round(20 * 0.221, 2)
+    assert sorted(calls) == sorted(set(calls))  # 서비스마다 한 번만 받아 둠 (Cloud SQL 은 2만 건)
+
+
+def test_gcp_free_tier_or_missing_region_is_not_guessed():
+    skus = {**GCP_SKUS, estimate.GCP_CLOUD_RUN: [
+        _sku("Services CPU (Instance-based billing) in asia-northeast3", "asia-northeast3", "0", 21600, tiers=2)]}
+    cost = estimate.GcpPrices(skus.__getitem__).cost(_req(), "asia-northeast3", "gcp")
+    assert cost.lines[0].monthly_usd is None
+    other = estimate.GcpPrices(GCP_SKUS.__getitem__).cost(_req(), "europe-west1", "gcp")
+    assert all(line.monthly_usd is None for line in other.lines)
+
+
+def test_gcp_uses_the_api_key_when_set(monkeypatch):
+    monkeypatch.setenv(estimate.GCP_KEY_ENV, "k")
+    assert estimate._gcp_auth_header() == ({"key": "k"}, {})
