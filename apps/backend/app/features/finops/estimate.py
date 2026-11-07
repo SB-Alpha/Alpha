@@ -19,9 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 
-from pydantic import BaseModel, Field
-
-from .schemas import CloudCost, CostLine, FinopsInput
+from .schemas import Candidate, CloudCost, CostLine, CostRequest, FinopsInput
 
 log = logging.getLogger(__name__)
 
@@ -29,25 +27,6 @@ HOURS_PER_MONTH = 730
 APP = "앱 컴퓨팅"
 DB = "DB 컴퓨팅"
 STORAGE = "DB 스토리지"
-
-
-class Candidate(BaseModel):
-    cloud: str  # "gcp" | "azure"
-    region: str  # 예: "asia-northeast3", "koreacentral"
-
-
-class CostRequest(BaseModel):
-    """비용을 낼 때 필요한 크기. assessment 결과에서 채웁니다. 모르면 None."""
-
-    source_region: str  # 원본 AWS 리전. 예: "ap-northeast-2"
-    app_vcpu: float | None = None
-    app_memory_mib: int | None = None
-    app_instances: int = Field(default=1, ge=1)  # 항상 떠 있는 인스턴스 수. assessment 가 아직 안 읽음
-    db_instance_class: str | None = None  # 원본 RDS 등급. 예: "db.t3.micro"
-    db_vcpu: int | None = None
-    db_memory_gib: float | None = None
-    db_storage_gb: int | None = None
-    candidates: list[Candidate] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)

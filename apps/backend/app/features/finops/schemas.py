@@ -65,3 +65,32 @@ class FinopsReport(BaseModel):
     summary: list[str]  # 승인자용 문장. 항상 코드가 씁니다
     notes: list[str] = Field(default_factory=list)  # 주의점. 규칙 주의점이 먼저, AI 설명은 그 뒤
     summary_source: Literal["rules", "ai"] = "rules"  # "ai" 면 notes 끝에 AI 설명이 붙었다는 뜻
+
+
+# -- 비용 산출 입력 (estimate.py: 크기 × 가격 API 단가 → FinopsInput) -----------------------------------
+
+
+class Candidate(BaseModel):
+    cloud: str  # "gcp" | "azure"
+    region: str  # 예: "asia-northeast3", "koreacentral"
+
+
+class CostRequest(BaseModel):
+    """비용을 낼 때 필요한 크기. assessment 결과에서 채웁니다. 모르면 None."""
+
+    source_region: str  # 원본 AWS 리전. 예: "ap-northeast-2"
+    app_vcpu: float | None = None
+    app_memory_mib: int | None = None
+    app_instances: int = Field(default=1, ge=1)  # 항상 떠 있는 인스턴스 수. assessment 가 아직 안 읽음
+    db_instance_class: str | None = None  # 원본 RDS 등급. 예: "db.t3.micro"
+    db_vcpu: int | None = None
+    db_memory_gib: float | None = None
+    db_storage_gb: int | None = None
+    candidates: list[Candidate] = Field(default_factory=list)
+
+
+class FinopsEstimate(BaseModel):
+    """POST /finops/estimate 결과: 가격 API 로 만든 비용 항목(input)과 그 비교(report)."""
+
+    input: FinopsInput
+    report: FinopsReport

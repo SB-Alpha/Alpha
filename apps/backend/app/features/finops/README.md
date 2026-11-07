@@ -2,7 +2,7 @@
 
 이전 후보별 월 비용을 비교해서 절감액을 계산하고, 승인자가 읽을 제안 문장을 붙이는 모듈입니다.
 
-- 비용 계산(사용량·단가·Infracost 등): 박준서
+- 비용 산출(`estimate.py`): 크기 × 각 클라우드 공식 가격 API 단가. 처음 구현 이주호, 이후 박준서님과 함께
 - 절감 계산·설명 문장(규칙 + AI): 이주호
 
 ## 원칙
@@ -17,6 +17,25 @@
   - 원본이나 후보에 금액이 빠진 항목이 있을 때. 원본 합계도 "현재 월 비용" 대신 "미제공 (아는 항목 합계 …)" 로 씁니다.
   - 원본에 있는 항목이 후보 견적에 통째로 없을 때. 항목은 `item` 이름으로 맞추므로 원본·후보가 같은 이름을 써야 합니다.
 - **금액은 0 이상인 유한한 수만 받습니다.** NaN·무한대·음수는 입력 검사에서 거절합니다.
+
+## 비용 산출 (`estimate.py`, `POST /finops/estimate`)
+
+크기(`CostRequest`)를 받아 항목 3개(앱 컴퓨팅 · DB 컴퓨팅 · DB 스토리지)의 월 비용을 가격 API 단가로 냅니다.
+월 환산은 730시간, 금액마다 `source` 에 API 이름과 조회 날짜를 남깁니다.
+
+| 클라우드 | 가격 API | 고르는 단가 | 인증 |
+|---|---|---|---|
+| AWS (원본) | Price List Query API (`pricing:GetProducts`, us-east-1) | Fargate Linux/x86 vCPU·GB 시간, RDS PostgreSQL Single-AZ 등급별 시간, gp3 GB-월 | boto3 기본 경로 (AWS 로그인) |
+| GCP | Cloud Billing Catalog API | Cloud Run 인스턴스 기반(항상 켜짐) vCPU·GiB 초, Cloud SQL Enterprise 단일 영역 vCPU·RAM 시간, SSD GiB-월 | `ALPHA_GCP_PRICING_API_KEY` 또는 ADC |
+| Azure | Retail Prices API | Container Apps 활성 vCPU·GiB 초, PostgreSQL Flexible 등급별 시간(크기 이상 가장 작은 등급), Storage GB-월 | 없음 |
+
+가정과 한계 (화면·발표에서 같이 밝힐 것)
+- 앱은 항상 떠 있는 인스턴스 `app_instances` 개(기본 1)로 셉니다. 요청 기반 과금·자동 축소는 반영하지 않습니다.
+- 무료 할당량·약정 할인·예약 할인은 빼지 않습니다 (결제 계정 단위라 이 앱 몫을 알 수 없음).
+- 네트워크 송신, 백업, 로드밸런서, 고가용성(Multi-AZ·Regional)은 아직 넣지 않았습니다.
+- GCP·Azure DB 는 원본과 같은 vCPU·메모리로 셉니다. Cloud SQL 은 vCPU 당 메모리 범위 제한이 있어 실제 등급과 다를 수 있습니다.
+- 단가가 0건이거나 애매하게 여러 건 걸리면 추측하지 않고 그 항목을 "미제공" 으로 둡니다.
+- 원본 RDS 등급(`db_instance_class`)은 assessment 결과에 아직 없어서 호출하는 쪽이 넣어야 합니다. 없으면 AWS DB 는 미제공.
 
 ## 입력 / 출력
 
@@ -34,7 +53,8 @@
 | `schemas.py` | 계약 |
 | `service.py` | `run(inp, ctx)`: 절감 계산 → 규칙 문장·주의점 → (켜져 있으면) AI 설명 덧붙이기 |
 | `ai.py` | Claude 설명 + 숫자·비용 판단 검사 |
-| `router.py` | `POST /finops/report`. 계약 확정 전이라 `main.py` 에 아직 등록하지 않음 |
+| `estimate.py` | 가격 API 단가로 비용 항목 만들기 |
+| `router.py` | `POST /finops/estimate`(가격 API) · `POST /finops/report`(이미 있는 비용, 수동 입력 포함) |
 
 예시 입력: `tests/finops/fixtures/finops_input.sample.json` (금액은 테스트용 예시이고 실제 단가가 아닙니다)
 

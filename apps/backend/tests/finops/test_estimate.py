@@ -201,3 +201,23 @@ def test_gcp_free_tier_or_missing_region_is_not_guessed():
 def test_gcp_uses_the_api_key_when_set(monkeypatch):
     monkeypatch.setenv(estimate.GCP_KEY_ENV, "k")
     assert estimate._gcp_auth_header() == ({"key": "k"}, {})
+
+
+def test_estimate_api_returns_the_priced_lines_and_the_report(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    real_build = estimate.build_input
+
+    def fake_build(req):
+        return real_build(req, aws=AwsPrices(FakePricingClient()), gcp=FakeGcp(),
+                                    azure=AzurePrices(fake_azure_query), today=TODAY)
+
+    monkeypatch.setattr(estimate, "build_input", fake_build)
+    body = _req().model_dump(mode="json")
+    res = TestClient(create_app()).post("/finops/estimate", json=body)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["input"]["current"]["cloud"] == "aws"
+    assert [s["cloud"] for s in data["report"]["savings"]] == ["gcp", "azure"]
