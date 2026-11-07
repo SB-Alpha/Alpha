@@ -72,3 +72,36 @@ def test_deploy_app_tells_the_worker_only_when_worker_url_is_set(seen, monkeypat
     AwsTargetAdapter().deploy_app("mig-1", {}, None, Ctx())
 
     assert seen["deploy_app"][0].update_worker_target is True
+
+
+class RecordingCtx:
+    def __init__(self):
+        self.messages: list[str] = []
+
+    def report(self, state, progress, metrics=None, message=None):
+        self.messages.append(message or "")
+
+
+def test_a_gcp_region_from_the_request_default_is_dropped_so_the_aws_default_applies(seen):
+    # 요청에 리전이 없으면 target_region 기본값(asia-northeast3)이 조사 결과로 흘러온다
+    ctx = RecordingCtx()
+    AwsTargetAdapter().provision("mig-1", {"service_name": "target-app", "region": "asia-northeast3"}, None, ctx)
+
+    assert "region" not in seen["run"][0].target_infra
+    assert any("asia-northeast3" in message and "ap-northeast-2" in message for message in ctx.messages)
+
+
+@pytest.mark.parametrize("region", ["ap-northeast-2", "us-east-1", "eu-central-1", "us-gov-west-1"])
+def test_an_aws_region_is_kept(seen, region):
+    ctx = RecordingCtx()
+    AwsTargetAdapter().provision("mig-1", {"service_name": "target-app", "region": region}, None, ctx)
+
+    assert seen["run"][0].target_infra["region"] == region
+    assert ctx.messages == []
+
+
+def test_an_explicit_gcp_region_in_the_config_is_also_dropped(seen):
+    config = TargetInfraConfig(provider="aws", region="koreacentral")
+    AwsTargetAdapter().deploy_app("mig-1", {"service_name": "target-app"}, config, RecordingCtx())
+
+    assert "region" not in seen["deploy_app"][0].target_infra

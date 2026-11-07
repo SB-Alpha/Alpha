@@ -8,6 +8,8 @@ from app.core.secrets import resolve
 from app.features.provisioning.providers import (
     AWS,
     FARGATE_SIZES,
+    LIVENESS_PATH,
+    READINESS_PATH,
     aws_adapt,
     get_provider,
     terraform_dir,
@@ -162,8 +164,25 @@ def test_translation_explains_what_it_changed_and_what_it_capped():
 
     assert changed and "Fargate 규칙에 맞췄습니다" in changed[0]
     assert same == []
-    assert (capped_infra["cpu"], capped_infra["memory"]) == (4.0, 30720)
+    assert (capped_infra["cpu"], capped_infra["memory"]) == (4.0, 8192)  # cpu 만 넘었으니 메모리는 4 vCPU 의 최솟값
     assert capped and "한도를 넘어" in capped[0]
+
+
+@pytest.mark.parametrize(
+    ("cpu", "memory", "expected"),
+    [
+        (8, 512, (4.0, 8192)),  # cpu 만 한도를 넘음: cpu 는 4, 메모리는 그 cpu 의 최솟값 (최대로 올리지 않음)
+        (8, 20000, (4.0, 20480)),  # 메모리는 요청한 값을 덮는 가장 작은 값
+        (2, 99999, (4.0, 30720)),  # 메모리만 한도를 넘음: 메모리를 한도로, 그러려면 4 vCPU 가 필요함
+        (16, 99999, (4.0, 30720)),  # 둘 다 넘음
+    ],
+)
+def test_only_the_axis_over_the_limit_is_capped(cpu, memory, expected):
+    infra, notes = aws_adapt({"cpu": cpu, "memory": memory})
+
+    assert (infra["cpu"], infra["memory"]) == expected
+    assert infra["memory"] in dict(FARGATE_SIZES)[infra["cpu"]]
+    assert notes and "한도를 넘어" in notes[0]
 
 
 def test_unknown_size_is_left_to_the_terraform_defaults():
@@ -250,3 +269,74 @@ def test_aws_deploy_app_turns_the_app_on_with_the_same_translated_size():
         "service_name": "target-app", "cpu": 1.0, "memory": 2048, "aws_account_id": ACCOUNT, "deploy_app": True,
     }
     assert result.healthy is True and result.app_url == "http://target-app-123.ap-northeast-2.elb.amazonaws.com"
+
+
+# ---------------------------------------------------------------------------
+# ALB 상태 확인 경로는 live (DB 까지 보는 ready 를 쓰면 DB 가 잠깐 막힐 때 정상 태스크가 교체된다)
+# ---------------------------------------------------------------------------
+
+
+def test_the_readiness_path_is_replaced_by_the_liveness_path_for_the_alb():
+    infra, notes = aws_adapt({"health_check_path": READINESS_PATH, "cpu": 1, "memory": 2048})
+
+    assert infra["health_check_path"] == LIVENESS_PATH == "/health/live"
+    assert any(READINESS_PATH in note and LIVENESS_PATH in note for note in notes)
+
+
+def test_the_path_is_replaced_even_when_the_plan_has_no_app_size():
+    infra, notes = aws_adapt({"health_check_path": READINESS_PATH})
+
+    assert infra == {"health_check_path": LIVENESS_PATH}
+    assert len(notes) == 1
+
+
+@pytest.mark.parametrize("path", ["/health/live", "/healthz", "/api/ping", "/"])
+def test_a_path_that_is_not_the_readiness_path_is_left_alone(path):
+    infra, notes = aws_adapt({"health_check_path": path})
+
+    assert infra["health_check_path"] == path
+    assert notes == []
+
+
+def test_a_missing_path_is_left_to_the_terraform_default():
+    infra, _ = aws_adapt({"cpu": 1, "memory": 2048})
+
+    assert "health_check_path" not in infra
+
+
+def test_aws_provisioning_sends_the_liveness_path_to_terraform_even_if_the_plan_says_ready():
+    tf = FakeTerraform(outputs=aws_outputs())
+    infra = {"service_name": "target-app", "health_check_path": READINESS_PATH}
+
+    run(aws_input(target_infra=infra), FakeContext(), terraform=tf)
+
+    assert tf.var_values["health_check_path"] == LIVENESS_PATH
+
+
+def test_the_terraform_default_path_is_the_same_liveness_path():
+    text = (AWS.terraform_dir / "variables.tf").read_text(encoding="utf-8")
+    match = re.search(r'variable "health_check_path" \{.*?default\s*=\s*"([^"]+)"', text, re.DOTALL)
+
+    assert match, "infra/terraform/aws/variables.tf 에서 health_check_path 기본값을 찾지 못했습니다"
+    assert match.group(1) == LIVENESS_PATH
+
+
+def test_the_memory_combinations_in_code_are_the_ones_the_terraform_accepts():
+    # infra/terraform/aws 의 memory 검증 목록이 바뀌면 이 테스트가 실패해서 FARGATE_SIZES 도 같이 고치게 한다.
+    text = (AWS.terraform_dir / "variables.tf").read_text(encoding="utf-8")
+    block = text[text.index('variable "memory"'):]
+    block = block[: block.index("error_message")]
+    accepted = {
+        float(vcpu): tuple(int(number) for number in numbers.split(",") if number.strip())
+        for vcpu, numbers in re.findall(r'"([0-9.]+)"\s*=\s*\[([0-9,\s]+)\]', block)
+    }
+
+    assert accepted, "infra/terraform/aws/variables.tf 에서 memory 검증 목록을 찾지 못했습니다"
+    assert accepted == dict(FARGATE_SIZES)
+
+
+def test_a_size_exactly_at_the_limit_is_not_reported_as_over_it():
+    infra, notes = aws_adapt({"cpu": 4, "memory": 30720})
+
+    assert (infra["cpu"], infra["memory"]) == (4.0, 30720)
+    assert notes == []

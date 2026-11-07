@@ -252,7 +252,7 @@ def test_azure_login_uses_the_fixed_user_and_the_az_token():
     assert destination_login.__name__  # 등록된 목적지 로그인 목록에도 있다
     from app.features.provisioning.image_transfer import DESTINATION_LOGINS
 
-    assert {"gcp", "azure"} <= set(DESTINATION_LOGINS)
+    assert set(DESTINATION_LOGINS) == {"gcp", "azure", "aws"}  # 새 목적지를 붙일 때 이 검사도 함께 고치게 한다
 
 
 def _fake_run(returncode=0, stdout="TOKEN\n", raises=None):
