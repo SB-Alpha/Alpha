@@ -168,19 +168,23 @@ aws rds modify-db-parameter-group \
   --region ap-northeast-2
 
 # 3. RDS 인스턴스 생성 (테스트용 프리티어 db.t3.micro 또는 db.t4g.micro)
+# 비밀번호는 직접 정해 환경변수로만 둡니다. 공개 저장소이므로 문서나 코드에 적지 마세요.
+read -rs SOURCE_DB_PASSWORD && export SOURCE_DB_PASSWORD
 aws rds create-db-instance \
   --db-instance-identifier target-db \
   --db-instance-class db.t4g.micro \
   --engine postgres \
   --engine-version 16.3 \
   --master-username postgres \
-  --master-user-password "CloudmorphPass123!" \
+  --master-user-password "$SOURCE_DB_PASSWORD" \
   --allocated-storage 20 \
   --db-name app_db \
   --db-parameter-group-name pg16-cdc-group \
-  --publicly-accessible \
+  --no-publicly-accessible \
   --region ap-northeast-2
 ```
+
+> 원본 RDS 는 퍼블릭 액세스를 끕니다. assessment 는 bastion(SSM 터널)으로 접속하고, bastion 이 없으면 DB 조회를 건너뛰어 gaps 에 남깁니다 (`apps/backend/app/features/assessment/README.md`).
 
 #### 2) ECS 클러스터 및 Fargate 서비스(`target-app`) 생성
 ```bash
@@ -317,57 +321,21 @@ Cloudmorph 백엔드는 보안을 위해 평문 비밀번호나 민감한 클라
 ---
 
 ### 4.2 원클릭 Python 등록 스크립트
-아래 스크립트를 실행하여 테스트용 공용 참조(`secret://default/...`)와 실행 전용 참조(`secret://mig/...`)를 백엔드 암호화 스토어에 즉시 등록합니다:
+`apps/backend/scripts/register_secrets.py` 로 테스트용 공용 참조(`secret://default/...`)를 백엔드 암호화 스토어에 등록합니다. 실행 전용 참조는 `--run-id mig` 처럼 접두어를 줍니다.
 
-```python
-# register_secrets.py
-import json
-import os
-import sys
-from pathlib import Path
+값은 인자, 환경변수 순으로 읽고, 없으면 터미널에서 묻습니다. 터미널이 아니면 아무것도 저장하지 않고 오류로 끝납니다.
 
-# backend 패키지 경로 추가
-sys.path.insert(0, "/Users/pj/dev/softbank-cloudmorph-next/apps/backend")
-from app.core.secrets import put_secret
+| 값 | 환경변수 |
+| :--- | :--- |
+| 원본 RDS 비밀번호 (2.4 에서 정한 값) | `SOURCE_DB_PASSWORD` |
+| 대상 Cloud SQL 초기 관리자 비밀번호 | `TARGET_DB_PASSWORD` |
+| AWS 키 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
+| GCP 서비스 계정 키 파일 경로 (기본 `~/.config/gcloud/cloudmorph-sa-key.json`) | `GOOGLE_APPLICATION_CREDENTIALS` |
 
-# 1. AWS 자격증명 (본인의 AWS Key 입력)
-aws_key_id = os.getenv("AWS_ACCESS_KEY_ID", "AKIA...")
-aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY", "...")
-
-put_secret("default/source-cloud", {
-    "aws_access_key_id": aws_key_id,
-    "aws_secret_access_key": aws_secret
-})
-
-# 2. RDS DB 관리자 계정
-put_secret("default/source-db-admin", {
-    "user": "postgres",
-    "password": "CloudmorphPass123!"
-})
-
-# 3. GCP 자격증명
-key_path = Path.home() / ".config/gcloud/cloudmorph-sa-key.json"
-if key_path.exists():
-    with open(key_path) as f:
-        put_secret("default/target-cloud", {"credentials_json": f.read()})
-
-# 4. Cloud SQL 대상 관리자 초기 계정
-put_secret("default/target-admin", {
-    "user": "postgres",
-    "password": "CloudmorphTargetPass456!"
-})
-
-print("✅ 모든 secret:// 참조가 성공적으로 등록되었습니다:")
-print(" - secret://default/source-cloud")
-print(" - secret://default/source-db-admin")
-print(" - secret://default/target-cloud")
-print(" - secret://default/target-admin")
-```
-
-터미널에서 바로 실행:
+터미널에서 바로 실행 (저장소 루트 기준):
 ```bash
-cd /Users/pj/dev/softbank-cloudmorph-next/apps/backend
-uv run python register_secrets.py
+cd apps/backend
+uv run python scripts/register_secrets.py
 ```
 
 ---
