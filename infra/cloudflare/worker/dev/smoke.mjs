@@ -11,7 +11,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function control(path, body, { token = TOKEN } = {}) {
   const res = await fetch(`${BASE}/control/${path}`, {
-    method: body === undefined && (path === "status" || path === "target") ? "GET" : "POST",
+    method: body === undefined && (path === "status" || path === "target" || path === "arbitrage") ? "GET" : "POST",
     headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -285,6 +285,49 @@ await check("request_counts: 원본에 닿지 못하면 실패로 센다", async
   const { request_counts: counts } = (await control("status")).body;
   assert.equal(counts.write_total, 1);
   assert.equal(counts.write_failed, 1);
+});
+
+await check("arbitrage: 동적 차익거래 설정, 읽기 우회, 쓰기 마스터 펜싱, 복제 지연 세이프가드", async () => {
+  await control("reset", {});
+  // 1. 기본 상태 조회
+  const init = await control("arbitrage");
+  assert.equal(init.status, 200);
+  assert.equal(init.body.enabled, false);
+
+  // 2. 차익거래 활성화 (문자열 'true' 입력 및 current_lag_bytes: 0)
+  const setRes = await control("arbitrage", { enabled: "true", read_target_weight: 1.0, max_lag_bytes: 1024, current_lag_bytes: 0 });
+  assert.equal(setRes.status, 200);
+  assert.equal(setRes.body.enabled, true);
+  assert.equal(setRes.body.read_target_weight, 1.0);
+
+  // 3. 읽기 요청: TARGET으로 우회되고 X-Arbitrage 헤더 부여
+  const readRes = await fetch(BASE + "/");
+  assert.equal(readRes.headers.get("x-gate-origin"), "TARGET");
+  assert.equal(readRes.headers.get("x-arbitrage"), "true");
+
+  // 4. 쓰기 요청: 읽기 우회가 켜져 있어도 항상 SOURCE(마스터)로 100% 펜싱
+  const writeRes = await fetch(BASE + "/", { method: "POST", body: "{}" });
+  assert.equal(writeRes.headers.get("x-gate-origin"), "SOURCE");
+  assert.equal(writeRes.headers.get("x-arbitrage"), null);
+
+  // 5. 복제 지연 세이프가드 (Fail-Closed):
+  // 5-1. 제어 평면의 CDC lag가 1024B를 넘으면 즉시 SOURCE로 펜싱
+  await control("arbitrage", { enabled: true, read_target_weight: 1.0, max_lag_bytes: 1024, current_lag_bytes: 4096 });
+  const laggedControlRead = await fetch(BASE + "/");
+  assert.equal(laggedControlRead.headers.get("x-gate-origin"), "SOURCE");
+  assert.equal(laggedControlRead.headers.get("x-arbitrage"), null);
+
+  // 5-2. 제어 평면 lag가 정상이더라도 클라이언트가 보고한 지연이 크면 보수적으로 SOURCE로 펜싱
+  await control("arbitrage", { enabled: true, read_target_weight: 1.0, max_lag_bytes: 1024, current_lag_bytes: 100 });
+  const laggedClientRead = await fetch(BASE + "/", {
+    headers: { "X-Replication-Lag-Bytes": "2048" },
+  });
+  assert.equal(laggedClientRead.headers.get("x-gate-origin"), "SOURCE");
+  assert.equal(laggedClientRead.headers.get("x-arbitrage"), null);
+
+  // 6. enabled: "false" 입력 시 확실히 비활성화되는지 검증
+  await control("arbitrage", { enabled: "false" });
+  assert.equal((await control("arbitrage")).body.enabled, false);
 });
 
 await control("reset", {});

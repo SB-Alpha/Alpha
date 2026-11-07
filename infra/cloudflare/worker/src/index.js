@@ -70,6 +70,15 @@ async function control(request, url, gate, env) {
     return respond(await gate.setTarget({ url: parsed.url }));
   }
 
+  // 동적 차익거래 제어 명령: GET 조회, POST 설정
+  if (command === "arbitrage") {
+    if (request.method === "GET") return respond(await gate.getArbitrage());
+    if (request.method !== "POST") return error(405, "method not allowed");
+    const body = await readJson(request);
+    if (!body) return error(400, "invalid json");
+    return respond(await gate.setArbitrage(body));
+  }
+
   if (!["hold", "switch", "release", "reset"].includes(command)) return error(404, "not found");
   if (request.method !== "POST") return error(405, "method not allowed");
   if (command === "reset") return respond(await gate.reset());
@@ -107,8 +116,14 @@ export default {
     if (url.pathname.startsWith("/control/")) return control(request, url, gate, env);
 
     const isWrite = !READ_METHODS.has(request.method);
+    const lagHeader = request.headers.get("X-Replication-Lag-Bytes");
+    const lagBytes = lagHeader ? parseInt(lagHeader, 10) : null;
+    const clientIp =
+      request.headers.get("CF-Connecting-IP") ||
+      request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ||
+      "default";
     let isFailure = true; // 원본 응답을 받기 전에 끝나면 실패로 센다
-    const { origin, ticket, target } = await gate.enter();
+    const { origin, ticket, target, viaArbitrage } = await gate.enter({ isWrite, lagBytes, clientIp });
     try {
       // TARGET 이면 제어 명령으로 정한 주소(target)를 먼저 쓰고, 없으면 설정값 UPSTREAM_TARGET 을 쓴다
       const base = origin === "TARGET" ? target || env.UPSTREAM_TARGET : env.UPSTREAM_SOURCE;
@@ -133,6 +148,9 @@ export default {
 
       const out = new Response(response.body, response);
       out.headers.set("X-Gate-Origin", origin);
+      if (viaArbitrage) {
+        out.headers.set("X-Arbitrage", "true");
+      }
       return out;
     } catch (cause) {
       return error(502, `upstream request failed: ${cause?.message ?? "unknown"}`);

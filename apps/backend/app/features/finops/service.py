@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Protocol
 
 from . import ai as ai_part
@@ -35,11 +36,17 @@ def run(inp: FinopsInput, ctx: Reporter | None = None) -> FinopsReport:
     return out
 
 
+def finite_or_none(value: float | None) -> float | None:
+    """유한한 수만 금액으로 씁니다. 항목 금액은 입력에서 막지만 합·차·비율은 넘칠 수 있어(1e308 + 1e308) 미제공으로 둡니다."""
+    return value if value is None or math.isfinite(value) else None
+
+
 def total(cost: CloudCost) -> tuple[float | None, bool]:
-    """(아는 항목 합계, 모든 항목에 금액이 있는지). 금액이 하나도 없으면 합계는 None."""
+    """(아는 항목 합계, 모든 항목에 금액이 있는지). 금액이 하나도 없거나 합이 넘치면 합계는 None."""
     known = [line.monthly_usd for line in cost.lines if line.monthly_usd is not None]
-    complete = bool(cost.lines) and len(known) == len(cost.lines)
-    return (round(sum(known), 2) if known else None), complete
+    summed = finite_or_none(sum(known)) if known else None
+    complete = bool(cost.lines) and len(known) == len(cost.lines) and summed is not None
+    return (None if summed is None else round(summed, 2)), complete
 
 
 def complete_total(cost: CloudCost) -> float | None:
@@ -67,8 +74,11 @@ def saving(current: CloudCost, candidate: CloudCost) -> Saving:
     missing = missing_items(current, candidate)
     # 후보에 원본 항목이 빠져 있으면 금액이 다 있어도 싸 보이는 견적이므로 완전한 비교로 치지 않습니다
     complete = cur is not None and cand is not None and bool(candidate.lines) and not missing
-    diff = round(cur - cand, 2) if complete else None
-    pct = round(diff / cur * 100, 1) if diff is not None and cur else None
+    diff = finite_or_none(cur - cand) if complete else None
+    pct = finite_or_none(diff / cur * 100) if diff is not None and cur else None
+    complete = complete and diff is not None
+    diff = None if diff is None else round(diff, 2)
+    pct = None if pct is None else round(pct, 1)
     return Saving(cloud=candidate.cloud, current_monthly_usd=cur, candidate_monthly_usd=cand,
                   monthly_saving_usd=diff, saving_pct=pct, complete=complete, missing=missing)
 

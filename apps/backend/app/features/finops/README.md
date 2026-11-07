@@ -16,6 +16,11 @@
   - 원본이나 후보에 금액이 빠진 항목이 있을 때. 원본 합계도 "현재 월 비용" 대신 "미제공 (아는 항목 합계 …)" 로 씁니다.
   - 원본에 있는 항목이 후보 견적에 통째로 없을 때. 항목은 `item` 이름으로 맞추므로 원본·후보가 같은 이름을 써야 합니다.
 - **금액은 0 이상인 유한한 수만 받습니다.** NaN·무한대·음수는 입력 검사에서 거절합니다.
+  항목 금액이 정상이어도 합·차·비율이 넘치면(예: `1e308 + 1e308`) 그 값은 `inf` 가 아니라 None("미제공")입니다.
+- **입력 검사 (모두 422).** 한 클라우드에 같은 `item` 이 두 줄이면 거절합니다(합계가 부풀어 가짜 절감이 생김).
+  후보 클라우드는 원본과 달라야 하고 서로 겹치면 안 됩니다(`/report` 는 `current.cloud`, `/estimate` 는 원본 `aws` 기준).
+  `CostRequest` 크기는 주면 0 보다 크고 상한 이하(`schemas.MAX_*`), 모르면 None 그대로입니다.
+  크기 제안(`Rightsizing`) 네 칸은 AI 설명과 같은 비용 판단 금지어(`schemas.JUDGEMENT_WORDS`)로 검사합니다. 측정값이 들어가야 하므로 숫자는 막지 않습니다.
 
 ## 비용 산출 (`estimate.py`, `POST /finops/estimate`)
 
@@ -43,6 +48,19 @@
 - 그 밖에는 원본과 같은 vCPU·메모리로 셉니다 (Cloud SQL 전용 코어, Azure 크기 이상 가장 작은 등급). Cloud SQL 은 vCPU 당 메모리 범위 제한이 있어 실제 등급과 다를 수 있습니다.
 - 단가가 0건이거나 애매하게 여러 건 걸리면 추측하지 않고 그 항목을 "미제공" 으로 둡니다.
 - 원본 RDS 등급(`db_instance_class`)은 assessment 결과에 아직 없어서 호출하는 쪽이 넣어야 합니다. 없으면 AWS DB 는 미제공.
+
+### 교차점 (`FinopsInput.crossover`, GCP 후보가 있을 때)
+
+Cloud Run(요청 없는 시간 0대)과 Fargate(내내 켜짐)의 앱 컴퓨팅만 비교합니다. DB 는 트래픽과 상관없어 빼고 봅니다.
+결과 문장은 `assumptions` 에 붙어 `report.notes` 로 나옵니다.
+
+- `break_even_idle_percent`: 같은 크기·같은 대수일 때 유휴 비율이 이 값보다 크면 Cloud Run 이 작습니다.
+  `1 - Fargate 월 / (Cloud Run 1대 한 달 내내 × 대수)` 이고 단가만으로 정해집니다.
+- `break_even_rps`: 지금 유휴 비율에서 요청 있는 시간 평균 RPS 가 이 값 이하이면 Cloud Run 이 작습니다.
+  요청 있는 시간에 필요한 Cloud Run 대수를 `ceil(RPS × 처리 시간 ÷ 동시 처리 80)` 으로 세고, Fargate 는 대수 고정으로 봅니다.
+  처리 시간(`traffic.avg_latency_ms`)이 없으면, 1대만으로도 비싸면, Terraform 한도(`max_instance_count = 2`) 안에서 교차하지 않으면
+  None 이고 `reason` 에 이유를 적습니다. 한도 밖은 짐작하지 않습니다.
+- 동시 처리 80 은 Terraform 이 `max_instance_request_concurrency` 를 적지 않아 쓰는 Cloud Run 기본값입니다. 실측이 아닙니다.
 
 ## 입력 / 출력
 

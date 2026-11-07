@@ -11,12 +11,39 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # 클라우드 이름과 항목 이름은 코드가 쓰는 결론 문장에 그대로 들어갑니다. 자유 문장이 들어오면
 # "가장 많이 아끼는 후보는 gcp (월 90% 확정 절감) 입니다" 처럼 결론을 꾸밀 수 있어 모양을 막습니다.
 CLOUD_SLUG = r"^[a-z0-9]+(-[a-z0-9]+)*$"  # 예: aws, gcp, azure, on-prem
 ITEM_NAME = r"^[^\d%$]{1,40}$"  # 숫자·%·$ 없이 40자까지. 금액과 비율은 코드만 씁니다
+SOURCE_CLOUD = "aws"  # /estimate 의 원본은 항상 AWS 입니다
+
+# 크기 상한. 가장 큰 단일 인스턴스보다 넉넉한 값이고, 곱셈이 넘치거나 오타로 큰 값이 들어오는 것만 막습니다
+MAX_APP_VCPU = 64
+MAX_APP_MEMORY_MIB = 512 * 1024
+MAX_APP_INSTANCES = 1000
+MAX_DB_VCPU = 128
+MAX_DB_MEMORY_GIB = 4096
+MAX_DB_STORAGE_GB = 64 * 1024
+
+# 숫자 없이도 비용 판단·추천이 되는 표현. 이런 문장은 코드(service.rule_summary)만 씁니다.
+# AI 설명(ai.check_notes)과 크기 제안 문장(Rightsizing)이 같은 목록으로 검사받습니다.
+JUDGEMENT_WORDS = ("추천", "권장", "저렴", "비싸", "싸게", "싸다", "싼 ", "절감", "아끼", "아낄", "아낍", "줄어", "늘어",
+                   "이득", "손해", "선택하", "recommend", "cheap", "expensive", "saving")
+
+
+def judgement_in(text: str) -> str | None:
+    lowered = text.lower()
+    return next((word for word in JUDGEMENT_WORDS if word in lowered), None)
+
+
+def _unique_clouds(clouds: list[str], source: str) -> None:
+    if source in clouds:
+        raise ValueError(f"후보에 원본과 같은 클라우드({source})가 있습니다")
+    dupes = sorted({c for c in clouds if clouds.count(c) > 1})
+    if dupes:
+        raise ValueError(f"같은 후보 클라우드가 두 번 이상 있습니다: {', '.join(dupes)}")
 
 
 class CostLine(BaseModel):
@@ -33,14 +60,52 @@ class CloudCost(BaseModel):
     region: str | None = None
     lines: list[CostLine] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _one_line_per_item(self) -> CloudCost:
+        # 항목은 이름으로 맞춥니다(service.missing_items). 같은 이름이 두 줄이면 합계만 부풀어 가짜 절감이 생깁니다.
+        names = [line.item.strip() for line in self.lines]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        if dupes:
+            raise ValueError(f"{self.cloud} 에 같은 항목이 두 번 이상 있습니다: {', '.join(dupes)}")
+        return self
+
 
 class Rightsizing(BaseModel):
-    """크기 줄이기 제안 하나. 근거 지표는 계산 코드가 문장으로 넣습니다."""
+    """크기 줄이기 제안 하나. 근거 지표는 계산 코드가 문장으로 넣습니다.
 
-    resource: str  # 예: "앱 CPU", "앱 메모리", "DB 등급"
-    current: str  # 예: "1 vCPU"
-    suggested: str  # 예: "0.5 vCPU"
-    evidence: str  # 예: "14일 CPU 사용률 p95 12%"
+    네 칸 모두 규칙 주의점에 그대로 실리므로 AI 설명과 같은 판단 금지어 검사를 거칩니다.
+    근거에는 측정값이 들어가야 하므로 숫자는 막지 않습니다.
+    """
+
+    resource: str = Field(max_length=40)  # 예: "앱 CPU", "앱 메모리", "DB 등급"
+    current: str = Field(max_length=40)  # 예: "1 vCPU"
+    suggested: str = Field(max_length=40)  # 예: "0.5 vCPU"
+    evidence: str = Field(max_length=120)  # 예: "14일 CPU 사용률 p95 12%"
+
+    @field_validator("resource", "current", "suggested", "evidence")
+    @classmethod
+    def _no_cost_judgement(cls, value: str) -> str:
+        word = judgement_in(value)
+        if word:
+            raise ValueError(f"비용 판단·추천 표현({word!r})은 계산 코드만 씁니다")
+        return value
+
+
+class Crossover(BaseModel):
+    """Cloud Run(요청 없는 시간 0대)이 Fargate(내내 켜짐)보다 싸지는 지점. 앱 컴퓨팅만 비교합니다 (DB 는 트래픽과 무관).
+
+    전부 estimate.py 가 단가로 계산합니다. 계산할 수 없으면 None 이고 reason 에 이유를 적습니다.
+    """
+
+    fargate_app_monthly_usd: float | None  # 원본 Fargate 앱, 내내 켜짐
+    cloud_run_instance_monthly_usd: float | None  # Cloud Run 1대를 한 달 내내 켰을 때
+    # 유휴 시간 비율이 이 값보다 크면 Cloud Run 이 쌉니다. 0 이면 내내 켜져 있어도 Cloud Run 이 쌉니다
+    break_even_idle_percent: float | None
+    # 지금 유휴 비율에서, 요청 있는 시간 평균 RPS 가 이 값 이하이면 Cloud Run 이 쌉니다
+    break_even_rps: float | None
+    concurrency: int  # Cloud Run 인스턴스 하나가 동시에 받는 요청 수 (가정)
+    max_instances: int  # Terraform max_instance_count
+    reason: str | None = None  # break_even_rps 가 None 인 이유
 
 
 class FinopsInput(BaseModel):
@@ -52,6 +117,13 @@ class FinopsInput(BaseModel):
     candidates: list[CloudCost] = Field(default_factory=list)  # 이전 후보 (예: gcp, azure)
     rightsizing: list[Rightsizing] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)  # 계산에 쓴 가정. 규칙 주의점에 그대로 실립니다
+    crossover: Crossover | None = None  # estimate.py 가 GCP 후보가 있을 때 채웁니다. 수동 입력은 None
+
+    @model_validator(mode="after")
+    def _candidates_differ(self) -> FinopsInput:
+        # 원본과 같은 클라우드를 후보로 넣으면 "aws 로 옮기면 … 줄어듭니다" 같은 문장이 나옵니다
+        _unique_clouds([c.cloud for c in self.candidates], self.current.cloud)
+        return self
 
 
 class Saving(BaseModel):
@@ -87,22 +159,32 @@ class Traffic(BaseModel):
 
     idle_percent: float = Field(ge=0, le=95, allow_inf_nan=False)  # 한 달 중 요청이 없는 시간 비율
     rps: float = Field(default=0, ge=0, le=100_000, allow_inf_nan=False)  # 요청이 있는 시간의 초당 평균 요청 수
+    # 요청 하나를 처리하는 평균 시간. RPS 교차점(필요한 Cloud Run 인스턴스 수)에만 씁니다. 모르면 None
+    avg_latency_ms: float | None = Field(default=None, gt=0, le=60_000, allow_inf_nan=False)
 
 
 class CostRequest(BaseModel):
     """비용을 낼 때 필요한 크기. assessment 결과에서 채웁니다. 모르면 None."""
 
+    # 크기는 모르면 None("미제공") 그대로 둡니다. 주면 0 보다 크고 상한 이하여야 합니다.
+    # 상한은 클라우드 한 대가 실제로 낼 수 있는 크기보다 넉넉하게 잡아, 곱셈이 넘치는 값만 막습니다.
     source_region: str  # 원본 AWS 리전. 예: "ap-northeast-2"
-    app_vcpu: float | None = None
-    app_memory_mib: int | None = None
-    app_instances: int = Field(default=1, ge=1)  # 떠 있는 인스턴스(복제본) 수. assessment 가 아직 안 읽음
+    app_vcpu: float | None = Field(default=None, gt=0, le=MAX_APP_VCPU, allow_inf_nan=False)
+    app_memory_mib: int | None = Field(default=None, gt=0, le=MAX_APP_MEMORY_MIB)
+    app_instances: int = Field(default=1, ge=1, le=MAX_APP_INSTANCES)  # 떠 있는 인스턴스(복제본) 수. assessment 가 아직 안 읽음
     db_instance_class: str | None = None  # 원본 RDS 등급. 예: "db.t3.micro"
-    db_vcpu: int | None = None
-    db_memory_gib: float | None = None
-    db_storage_gb: int | None = None
+    db_vcpu: int | None = Field(default=None, gt=0, le=MAX_DB_VCPU)
+    db_memory_gib: float | None = Field(default=None, gt=0, le=MAX_DB_MEMORY_GIB, allow_inf_nan=False)
+    db_storage_gb: int | None = Field(default=None, gt=0, le=MAX_DB_STORAGE_GB)
     candidates: list[Candidate] = Field(default_factory=list)
     # None 이면 앱이 한 달 내내 켜져 있다고 봅니다. 주면 Cloud Run 은 요청 없는 시간에 0대, Azure 는 유휴 요금
     traffic: Traffic | None = None
+
+    @model_validator(mode="after")
+    def _candidates_differ(self) -> CostRequest:
+        # 가격 API 를 부르기 전에 막습니다. build_input 안에서 FinopsInput 검사에 걸리면 422 가 아니라 500 이 됩니다
+        _unique_clouds([c.cloud for c in self.candidates], SOURCE_CLOUD)
+        return self
 
 
 class FinopsEstimate(BaseModel):
@@ -110,3 +192,55 @@ class FinopsEstimate(BaseModel):
 
     input: FinopsInput
     report: FinopsReport
+    arbitrage: ArbitrageResult | None = None
+
+
+# -- 비용 변동성 및 동적 차익거래 (Dynamic Cost-Arbitrage Routing) --------------------------
+# 소프트뱅크 인프라 비용 변동성 대응: 읽기/쓰기 분리 차익거래, 환율 반영, 복제 지연 펜싱
+
+DEFAULT_FX_RATES: dict[str, float] = {
+    "USD": 1.0,
+    "JPY": 154.5,
+    "KRW": 1420.0,
+}
+
+
+class ArbitrageRequest(BaseModel):
+    """동적 트래픽 차익거래 계산 입력."""
+
+    source_cloud: str = Field(default=SOURCE_CLOUD, pattern=CLOUD_SLUG)
+    target_cloud: str = Field(default="gcp", pattern=CLOUD_SLUG)
+    app_vcpu: float = Field(default=0.5, gt=0, le=MAX_APP_VCPU, allow_inf_nan=False)
+    app_memory_mib: int = Field(default=1024, gt=0, le=MAX_APP_MEMORY_MIB)
+    app_instances: int = Field(default=1, ge=1, le=MAX_APP_INSTANCES)
+    rps: float = Field(default=20.0, ge=0, le=100_000, allow_inf_nan=False)
+    read_ratio: float = Field(default=0.8, ge=0.0, le=1.0, allow_inf_nan=False)  # 읽기 트래픽 비율 (0~100%)
+    idle_percent: float = Field(default=40.0, ge=0.0, le=95.0, allow_inf_nan=False)
+    avg_latency_ms: float = Field(default=150.0, gt=0, le=60_000, allow_inf_nan=False)
+    avg_response_kb: float = Field(default=4.0, gt=0, le=10_000, allow_inf_nan=False)
+    replication_lag_bytes: int | None = Field(default=0, ge=0)
+    max_safe_lag_bytes: int = Field(default=1024, ge=0)
+    read_after_write_fence_sec: float = Field(default=5.0, ge=0.0, le=300.0, allow_inf_nan=False)
+    currency: str = Field(default="USD", pattern=r"^(USD|JPY|KRW)$")
+    custom_fx_rate: float | None = Field(default=None, gt=0, le=10_000_000, allow_inf_nan=False)
+
+
+class ArbitrageResult(BaseModel):
+    """동적 트래픽 차익거래 결과 및 추천 가중치."""
+
+    read_weight_target: float  # 목적지로 보낼 읽기 트래픽 비율 (0.0 ~ 1.0)
+    read_weight_source: float  # 원본으로 유지할 읽기 트래픽 비율 (0.0 ~ 1.0)
+    write_destination: str  # 쓰기 트래픽 처리 대상 ("SOURCE" - 항상 액티브 마스터)
+    active_master: str  # 액티브 마스터 클라우드 ("SOURCE")
+    lag_fenced: bool  # 복제 지연 초과로 읽기 우회가 차단되었는지 여부
+    baseline_monthly_cost: float  # 차익거래 없이 100% 원본 가동 시 월 비용
+    arbitrage_monthly_cost: float  # 동적 차익거래 적용 시 월 비용
+    monthly_savings: float  # 절감액
+    savings_percent: float  # 절감률 (%)
+    cross_cloud_egress_monthly_usd: float  # 크로스 클라우드 네트워크 Egress 요금 (USD)
+    currency: str  # 통화 코드
+    fx_rate: float  # 적용 환율
+    crossover_rps: float | None = None  # 전체 전환 변곡점 RPS
+    recommendation: str  # 운영 권고
+    reasons: list[str]  # 상세 근거 및 제약 사항
+

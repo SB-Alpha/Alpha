@@ -183,6 +183,11 @@ class AbortRequest(BaseModel):
     reason: str | None = None
 
 
+class DecommissionRequest(BaseModel):
+    operator: str | None = Field(default=None, description="철거 승인 운영자 서명")
+    reason: str | None = Field(default=None, description="철거 확인 사유")
+
+
 class ManualStageInput(BaseModel):
     """모듈이 아직 연결되지 않았을 때 사람이 넣는 단계 결과 (fixture). 기록에 manual 로 남습니다."""
 

@@ -45,6 +45,8 @@ logger = logging.getLogger(__name__)
 StageRunner = Callable[[RunStatus, RunContext], BaseModel | dict[str, Any]]
 # 중단된 run 이 남긴 외부 자원을 정리합니다. 정리할 것이 없으면 False, 실패하면 예외입니다. 다시 불러도 안전해야 합니다.
 AbortCleanup = Callable[[RunStatus], bool]
+# 전환이 끝난 run 의 이전 자원 정리. 끝나면 사람에게 보일 문장을 돌려주고, 남은 것이 있으면 예외를 냅니다.
+Decommission = Callable[[RunStatus], str]
 
 GATE_LABEL: dict[Gate, str] = {"plan": "계획 승인 ①", "cutover": "전환 승인 ②"}
 
@@ -61,6 +63,10 @@ _CUTOVER_MANUAL_NOTE = "수동 확인 필요: 트래픽이 이미 목적지로 �
 CUTOVER_OUTCOME = "cutover_outcome"
 CUTOVER_ON_SOURCE = {"rolled_back", "not_started"}
 _CLEANUP_STARTED: dict[str, Any] = {"cleanup_state": "running", "cleanup_message": "복제 자원 정리 중"}
+_DECOMMISSION_STARTED: dict[str, Any] = {
+    "cleanup_state": "running",
+    "cleanup_message": "이전 자원 정리 중 (복제 작업 종료, VPN 삭제)",
+}
 
 
 class InvalidTransition(Exception):
@@ -101,11 +107,13 @@ class Engine:
         store: RunStore,
         runners: Mapping[StageName, StageRunner] | None = None,
         abort_cleanup: AbortCleanup | None = None,
+        decommission: Decommission | None = None,
         memory: ReasoningBank | None = None,
     ) -> None:
         self._store = store
         self._runners = dict(runners or {})
         self._abort_cleanup = abort_cleanup
+        self._decommission = decommission
         self._memory = memory  # 자가치유 기억(#77). 없으면 학습하지 않습니다
 
     # -- 조회 ---------------------------------------------------------------
@@ -227,6 +235,76 @@ class Engine:
             self._finish_cleanup(run_id, "done", "복제 자원 정리 완료")
         else:
             self._finish_cleanup(run_id, None, None)
+
+    def start_decommission(self, run_id: str, operator: str | None = None) -> RunStatus:
+        """전환이 끝난 run 의 이전 자원(복제 작업, VPN) 정리를 시작으로 표시합니다. 이어서 run_decommission() 을 부릅니다.
+
+        사람이 누릅니다. 복제를 닫으면 원본으로 되돌아갈 길이 없어지므로 자동으로 하지 않습니다.
+        전환 후 데이터 정합성 검증이 'match'이고 되돌릴 수 없는 상태임을 확인합니다.
+        """
+
+        def change(run: RunStatus) -> RunStatus:
+            if self._decommission is None:
+                raise InvalidTransition("이전 자원 정리 기능이 연결되지 않았습니다")
+            if run.state != WorkflowState.SUCCEEDED:
+                raise InvalidTransition("전환까지 끝난 run 만 이전 자원을 정리합니다")
+            if run.cleanup_state in ("running", "done"):
+                raise InvalidTransition("이미 정리 중이거나 정리가 끝났습니다")
+
+            # 안전 게이트: Cutover 단계의 verification 결과 확인 (불일치 또는 미완료 시 비가역 철거 차단)
+            cutover_out = run.outputs.get(StageName.CUTOVER.value) or {}
+            metrics = cutover_out.get("metrics") if isinstance(cutover_out, dict) else {}
+            v_val = (
+                metrics.get("verification") if isinstance(metrics, dict) else None
+            ) or (cutover_out.get("verification") if isinstance(cutover_out, dict) else None)
+
+            if isinstance(v_val, dict):
+                v_status = v_val.get("status")
+                if v_status in ("mismatch", "failed", "unverifiable"):
+                    raise InvalidTransition(f"전환 검증 상태가 match 가 아닙니다 ({v_status}). 비가역 이전 자원 철거가 거부되었습니다")
+            elif isinstance(v_val, str) and v_val in ("mismatch", "failed", "unverifiable", "unknown"):
+                raise InvalidTransition(f"전환 검증 상태가 match 가 아닙니다 ({v_val}). 비가역 이전 자원 철거가 거부되었습니다")
+
+            # 트래픽 게이트 안전 확인: Worker 가 연결되어 있다면 현재 트래픽 모드가 TARGET 이어야만 철거 허용
+            try:
+                from app.features.provisioning.worker_client import WorkerClient
+
+                worker = WorkerClient.from_env()
+                if worker is not None:
+                    worker_mode = worker.status().get("mode")
+                    if worker_mode != "TARGET":
+                        raise InvalidTransition(
+                            f"트래픽이 아직 TARGET 으로 100% 전환되지 않았습니다 (현재 Worker 모드: {worker_mode}). "
+                            "비가역 원본 자원 철거가 거부되었습니다"
+                        )
+            except Exception as exc:
+                if isinstance(exc, InvalidTransition):
+                    raise
+                raise InvalidTransition(f"Worker 트래픽 게이트 상태를 확인할 수 없어 철거가 거부되었습니다: {exc}") from exc
+
+            updates = dict(_DECOMMISSION_STARTED)
+            if operator:
+                updates["cleanup_message"] = f"철거 승인자: {operator}"
+            return run.model_copy(update=updates)
+
+        return self._store.update(run_id, change)
+
+    def run_decommission(self, run_id: str) -> None:
+        """백그라운드 작업. 실패는 기록하고 다시 누를 수 있게 둡니다. 이전 결과(succeeded)는 바꾸지 않습니다."""
+        if self._decommission is None:
+            return
+        run = self._store.get(run_id)
+        if run.state != WorkflowState.SUCCEEDED or run.cleanup_state != "running":
+            return
+        try:
+            message = self._decommission(run)
+        except Exception as exc:
+            logger.exception("decommission failed for run %s", run_id)
+            from .runners import scrub_sensitive_text
+            cleaned_err = scrub_sensitive_text(str(exc), fallback=type(exc).__name__)
+            self._finish_cleanup(run_id, "failed", f"이전 자원 정리 실패: {cleaned_err}"[:_MAX_ERROR_MESSAGE])
+            return
+        self._finish_cleanup(run_id, "done", message[:_MAX_ERROR_MESSAGE])
 
     def _finish_cleanup(self, run_id: str, state: CleanupState | None, message: str | None) -> None:
         # run.updated_at 은 상태가 바뀐 시각이므로 건드리지 않습니다.

@@ -16,7 +16,7 @@ import re
 
 from pydantic import BaseModel, Field
 
-from .schemas import FinopsInput, FinopsReport
+from .schemas import FinopsInput, FinopsReport, judgement_in
 
 log = logging.getLogger(__name__)
 
@@ -39,9 +39,7 @@ SYSTEM = (
 )
 
 _DIGIT = re.compile(r"\d")
-# 숫자 없이도 비용 판단·추천이 되는 표현. 이런 문장은 코드만 씁니다
-_JUDGEMENT = ("추천", "권장", "저렴", "비싸", "싸게", "싸다", "싼 ", "절감", "아끼", "아낄", "아낍", "줄어", "늘어",
-              "이득", "손해", "선택하", "recommend", "cheap", "expensive", "saving")
+# 비용 판단·추천 표현 목록은 schemas.JUDGEMENT_WORDS 하나로 둡니다 (크기 제안 문장도 같은 목록으로 검사)
 
 
 class AiNotes(BaseModel):
@@ -80,8 +78,7 @@ def check_notes(notes: AiNotes) -> str | None:
     for note in notes.notes:
         if _DIGIT.search(note):
             return "number"
-        lowered = note.lower()
-        if any(word in lowered for word in _JUDGEMENT):
+        if judgement_in(note):
             return "cost_judgement"
     return None
 

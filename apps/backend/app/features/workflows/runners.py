@@ -511,6 +511,33 @@ def clean_up_cdc(run: RunStatus) -> bool:
     return True
 
 
+def decommission_cdc(run: RunStatus) -> str:
+    """전환이 끝난 run 의 이전 자원을 db_workflow.finish 로 정리합니다 (에이전트 작업 종료 → 복제 슬롯 정리 → VPN 삭제).
+
+    남겨 두면 VPN 연결과 CDC 서버가 매달 청구되고, 원본 복제 슬롯이 WAL 을 계속 붙잡습니다.
+    끝나면 사람에게 보일 문장을, 남은 항목이 있으면 그 이름과 함께 예외를 냅니다 (다시 부를 수 있음).
+    전환 단계·작업 단계 확인(stabilizing 또는 closed)은 db_workflow.finish 가 합니다.
+    """
+    stage = run.stage(StageName.DB_MIGRATION)
+    if stage.manual or stage.state == WorkflowState.PENDING:
+        return "DB 이전을 수동으로 기록한 run 이라 자동으로 정리할 복제 자원이 없습니다. 직접 만든 자원은 직접 지우세요"
+
+    from app.features.db_migration import db_workflow
+    from app.features.db_migration.client import AgentSettings, CdcAgentClient
+
+    try:
+        settings = AgentSettings.from_env()
+    except KeyError:
+        raise RuntimeError("CDC_AGENT_URL 이 없어 이전 자원을 정리하지 못했습니다") from None
+    result = db_workflow.finish(run.run_id, agent=CdcAgentClient(settings))
+    if result.state != "finished":
+        left = ", ".join(result.remaining) or "확인 필요"
+        detail = f" ({result.message})" if result.message else ""
+        raise RuntimeError(f"남은 항목: {left}{detail}. 다시 시도하세요")
+    vpn = "VPN 삭제" if result.vpn == "removed" else "VPN 남음"
+    return " ".join([f"이전 자원 정리 완료: 복제 작업 종료, {vpn}.", *result.next_steps])
+
+
 def _cdc_end_reason(result: Any) -> str | None:
     """db_migration 이 끝난 이유. 전환이 끝나 돌아온 것만 정상 종료이고, 그 밖의 streaming 이후 종료에는 항상 사유를 만듭니다."""
     is_mapping = isinstance(result, Mapping)
@@ -600,6 +627,16 @@ def run_db_migration(
                     latest_phase[0] = phase
                     if phase in APP_DEPLOY_PHASES:
                         ready_event.set()
+                lag = forwarded.get("replication_lag_bytes")
+                if lag is not None and isinstance(lag, (int, float)):
+                    try:
+                        from app.features.provisioning.worker_client import WorkerClient
+
+                        worker = WorkerClient.from_env()
+                        if worker is not None:
+                            worker.sync_lag(int(lag))
+                    except Exception:
+                        pass
             if ctx is not None and not run_aborted.is_set():
                 # db_migration/service.py 가 종료 시점에 ctx.report("failed", ...) 또는 ctx.report("stopped", ...) 를 호출할 수 있습니다.
                 # workflows 규격상 완료/실패는 runner 반환 및 예외로 판정하므로, reportable 상태일 때만 forward 합니다.

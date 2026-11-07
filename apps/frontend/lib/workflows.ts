@@ -68,7 +68,7 @@ export interface RunStatus {
   updated_at: string;
   approval_records: ApprovalRecord[];
   cutover_readiness?: CutoverReadiness | null; // 승인 ② 대기 중일 때만 서버가 채웁니다
-  cleanup_state?: "running" | "done" | "failed" | null; // 중단 뒤 복제 자원 정리 상태
+  cleanup_state?: "running" | "done" | "failed" | null; // 복제 자원 정리 상태 (중단 뒤, 또는 전환이 끝난 뒤 이전 자원 정리)
   cleanup_message?: string | null;
   cdc_job_id?: string | null; // 단건 응답에만 있습니다. CDC 작업 직접 제어에 씁니다
 }
@@ -204,6 +204,8 @@ export const workflows = {
     post<RunStatus>(`/${encodeURIComponent(runId)}/abort`, { reason: reason || null }),
   resume: (runId: string) => post<RunStatus>(`/${encodeURIComponent(runId)}/resume`),
   retryCleanup: (runId: string) => post<RunStatus>(`/${encodeURIComponent(runId)}/cleanup`),
+  // 전환이 끝난 run 의 복제 작업·VPN 정리. 실패하면 같은 요청으로 다시 시도합니다.
+  decommission: (runId: string) => post<RunStatus>(`/${encodeURIComponent(runId)}/decommission`),
   submitManual: (runId: string, stage: StageName, output: Record<string, unknown>, note?: string) =>
     post<RunStatus>(`/${encodeURIComponent(runId)}/stages/${stage}/manual`, { output, note: note || null }),
   getDiagnosis: (runId: string) => call<SelfHealingDiagnosis>(`/${encodeURIComponent(runId)}/diagnosis`),

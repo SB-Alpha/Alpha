@@ -157,6 +157,7 @@ export function RunView() {
             }
             onResume={() => act(() => workflows.resume(run.run_id))}
             onRetryCleanup={() => act(() => workflows.retryCleanup(run.run_id))}
+            onDecommission={() => act(() => workflows.decommission(run.run_id))}
             onAbort={(reason) => act(() => workflows.abort(run.run_id, reason))}
           />
 

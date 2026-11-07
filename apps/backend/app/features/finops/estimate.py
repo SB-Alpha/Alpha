@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -24,7 +25,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 
-from .schemas import Candidate, CloudCost, CostLine, CostRequest, FinopsInput, Traffic
+from .schemas import (
+    Candidate,
+    CloudCost,
+    CostLine,
+    CostRequest,
+    Crossover,
+    FinopsInput,
+    Traffic,
+)
 
 log = logging.getLogger(__name__)
 
@@ -90,16 +99,92 @@ def build_input(req: CostRequest, aws: AwsPrices | None = None, gcp: GcpPrices |
     """원본(AWS)과 후보들의 월 비용 항목을 가격 API 단가로 계산해 FinopsInput 으로 만듭니다."""
     stamp = (today or date.today()).isoformat()
     aws = aws or AwsPrices()
+    gcp = gcp or GcpPrices()
     current = aws.cost(req, f"{aws.api_name} {stamp}")
     candidates = []
     for cand in req.candidates:
         if cand.cloud == "gcp":
-            candidates.append((gcp or GcpPrices()).cost(req, cand.region, f"gcp-cloud-billing-catalog {stamp}"))
+            candidates.append(gcp.cost(req, cand.region, f"gcp-cloud-billing-catalog {stamp}"))
         elif cand.cloud == "azure":
             candidates.append((azure or AzurePrices()).cost(req, cand.region, f"azure-retail-prices-api {stamp}"))
         else:
             candidates.append(_unsupported(cand))
-    return FinopsInput(current=current, candidates=candidates, assumptions=assumptions(req))
+    gcp_region = next((c.region for c in req.candidates if c.cloud == "gcp"), None)
+    cross = crossover(req, aws, gcp, gcp_region) if gcp_region else None
+    notes = assumptions(req) + (crossover_notes(cross, req) if cross else [])
+    return FinopsInput(current=current, candidates=candidates, assumptions=notes, crossover=cross)
+
+
+# -- 교차점: Cloud Run(요청 없으면 0대) 과 Fargate(내내 켜짐) -------------------------------------------
+# 앱 컴퓨팅만 비교합니다. DB·스토리지는 트래픽과 상관없이 같은 값이라 교차점에 영향이 없습니다.
+
+# Terraform(infra/terraform/gcp/modules/app/main.tf)이 max_instance_request_concurrency 를 적지 않아 Cloud Run 기본값입니다
+CLOUD_RUN_CONCURRENCY = 80
+CLOUD_RUN_MAX_INSTANCES = 2  # 같은 파일의 max_instance_count
+
+
+def crossover(req: CostRequest, aws: AwsPrices, gcp: GcpPrices, region: str) -> Crossover:
+    def not_provided(reason: str) -> Crossover:
+        return Crossover(fargate_app_monthly_usd=None, cloud_run_instance_monthly_usd=None, break_even_idle_percent=None,
+                         break_even_rps=None, concurrency=CLOUD_RUN_CONCURRENCY,
+                         max_instances=CLOUD_RUN_MAX_INSTANCES, reason=reason)
+
+    if req.app_vcpu is None or req.app_memory_mib is None:
+        return not_provided("앱 크기가 미제공이라 교차점을 계산하지 않았습니다")
+    try:
+        fargate = aws.app_monthly(req)
+        one = gcp.app_instance_month(req, region)
+    except Exception as exc:  # noqa: BLE001 - 단가 하나가 없으면 교차점도 없습니다. 0 으로 채우지 않습니다
+        log.warning("finops 교차점 단가 조회 실패 (%s): %s", type(exc).__name__, exc)
+        return not_provided(f"단가 조회에 실패해 교차점을 계산하지 않았습니다 ({type(exc).__name__})")
+    if one <= 0 or fargate <= 0:
+        return not_provided("단가가 0 이라 교차점을 정할 수 없습니다")
+    # 같은 대수끼리: Cloud Run 이 켜져 있는 비율이 fargate / (1대 한 달 × 대수) 보다 작으면 쌉니다
+    idle = max(0.0, (1 - fargate / (one * req.app_instances)) * 100)
+    rps, reason = _break_even_rps(req.traffic, fargate, one)
+    return Crossover(fargate_app_monthly_usd=round(fargate, 2), cloud_run_instance_monthly_usd=round(one, 2),
+                     break_even_idle_percent=round(idle, 1), break_even_rps=rps, concurrency=CLOUD_RUN_CONCURRENCY,
+                     max_instances=CLOUD_RUN_MAX_INSTANCES, reason=reason)
+
+
+def _break_even_rps(traffic: Traffic | None, fargate: float, one_instance_month: float) -> tuple[float | None, str | None]:
+    """요청 있는 시간에 필요한 Cloud Run 대수 = ceil(RPS × 처리 시간 ÷ 동시 처리 수). Fargate 는 대수 고정.
+
+    대수가 n 일 때 Cloud Run 비용은 n × 1대 한 달 × 켜진 비율입니다. Fargate 보다 싼 가장 큰 n 을 찾고,
+    그 n 대가 감당하는 RPS 를 교차점으로 돌려줍니다. Terraform 한도를 넘는 값은 짐작하지 않습니다.
+    """
+    if traffic is None:
+        return None, "트래픽 가정이 없어 RPS 교차점을 계산하지 않았습니다"
+    if traffic.avg_latency_ms is None:
+        return None, "요청당 처리 시간이 미제공이라 RPS 교차점을 계산하지 않았습니다"
+    per_instance = one_instance_month * active_share(traffic)
+    latency_s = traffic.avg_latency_ms / 1000
+    cheaper = math.ceil(fargate / per_instance) - 1  # n × per_instance < fargate 인 가장 큰 n
+    if cheaper < 1:
+        return None, "이 유휴 비율에서는 Cloud Run 1대만 떠 있어도 Fargate 보다 비싸 RPS 교차점이 없습니다"
+    if cheaper >= CLOUD_RUN_MAX_INSTANCES:
+        cap = CLOUD_RUN_MAX_INSTANCES * CLOUD_RUN_CONCURRENCY / latency_s
+        return None, (f"Cloud Run 최대 {CLOUD_RUN_MAX_INSTANCES}대(약 {cap:,.0f} RPS) 안에서는 교차점이 없습니다. "
+                      "그 이상은 Terraform 한도라 계산하지 않습니다")
+    return round(cheaper * CLOUD_RUN_CONCURRENCY / latency_s, 1), None
+
+
+def crossover_notes(x: Crossover, req: CostRequest) -> list[str]:
+    """교차점을 주의점 문장으로. 숫자는 위에서 계산한 값만 씁니다."""
+    lines = []
+    if x.break_even_idle_percent is not None:
+        when = ("한 달 내내 켜져 있어도" if x.break_even_idle_percent == 0
+                else f"유휴 {x.break_even_idle_percent:g}% 보다 길면")
+        lines.append(f"교차점: 같은 크기·같은 대수라면 {when} Cloud Run 앱 비용이 Fargate 보다 작습니다 "
+                     f"(Fargate 월 ${x.fargate_app_monthly_usd:,.2f}, Cloud Run 1대 한 달 내내 "
+                     f"${x.cloud_run_instance_monthly_usd:,.2f}, 앱 컴퓨팅만).")
+    if x.break_even_rps is not None and req.traffic is not None:
+        lines.append(f"교차점: 유휴 {req.traffic.idle_percent:g}% 에서 요청 있는 시간 평균 {x.break_even_rps:g} RPS 이하이면 "
+                     f"Cloud Run 앱 비용이 Fargate 보다 작습니다 (처리 시간 {req.traffic.avg_latency_ms:g}ms, "
+                     f"인스턴스당 동시 {x.concurrency}건, Fargate {req.app_instances}대 고정 가정).")
+    elif x.reason:
+        lines.append(f"교차점: {x.reason}.")
+    return lines
 
 
 # -- 공통 ------------------------------------------------------------------------------
@@ -353,15 +438,19 @@ class AwsPrices:
             _f("databaseEngine", "PostgreSQL"), _f("volumeType", AWS_RDS_GP3), _f("deploymentOption", "Single-AZ")])
         return self._pick(items, lambda u: True, "GB-month", "rds gp3 storage")
 
+    def app_monthly(self, req: CostRequest) -> float:
+        """Fargate 앱 월 비용. 서비스 태스크가 계속 떠 있어 트래픽과 상관없이 내내 켜진 값입니다."""
+        vcpu, mem = self.fargate(req.source_region)
+        hours = HOURS_PER_MONTH * req.app_instances
+        return hours * (req.app_vcpu * vcpu.usd + req.app_memory_mib / 1024 * mem.usd)
+
     def cost(self, req: CostRequest, source: str) -> CloudCost:
         region = req.source_region
 
         def app() -> float | None:
             if req.app_vcpu is None or req.app_memory_mib is None:
                 return None
-            vcpu, mem = self.fargate(region)
-            hours = HOURS_PER_MONTH * req.app_instances
-            return hours * (req.app_vcpu * vcpu.usd + req.app_memory_mib / 1024 * mem.usd)
+            return self.app_monthly(req)
 
         def db() -> float | None:
             if not req.db_instance_class:
@@ -414,10 +503,11 @@ def _gcp_auth_header() -> tuple[dict[str, str], dict[str, str]]:
     if key:
         return {"key": key}, {}
     import google.auth  # ADC. provisioning 과 같은 로그인
-    import google.auth.transport.requests
+    import google.auth.transport.urllib3  # 의존성이 google-auth[urllib3] 라 requests 가 없습니다
+    import urllib3
 
     credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-billing.readonly"])
-    credentials.refresh(google.auth.transport.requests.Request())
+    credentials.refresh(google.auth.transport.urllib3.Request(urllib3.PoolManager()))
     return {}, {"Authorization": f"Bearer {credentials.token}"}
 
 
@@ -466,15 +556,18 @@ class GcpPrices:
             raise PriceUnavailable(f"{pattern.pattern} @ {region}: {len(hits)}건")
         return UnitPrice(_gcp_unit_price(hits[0]), unit, hits[0].get("description", ""))
 
+    def app_instance_month(self, req: CostRequest, region: str) -> float:
+        """Cloud Run 인스턴스 1대를 한 달 내내 켰을 때 (인스턴스 기반 과금)."""
+        cpu = self._pick(GCP_CLOUD_RUN, region, _RUN_CPU, "vCPU-second")
+        mem = self._pick(GCP_CLOUD_RUN, region, _RUN_MEMORY, "GiB-second")
+        return SECONDS_PER_MONTH * (req.app_vcpu * cpu.usd + req.app_memory_mib / 1024 * mem.usd)
+
     def cost(self, req: CostRequest, region: str, source: str) -> CloudCost:
         def app() -> float | None:
             if req.app_vcpu is None or req.app_memory_mib is None:
                 return None
-            cpu = self._pick(GCP_CLOUD_RUN, region, _RUN_CPU, "vCPU-second")
-            mem = self._pick(GCP_CLOUD_RUN, region, _RUN_MEMORY, "GiB-second")
             # 트래픽 가정이 있으면 요청이 있는 시간만 켜져 있습니다 (min_instance_count = 0)
-            seconds = SECONDS_PER_MONTH * req.app_instances * active_share(req.traffic)
-            return seconds * (req.app_vcpu * cpu.usd + req.app_memory_mib / 1024 * mem.usd)
+            return self.app_instance_month(req, region) * req.app_instances * active_share(req.traffic)
 
         shared = gcp_sql_shared(req.db_memory_gib) if is_burstable(req) else None
 

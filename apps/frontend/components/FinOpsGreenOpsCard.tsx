@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { DbBasisRows } from "@/components/finops/DbBasisRows";
+import { PriceApiEstimate } from "@/components/finops/PriceApiEstimate";
 import { SensitivityPanel } from "@/components/finops/SensitivityPanel";
 import {
   CARBON_DATA_YEAR,
@@ -30,6 +31,7 @@ import {
   type ProviderFinOpsProfile,
   type TargetProvider,
 } from "@/lib/finops";
+import { estimateRequest, useFinopsEstimate } from "@/lib/finopsApi";
 import { isRecord } from "@/lib/plan";
 import type { RunStatus } from "@/lib/workflows";
 
@@ -192,7 +194,7 @@ function CopyReportButton({ input }: { input: CostReportInput }) {
         onClick={handleCopy}
         className="inline-flex items-center gap-1.5 rounded-lg border border-ink bg-paper px-3 py-1.5 text-xs font-medium text-ink shadow-[2px_2px_0_0_var(--color-ink)] transition-transform active:translate-x-0.5 active:translate-y-0.5 active:shadow-none"
       >
-        {copyState === "copied" ? "✓ 복사 완료!" : "📋 비용 추정 복사"}
+        {copyState === "copied" ? "✓ 복사 완료!" : "📋 참고 계산 복사"}
       </button>
       {copyState === "failed" && (
         <p role="alert" className="w-full text-right text-[11px] font-medium text-rose-700">
@@ -390,7 +392,10 @@ function EvidenceDetails() {
           <p className="mt-2 font-semibold text-ink">계산 가정</p>
           <ul className="mt-1 list-disc space-y-0.5 pl-4">
             <li>요청당 응답 12KB, AWS·GCP 인스턴스 1개, Azure 최소 복제본 2개 기준입니다.</li>
-            <li>Cloud Run 은 요청 기반 과금으로 가정했습니다. 실제 배포 설정은 확인이 필요합니다.</li>
+            <li>
+              참고 계산은 Cloud Run 을 요청 기반 과금으로 셉니다. 가격 API 견적은 Terraform 설정대로 인스턴스 기반 과금
+              (요청 없는 시간 0대)으로 셉니다. 두 값이 다른 주된 이유입니다.
+            </li>
             <li>탄소 값은 Google이 공개한 {CARBON_DATA_YEAR}년 서울 리전 값입니다. AWS·Azure는 같은 형식의 공개값을 확인하지 못했습니다.</li>
           </ul>
         </div>
@@ -404,6 +409,8 @@ function FinOpsCardBody({ run }: Props) {
   const bases = useMemo(() => computeBothBases(params), [params]);
   const metrics = bases.sameMemory;
   const report: CostReportInput = { params, origins };
+  // 같은 입력으로 백엔드 가격 API 견적을 받습니다. 슬라이더를 움직이면 300ms 뒤 한 번만 부릅니다.
+  const estimate = useFinopsEstimate(estimateRequest(params, run.request.aws_region));
 
   return (
     <section
@@ -411,6 +418,14 @@ function FinOpsCardBody({ run }: Props) {
       className="rounded-xl border border-ink bg-white p-5 shadow-[3px_3px_0_0_var(--color-ink)]"
     >
       <CardHeader report={report} setters={setters} />
+      <PriceApiEstimate state={estimate} />
+
+      <h3 className="mt-6 border-t border-ink/15 pt-4 text-sm font-semibold">
+        참고 계산 (화면 고정 단가, 네트워크·등급 비교 포함)
+      </h3>
+      <p className="mt-0.5 text-[11px] text-ink/60">
+        위 가격 API 견적이 기준입니다. 아래는 가격 API 가 아직 다루지 않는 네트워크 송신과 DB 등급 두 기준(같은 메모리·실제 배포) 비교를 위한 참고값입니다.
+      </p>
       <HeroStats metrics={metrics} params={params} />
       <DbBasisRows bases={bases} planDbTier={params.planDbTier} />
       {params.targetProvider === "aws" && (

@@ -22,6 +22,7 @@ type TextField =
   | "rds_instance_id"
   | "db_credentials_ref"
   | "target_region"
+  | "target_project_id"
   | "github_repo_url";
 
 type FormState = Record<TextField, string> & { target_preset: TargetInfraType };
@@ -203,6 +204,34 @@ export default function HomePage() {
                 <p className="mt-1 min-h-[1.25rem] text-xs text-ink/50">{adapter.projectIdHint}</p>
               )}
             </div>
+          </div>
+
+          <div>
+            <label htmlFor="target_project_id" className="text-xs font-semibold text-ink/60">
+              {form.target_preset === "azure"
+                ? "목적지 구독 ID (선택)"
+                : form.target_preset === "aws"
+                ? "목적지 계정 ID (선택)"
+                : "목적지 프로젝트 ID (선택)"}
+            </label>
+            <input
+              id="target_project_id"
+              value={form.target_project_id}
+              onChange={(e) => setForm({ ...form, target_project_id: e.target.value })}
+              placeholder={
+                form.target_preset === "azure"
+                  ? "00000000-0000-0000-0000-000000000000"
+                  : form.target_preset === "aws"
+                  ? "12자리 숫자 (예: 123456789012)"
+                  : "alpha-target-513617"
+              }
+              className={`${INPUT} mt-1 font-mono text-xs`}
+            />
+            <p className="mt-1 min-h-[1.25rem] text-xs text-ink/50">
+              {form.target_preset === "aws"
+                ? "비워둘 시 백엔드 환경변수를 사용하며, 값과 환경변수가 모두 없으면 시작 전 오류('AWS 계정 ID가 없습니다')로 중단됩니다."
+                : "비워둘 시 백엔드 기본 환경변수를 사용합니다."}
+            </p>
           </div>
 
           <p className="text-xs text-ink/50">비밀번호·키 원문은 넣지 않습니다. Secret 경로 같은 참조만 넣으세요.</p>
