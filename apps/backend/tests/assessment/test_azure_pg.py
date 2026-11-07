@@ -7,7 +7,7 @@ import pytest
 from app.features.assessment import azure_pg, db
 from app.features.assessment.schemas import AssessmentInput
 
-KW = dict(aws_credentials_ref="x", aws_region="r", target_region="t", source_cloud="azure")
+KW = dict(aws_credentials_ref="x", aws_region="r", target_region="t", source_kind="azure")
 
 
 class Err(Exception):
@@ -82,7 +82,7 @@ def env(monkeypatch):
 def run(f, rid="rg/srv", ref="env://AZ", cf=None, nf=None):
     cf = cf or compute()
     nf = nf or net()
-    return azure_pg.collect(AssessmentInput(rds_instance_id=rid, db_admin_ref=ref, **KW), None, f, cf, nf)
+    return azure_pg.collect(AssessmentInput(db_instance_id=rid, db_admin_ref=ref, **KW), None, f, cf, nf)
 
 
 def test_ok():
@@ -157,7 +157,7 @@ def test_no_creds_no_leak():
 
 
 def test_integration_never_raises():
-    out = db.collect(AssessmentInput(source_cloud="azure", **{k: v for k, v in KW.items() if k != "source_cloud"}), None)
+    out = db.collect(AssessmentInput(**KW), None)
     assert out.gaps
 
 

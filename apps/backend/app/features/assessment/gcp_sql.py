@@ -130,15 +130,16 @@ def collect(
     ssh_factory: Callable[..., Callable] = ssh_tunnel_factory,
 ) -> CspSource:
     src = CspSource()
-    project = os.environ.get(PROJECT_ENV)
+    project = inp.gcp_project or os.environ.get(PROJECT_ENV)
     if not project:
-        src.gaps.append(f"GCP 프로젝트를 알 수 없음 ({PROJECT_ENV} 미설정)")
+        src.gaps.append(f"GCP 프로젝트를 알 수 없음 (gcp_project 또는 {PROJECT_ENV} 필요)")
         return src
-    if not inp.rds_instance_id:
-        src.gaps.append("Cloud SQL 인스턴스 이름(rds_instance_id)이 지정되지 않음")
+    inst = inp.db_instance_id or inp.rds_instance_id
+    if not inst:
+        src.gaps.append("Cloud SQL 인스턴스 이름(db_instance_id)이 지정되지 않음")
         return src
     try:
-        d = client_factory(session).instances().get(project=project, instance=inp.rds_instance_id).execute()
+        d = client_factory(session).instances().get(project=project, instance=inst).execute()
     except Exception as e:
         src.gaps.append(f"Cloud SQL 조회 실패 ({_err(e)})")
         return src
@@ -174,6 +175,7 @@ def collect(
         publicly_accessible=public, logical_replication=lr)
     src.network = SourceNetwork(
         vpc_id=ip.get("privateNetwork"), allowed_cidrs=[n["value"] for n in ip.get("authorizedNetworks") or [] if n.get("value")])
+    src.region, src.account_id = d.get("region"), project
     conn = d.get("connectionName")
 
     src.creds, reason = refs.resolve_db_admin(inp.db_admin_ref)

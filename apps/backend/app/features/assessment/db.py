@@ -1,7 +1,7 @@
 """원본 DB·네트워크 조회 통합. (담당: 김준석)
 
 흐름: CSP 수집기(인스턴스·네트워크·접근 경로·관리자 자격; csp.CspSource) → PG 카탈로그(pg_connect/pg_tables, CSP 독립).
-CSP 수집기: aws=이 파일의 _collect_aws, gcp=gcp_sql.collect, azure=azure_pg.collect. inp.source_cloud 로 고릅니다.
+CSP 수집기: aws=이 파일의 _collect_aws, gcp=gcp_sql.collect, azure=azure_pg.collect. inp.source_kind 로 고릅니다.
 절대 예외를 던지지 않습니다. 조회 못한 값은 None 으로 두고 gaps 에 한국어 문장(비밀 없음)만 남깁니다.
 """
 
@@ -68,7 +68,7 @@ def _pg_step(inp: AssessmentInput, src: CspSource, gaps: list[str]) -> None:
     try:
         with src.tunnel() as (host, port):
             catalog = pg_connect.collect_catalog(
-                host, port, creds["user"], creds["password"], database, cloud=inp.source_cloud)
+                host, port, creds["user"], creds["password"], database, cloud=inp.source_kind)
     except Exception as e:  # 메시지에 비밀번호가 섞일 수 있어 클래스명만 남깁니다
         gaps.append(f"DB 접속 실패 ({type(e).__name__})")
         return
@@ -98,9 +98,9 @@ def collect(inp: AssessmentInput, session) -> DbAssessment:
     gaps: list[str] = []
     src = CspSource()
     try:
-        collector = COLLECTORS.get(inp.source_cloud)
+        collector = COLLECTORS.get(inp.source_kind)
         if collector is None:
-            gaps.append(f"지원하지 않는 원본 클라우드: {inp.source_cloud}")
+            gaps.append(f"지원하지 않는 원본 클라우드: {inp.source_kind}")
         else:
             src = collector(inp, session)
             gaps += src.gaps
@@ -108,4 +108,5 @@ def collect(inp: AssessmentInput, session) -> DbAssessment:
                 _pg_step(inp, src, gaps)
     except Exception as e:
         gaps.append(f"DB·네트워크 조회 중 오류 ({type(e).__name__})")
-    return DbAssessment(facts=src.db, source_db=src.source_db, network=src.network, gaps=gaps)
+    return DbAssessment(facts=src.db, source_db=src.source_db, network=src.network,
+                        region=src.region, account_id=src.account_id, gaps=gaps)

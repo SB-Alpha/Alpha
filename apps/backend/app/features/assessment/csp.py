@@ -31,6 +31,8 @@ class CspSource:
     network: SourceNetwork = field(default_factory=SourceNetwork)
     db_name: str | None = None  # 인스턴스 생성 시 DB 이름(폴백)
     db_hint: str | None = None  # 앱 설정에서 찾은 DB 이름(보조)
+    region: str | None = None
+    account_id: str | None = None
     creds: dict | None = None
     tunnel: Callable[[], AbstractContextManager[tuple[str, int]]] | None = None
     gaps: list[str] = field(default_factory=list)

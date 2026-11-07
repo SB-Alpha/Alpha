@@ -6,7 +6,7 @@ from app.features.assessment import db, gcp_sql
 from app.features.assessment.schemas import AssessmentInput
 
 KW = dict(aws_credentials_ref="profile:x", aws_region="ap-northeast-2", target_region="asia-northeast3",
-          source_cloud="gcp", rds_instance_id="pg1")
+          source_kind="gcp", db_instance_id="pg1")
 
 
 class HttpError(Exception):

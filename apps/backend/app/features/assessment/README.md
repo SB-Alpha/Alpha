@@ -51,11 +51,12 @@ python -m app.features.assessment.cli --profile <읽기 전용 프로필> --aws-
 | 필드 | 설명 |
 | --- | --- |
 | `run_id`, `github_repo_url` | workflows · 사용자 |
-| `source_kind` | 원본 읽는 방법. `aws`(기본, AWS 계정 조회) / `manual`(직접 입력). 어느 쪽이든 출력 형식은 같음 |
+| `source_kind` | 원본 읽는 방법. `aws`(기본, AWS 계정 조회) / `gcp` · `azure`(관리형 PostgreSQL 조회, 선택 의존성 `.[cloud-sources]`) / `manual`(직접 입력). 어느 쪽이든 출력 형식은 같음 |
 | `manual` | `source_kind="manual"` 이면 필수. `{cloud, region, app: {service_name, image_uri, container_port, vcpu, memory_mib, health_check_path, env_vars, db_user}, db: {engine_version, host, port, database_name, memory_gib, vcpu, storage_gb, publicly_accessible, logical_replication, tables}}`. 모르는 값은 비우면 '확인 안 됨'·기본값 |
 | `aws_credentials_ref` | `source_kind="aws"` 면 필수. 원본 AWS 키 이름표. `secret://...`(backend DB, `core/secrets.resolve`) 또는 로컬 개발용 `profile:<이름>`(`ALPHA_ALLOW_AWS_PROFILE=1` 일 때만, cli.py 가 켬). 저장 값은 `{aws_access_key_id, aws_secret_access_key, aws_session_token?}` (#31 `source-cloud` 와 같음) |
 | `db_admin_ref` | 원본 DB 관리자 계정 이름표 (db.py 가 PG 카탈로그 조회에 사용) |
 | `aws_region` / `target_region` | 원본 AWS 리전(`source_kind="aws"` 면 필수) / 목적지 리전 |
+| `db_instance_id`, `gcp_project`, `azure_subscription_id` | gcp/azure 원본 식별. `db_instance_id` 는 gcp=인스턴스 이름, azure=`<리소스그룹>/<서버>` (비우면 `rds_instance_id`). 프로젝트·구독은 비우면 환경변수 `ALPHA_GCP_PROJECT` · `ALPHA_AZURE_SUBSCRIPTION_ID` |
 | `ecs_cluster`, `ecs_service`, `rds_instance_id` | 선택. 후보가 여러 개일 때만. 비우면 하나뿐일 때 자동 선택, 여러 개면 고르지 않고 gaps |
 
 ## 출력 — `AssessmentOutput`

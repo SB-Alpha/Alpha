@@ -1,6 +1,6 @@
 """Azure Database for PostgreSQL Flexible Server 원본 수집기 (읽기 전용). 오류는 raise 하지 않고 gaps 로 남깁니다.
 
-임시 입력 규약: rds_instance_id="<resource_group>/<server_name>", 구독은 환경변수 ALPHA_AZURE_SUBSCRIPTION_ID.
+입력 규약: db_instance_id(없으면 rds_instance_id)="<resource_group>/<server_name>", 구독은 azure_subscription_id(없으면 환경변수 ALPHA_AZURE_SUBSCRIPTION_ID).
 session 은 azure credential 객체(없으면 DefaultAzureCredential). 테스트는 client_factory 로 가짜 클라이언트를 주입합니다.
 """
 
@@ -235,14 +235,14 @@ def _size(client: Any, location: str | None, sku: str | None) -> tuple[int | Non
 def collect(inp: AssessmentInput, session: Any, client_factory: Callable[[Any, str], Any] = _client,
             compute_factory: Callable[[Any, str], Any] = _compute, network_factory: Callable[[Any, str], Any] = _network) -> CspSource:
     src = CspSource()
-    m = _ID.match(inp.rds_instance_id or "")
+    m = _ID.match(inp.db_instance_id or inp.rds_instance_id or "")
     if not m:
-        src.gaps.append("Azure 서버 식별 형식 오류: rds_instance_id 는 '<리소스그룹>/<서버이름>' 이어야 함")
+        src.gaps.append("Azure 서버 식별 형식 오류: db_instance_id 는 '<리소스그룹>/<서버이름>' 이어야 함")
         return src
     rg, name = m.groups()
-    sub = os.environ.get(SUBSCRIPTION_ENV)
+    sub = inp.azure_subscription_id or os.environ.get(SUBSCRIPTION_ENV)
     if not sub:
-        src.gaps.append(f"Azure 구독이 지정되지 않음: 환경변수 {SUBSCRIPTION_ENV} 필요")
+        src.gaps.append(f"Azure 구독이 지정되지 않음: azure_subscription_id 또는 환경변수 {SUBSCRIPTION_ENV} 필요")
         return src
     try:
         client = client_factory(session, sub)
@@ -262,6 +262,7 @@ def collect(inp: AssessmentInput, session: Any, client_factory: Callable[[Any, s
         except Exception as e:
             src.gaps.append(f"Private Endpoint 조회 실패 ({_err(e)})")
         subnet = pe["subnet_id"] if pe else None
+    src.region, src.account_id = getattr(s, "location", None), sub
     sku, storage = getattr(s, "sku", None), getattr(s, "storage", None)
     host = getattr(s, "fully_qualified_domain_name", None)
     ha_mode = getattr(getattr(s, "high_availability", None), "mode", None)

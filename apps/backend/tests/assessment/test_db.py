@@ -201,5 +201,5 @@ def test_slots_filled_for_non_aws(fx, monkeypatch, cloud):
         db=r.db, source_db=r.source_db, network=r.network, creds={"user": "u", "password": SENTINEL},
         tunnel=lambda: contextlib.nullcontext(("h", 5432))))
     fx["catalog"] = {**CATALOG, "max_replication_slots": 10, "slots_in_use": 2}
-    out = db.collect(INP.model_copy(update={"source_cloud": cloud}), object())
+    out = db.collect(INP.model_copy(update={"source_kind": cloud}), object())
     assert (out.facts.max_replication_slots, out.facts.replication_slots_in_use) == (10, 2)

@@ -215,13 +215,13 @@ class AssessmentInput(BaseModel):
 
     source_kind 로 원본을 읽는 방법을 고릅니다. 어느 쪽이든 결과(AssessmentOutput)는 같은 형식입니다.
     - "aws"(기본): AWS 계정을 조회합니다. aws_credentials_ref · aws_region 이 필요합니다.
+    - "gcp" · "azure": 해당 클라우드의 관리형 PostgreSQL 을 조회합니다 (db_instance_id 등).
     - "manual": 사람이 입력한 manual 값으로 만듭니다. 원본에서 확인한 값이 아니라 gaps 에 남깁니다.
     """
 
     run_id: str | None = None
-    source_kind: Literal["aws", "manual"] = "aws"
+    source_kind: Literal["aws", "gcp", "azure", "manual"] = "aws"
     github_repo_url: str | None = None
-    source_cloud: Literal["aws", "gcp", "azure"] = "aws"  # source_kind="aws" 일 때 원본 클라우드. db.collect 가 수집기를 고름
     aws_credentials_ref: str | None = None  # 원본 AWS 키 이름표. source_kind="aws" 면 필수
     db_admin_ref: str | None = None  # 원본 DB 관리자 계정 이름표 (db.py 가 PG 카탈로그 조회에 씀)
     aws_region: str | None = None  # 원본 AWS 리전. 예: "ap-northeast-2". source_kind="aws" 면 필수
@@ -231,6 +231,9 @@ class AssessmentInput(BaseModel):
     ecs_cluster: str | None = None
     ecs_service: str | None = None
     rds_instance_id: str | None = None
+    db_instance_id: str | None = None  # 원본 DB 식별. gcp=인스턴스 이름, azure="<리소스그룹>/<서버>", 비우면 rds_instance_id
+    gcp_project: str | None = None  # 비우면 환경변수 ALPHA_GCP_PROJECT
+    azure_subscription_id: str | None = None  # 비우면 환경변수 ALPHA_AZURE_SUBSCRIPTION_ID
 
     @model_validator(mode="after")
     def _needs_values_for_kind(self) -> AssessmentInput:
@@ -238,7 +241,7 @@ class AssessmentInput(BaseModel):
             missing = [n for n in ("aws_credentials_ref", "aws_region") if not getattr(self, n)]
             if missing:
                 raise ValueError(f"source_kind=aws 에는 {', '.join(missing)} 가 필요합니다")
-        elif self.manual is None:
+        elif self.source_kind == "manual" and self.manual is None:
             raise ValueError("source_kind=manual 에는 manual 이 필요합니다")
         return self
 
@@ -299,6 +302,8 @@ class DbAssessment(BaseModel):
     facts: DbInfo = Field(default_factory=DbInfo)
     source_db: SourceDb = Field(default_factory=SourceDb)
     network: SourceNetwork = Field(default_factory=SourceNetwork)
+    region: str | None = None
+    account_id: str | None = None
     gaps: list[str] = Field(default_factory=list)
 
 

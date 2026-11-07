@@ -1,4 +1,4 @@
-"""source_cloud 분기: 기본값, stub CSP 의 gaps, CSP별 복제 역할·논리 복제 플래그."""
+"""source_kind 분기: 기본값, stub CSP 의 gaps, CSP별 복제 역할·논리 복제 플래그."""
 
 import pytest
 
@@ -9,14 +9,14 @@ from app.features.assessment.schemas import AssessmentInput
 KW = dict(aws_credentials_ref="profile:x", aws_region="ap-northeast-2", target_region="asia-northeast3")
 
 
-def test_source_cloud_default_aws():
-    assert AssessmentInput(**KW).source_cloud == "aws"
+def test_source_kind_default_aws():
+    assert AssessmentInput(**KW).source_kind == "aws"
 
 
 @pytest.mark.parametrize("cloud", ["aws", "gcp", "azure"])
 def test_csp_without_collector_falls_to_gaps(cloud, monkeypatch):
     monkeypatch.delitem(db.COLLECTORS, cloud)
-    out = db.collect(AssessmentInput(source_cloud=cloud, **KW), object())
+    out = db.collect(AssessmentInput(source_kind=cloud, **KW), object())
     assert out.gaps and out.facts.engine is None and out.source_db.instance_id is None
 
 
@@ -42,16 +42,16 @@ def test_three_csps_same_shape_no_secret(monkeypatch):
     monkeypatch.setattr(pg_connect, "collect_catalog", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("pw-secret")))
     keys = None
     for cloud, rid in [("aws", "i"), ("gcp", "pg1"), ("azure", "rg/srv")]:
-        out = db.collect(AssessmentInput(source_cloud=cloud, rds_instance_id=rid, db_admin_ref="env://X", **KW), object())
+        out = db.collect(AssessmentInput(source_kind=cloud, db_instance_id=rid, db_admin_ref="env://X", **KW), object())
         d = out.model_dump()
-        assert set(d) == {"facts", "source_db", "network", "gaps"}
-        keys = keys or {k: set(v) for k, v in d.items() if k != "gaps"}
-        assert {k: set(v) for k, v in d.items() if k != "gaps"} == keys
+        assert set(d) == {"facts", "source_db", "network", "region", "account_id", "gaps"}
+        keys = keys or {k: set(v) for k, v in d.items() if k not in ("gaps", "region", "account_id")}
+        assert {k: set(v) for k, v in d.items() if k not in ("gaps", "region", "account_id")} == keys
         assert "pw-secret" not in str(d)
 
 
 def test_unknown_csp_gap_not_raise():
-    out = db.collect(AssessmentInput.model_construct(source_cloud="oracle", **KW), object())
+    out = db.collect(AssessmentInput.model_construct(source_kind="oracle", **KW), object())
     assert out.gaps == ["지원하지 않는 원본 클라우드: oracle"]
 
 
@@ -69,3 +69,17 @@ def test_logical_flag_per_csp():
     assert logical_enabled("gcp", "on") and not logical_enabled("gcp", "off")
     assert logical_enabled("azure", "logical") and not logical_enabled("azure", "replica")
     assert logical_enabled("gcp", None) is None
+
+
+def test_gcp_azure_need_neither_aws_nor_manual():
+    for k in ("gcp", "azure"):
+        assert AssessmentInput(source_kind=k, target_region="t").source_kind == k
+    with pytest.raises(ValueError):
+        AssessmentInput(source_kind="manual", target_region="t")
+
+
+def test_cloud_modules_import_without_sdks():
+    import subprocess, sys
+    code = ("import sys\nfor m in ('azure','google','googleapiclient'): sys.modules[m] = None\n"
+            "import app.features.assessment.gcp_sql, app.features.assessment.azure_pg, app.features.assessment.db")
+    assert subprocess.run([sys.executable, "-c", code], capture_output=True).returncode == 0
