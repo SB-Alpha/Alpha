@@ -2,8 +2,7 @@
 
 이전 후보별 월 비용을 비교해서 절감액을 계산하고, 승인자가 읽을 제안 문장을 붙이는 모듈입니다.
 
-- 비용 산출(`estimate.py`): 크기 × 각 클라우드 공식 가격 API 단가. 처음 구현 이주호, 이후 박준서님과 함께
-- 절감 계산·설명 문장(규칙 + AI): 이주호
+- 모듈 담당: 박재현 (11/7 변경). 비용 산출(`estimate.py`)·절감 설명 첫 구현은 이주호
 
 ## 원칙
 
@@ -46,7 +45,7 @@
 | `FinopsInput` | `current`(지금 원본) · `candidates`(이전 후보) 각각 `CloudCost{cloud, region, lines[CostLine{item, monthly_usd, source}]}`, `rightsizing`, `period_days` |
 | `FinopsReport` | `savings[Saving{…, complete, missing}]`, `best`, `summary`, `notes`, `summary_source`("ai" 면 notes 끝에 AI 설명이 붙음) |
 
-`FinopsInput` 은 박준서님 계산 결과를 받을 자리라 형식이 확정되면 맞춥니다.
+`FinopsInput` 은 `estimate.py` 가 만들고, 수동 입력이나 다른 계산(예: Infracost)도 같은 형식으로 넣을 수 있습니다.
 
 ## 파일
 
