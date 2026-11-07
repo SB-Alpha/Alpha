@@ -37,6 +37,22 @@ def test_aws_source_without_require_switch_stays_open():
         assert client.get("/health/live").status_code == 200
 
 
+def test_aws_source_without_require_switch_serves_the_api():
+    # 원본의 업무 API가 열려 있는지 확인 (DB 결과는 빈 목록으로 대체)
+    with patch.dict(os.environ, {"APP_ENV": "aws"}, clear=True), patch("app.db.pool") as pool, TestClient(app) as client:
+        pool.connection.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = []
+        res = client.get("/api/work-items")
+    assert res.status_code == 200
+    assert res.json() == []
+
+
+def test_require_worker_secret_with_the_secret_accepts_the_worker():
+    env = {"APP_ENV": "gcp", "REQUIRE_WORKER_SECRET": "true", "WORKER_SECRET": SECRET}
+    with patch.dict(os.environ, env, clear=True), TestClient(app) as client:
+        assert client.get("/").status_code == 403
+        assert client.get("/", headers={"X-Alpha-Worker-Secret": SECRET}).status_code == 200
+
+
 def test_require_worker_secret_without_secret_is_blocked_fail_closed():
     # REQUIRE_WORKER_SECRET=true가 켜진 대상 환경(GCP 등)에서 시크릿이 누락되면 403으로 즉시 차단
     with patch.dict(os.environ, {"APP_ENV": "gcp", "REQUIRE_WORKER_SECRET": "true"}, clear=True), TestClient(app) as client:

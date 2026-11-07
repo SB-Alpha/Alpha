@@ -34,6 +34,8 @@ DB 연결은 PostgreSQL 표준(libpq) 변수를 그대로 씁니다. ECS에서�
 | `PORT` |  | 기본 8080 |
 | `APP_ENV` |  | 처리 환경 표시 (예: `aws`, `gcp`). 응답 헤더 `X-Served-By`와 로그에 그대로 찍힘 |
 | `LOG_LEVEL` |  | 기본 `INFO` |
+| `WORKER_SECRET` |  | 설정하면 `/health/*` 밖의 요청은 `X-Alpha-Worker-Secret` 헤더가 같은 값일 때만 받고, 나머지는 403. Cloudflare Worker와 같은 값을 **비밀 참조로 주입** (#34) |
+| `REQUIRE_WORKER_SECRET` |  | `true`면 `WORKER_SECRET`이 없을 때 모든 요청을 403으로 거절. Worker가 헤더를 보내는 목적지에서만 켜고, AWS 원본·로컬에서는 끔 |
 
 ## 3. 실행
 

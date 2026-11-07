@@ -68,7 +68,12 @@ app = FastAPI(title="target-app", version="0.1.0", lifespan=lifespan)
 # Declared before request_log so that request_log wraps it and blocked requests are logged too.
 @app.middleware("http")
 async def verify_proxy_secret(request: Request, call_next):
-    """Accept only requests that came through the Cloudflare Worker when WORKER_SECRET is set (#34).
+    """Accept only requests that came through the Cloudflare Worker (#34).
+
+    - WORKER_SECRET set: the request must carry the same value in the proxy header.
+    - REQUIRE_WORKER_SECRET=true and no WORKER_SECRET: every request is refused (fail-closed).
+      Turn this on only where the Worker sends the header (the target, not the AWS source).
+    - Neither set (local, AWS source): the check is off.
 
     /health/* stays open because Cloud Run probes and the platform call it directly.
     """
@@ -78,24 +83,22 @@ async def verify_proxy_secret(request: Request, call_next):
     required = os.getenv("REQUIRE_WORKER_SECRET", "").lower() in ("1", "true", "yes")
     expected = os.getenv("WORKER_SECRET")
 
-    # REQUIRE_WORKER_SECRET이 켜진 환경에서 시크릿이 누락된 경우 fail-open 방지 (403)
-    if required and not expected:
-        return Response(
-            content=json.dumps({"detail": "Server configuration error: WORKER_SECRET is required when REQUIRE_WORKER_SECRET is enabled."}),
-            status_code=403,
-            media_type="application/json",
-        )
-
-    # 시크릿이 설정되었거나 필수 검증이 켜진 경우 헤더 검사
-    if expected or required:
-        token = request.headers.get(WORKER_SECRET_HEADER, "")
-        if not expected or not hmac.compare_digest(token.encode(), expected.encode()):
+    if not expected:
+        if required:
             return Response(
-                content=json.dumps({"detail": "Direct access forbidden. Requests must pass through Cloudflare Worker."}),
+                content=json.dumps({"detail": "Server configuration error: WORKER_SECRET is required when REQUIRE_WORKER_SECRET is enabled."}),
                 status_code=403,
                 media_type="application/json",
             )
+        return await call_next(request)
 
+    token = request.headers.get(WORKER_SECRET_HEADER, "")
+    if not hmac.compare_digest(token.encode(), expected.encode()):
+        return Response(
+            content=json.dumps({"detail": "Direct access forbidden. Requests must pass through Cloudflare Worker."}),
+            status_code=403,
+            media_type="application/json",
+        )
     return await call_next(request)
 
 
