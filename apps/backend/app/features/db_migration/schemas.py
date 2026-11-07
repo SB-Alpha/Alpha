@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import TypedDict
 
 from .settings import tunables
@@ -303,6 +303,28 @@ class MigrationRunStatus(BaseModel):
 
 # workflows에도 RunStatus가 있어 API 문서의 이름이 겹치지 않게 모델 이름을 나눴다.
 RunStatus = MigrationRunStatus
+
+
+class RunSummary(BaseModel):
+    run_id: str
+    route: Route | None = None
+    active: bool = Field(description="이 앱에서 지금 실행 중이거나 정리 중")
+
+
+class RetryRequest(BaseModel):
+    """주지 않은 값은 전에 고른 값을 그대로 쓴다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_database: str | None = None
+    target_database: str | None = None
+
+    @field_validator("source_database", "target_database")
+    @classmethod
+    def _single_line(cls, value: str | None) -> str | None:
+        if value is not None and not single_line(value):
+            raise ValueError("must be a single line of text without surrounding spaces")
+        return value
 
 
 class CloudStatus(BaseModel):

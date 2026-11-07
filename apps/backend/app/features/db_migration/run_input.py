@@ -4,6 +4,7 @@
 """
 
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -16,7 +17,7 @@ from pydantic import (
     field_validator,
 )
 
-from app.core.secrets import put_secret, resolve
+from app.core.secrets import has_secret, put_secret, resolve
 
 from .schemas import RUN_ID_PATTERN, single_line
 
@@ -37,6 +38,9 @@ TARGET_DB_TAG = "target-admin"
 # 정리 시점에는 run_id만 알므로 안내 분기에 쓸 cloud 값을 남긴다. 비밀값은 없다.
 CLOUDS_TAG = "run-clouds"
 UNKNOWN_FIELD = "unknown_field"
+# 저장소는 이름으로 찾을 수 없어 화면에 보여 줄 run을 따로 적어 둔다. 비밀값은 없다.
+RUN_INDEX = "db-migration/run-index"
+_index_lock = threading.Lock()
 
 
 class InvalidInput(ValueError):
@@ -49,6 +53,10 @@ class InvalidInput(ValueError):
 
 class MissingCredentials(RuntimeError):
     """클라우드 권한이 저장되지 않았거나 형식이 맞지 않는다. 값과 저장된 키 이름은 담지 않는다."""
+
+
+class NoSavedInput(LookupError):
+    """입력을 다시 받지 않고는 이어서 실행할 수 없다."""
 
 
 class _Strict(BaseModel):
@@ -161,13 +169,17 @@ def inject(run_id: str, inp: RunInput) -> InjectedRun:
     target_credentials = _credentials_ref(inp.target.cloud)
     put_secret(
         f"{run_id}/{CLOUDS_TAG}",
-        {
+        _without_none({
             "source": inp.source.cloud,
             "target": inp.target.cloud,
             "source_region": inp.source.region,
             "target_region": inp.target.region,
-        },
+            "target_app_user": inp.target.db.app_user,
+            "source_database": inp.source.db.database,
+            "target_database": inp.target.db.database,
+        }),
     )
+    _remember_run(run_id)
     return InjectedRun(
         run_id=run_id,
         source=_inject_endpoint(run_id, inp.source, source_credentials, SOURCE_DB_TAG),
@@ -175,6 +187,31 @@ def inject(run_id: str, inp: RunInput) -> InjectedRun:
         target_app_user=inp.target.db.app_user,
         source_database=inp.source.db.database,
         target_database=inp.target.db.database,
+    )
+
+
+def reload_run(run_id: str, *, source_database: str | None = None, target_database: str | None = None) -> InjectedRun:
+    """저장된 입력으로 다시 실행한다. DB 이름을 주면 그 값으로 바꾸고, 주지 않으면 전에 고른 값을 쓴다."""
+    try:
+        saved = resolve(f"secret://{run_id}/{CLOUDS_TAG}")
+    except KeyError:
+        raise NoSavedInput(run_id) from None
+    source_ref, target_ref = f"secret://{run_id}/{SOURCE_DB_TAG}", f"secret://{run_id}/{TARGET_DB_TAG}"
+    if "target_app_user" not in saved or not has_secret(source_ref) or not has_secret(target_ref):
+        raise NoSavedInput(run_id)
+    source_credentials = _credentials_ref(saved["source"])
+    target_credentials = _credentials_ref(saved["target"])
+    source_database = source_database or saved.get("source_database")
+    target_database = target_database or saved.get("target_database")
+    put_secret(f"{run_id}/{CLOUDS_TAG}",
+               _without_none({**saved, "source_database": source_database, "target_database": target_database}))
+    return InjectedRun(
+        run_id=run_id,
+        source=InjectedEndpoint(saved["source"], saved["source_region"], source_credentials, source_ref),
+        target=InjectedEndpoint(saved["target"], saved["target_region"], target_credentials, target_ref),
+        target_app_user=saved["target_app_user"],
+        source_database=source_database,
+        target_database=target_database,
     )
 
 
@@ -189,6 +226,18 @@ def saved_target_network(run_id: str) -> str | None:
         return resolve(f"secret://{run_id}/{CLOUDS_TAG}").get("target_db_network")
     except KeyError:
         return None
+
+
+def known_runs() -> list[str]:
+    try:
+        return list(resolve(f"secret://{RUN_INDEX}"))
+    except KeyError:
+        return []
+
+
+def forget_runs(run_ids: list[str]) -> None:
+    with _index_lock:
+        put_secret(RUN_INDEX, {run_id: "1" for run_id in known_runs() if run_id not in run_ids})
 
 
 def credentials_registered(cloud: str) -> bool:
@@ -218,6 +267,15 @@ def saved_route(run_id: str) -> dict[str, dict[str, str]] | None:
         }
     except KeyError:
         return None
+
+
+def _without_none(values: dict[str, str | None]) -> dict[str, str]:
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def _remember_run(run_id: str) -> None:
+    with _index_lock:
+        put_secret(RUN_INDEX, {**dict.fromkeys(known_runs(), "1"), run_id: "1"})
 
 
 def _field_name(error: Any) -> str:

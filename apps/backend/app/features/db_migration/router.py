@@ -21,7 +21,9 @@ from app.features.db_migration.schemas import (
     CutoverResult,
     FinishResult,
     JobRequest,
+    RetryRequest,
     RunStatus,
+    RunSummary,
 )
 from app.features.db_migration.settings import MissingSetting
 
@@ -90,6 +92,18 @@ def add_exception_handlers(app: FastAPI) -> None:
 def start_run(body: Annotated[Any, Depends(_json_body)], client: Agent) -> dict:
     """Save the inputs and start the migration in the background; see GET /runs/{run_id}."""
     return {"run_id": db_workflow.run(body, agent=client)}
+
+
+@router.get("/runs")
+def list_runs() -> list[RunSummary]:
+    """Runs still running or with something left to clean up. Read each one with GET /runs/{run_id}."""
+    return db_workflow.list_runs()
+
+
+@router.post("/runs/{run_id}/retry", status_code=202)
+def retry_run(run_id: RunId, client: Agent, req: RetryRequest | None = None) -> dict:
+    """Continue a failed run from its saved inputs, with the databases chosen from database_choices."""
+    return {"run_id": db_workflow.retry(run_id, req, agent=client)}
 
 
 @router.get("/runs/{run_id}")

@@ -77,8 +77,12 @@ from .progress_view import (
 from .run_input import (
     InjectedRun,
     InvalidInput,
+    NoSavedInput,
+    forget_runs,
     inject,
+    known_runs,
     parse,
+    reload_run,
     save_target_network,
     saved_clouds,
     saved_route,
@@ -93,9 +97,11 @@ from .schemas import (
     FinishResult,
     JobOptions,
     JobRequest,
+    RetryRequest,
     Route,
     RunError,
     RunStatus,
+    RunSummary,
     SourceSpec,
     TargetSpec,
 )
@@ -216,6 +222,44 @@ def run(inp: Any, *, agent: CdcAgentClient | None = None, ctx: Reporter | None =
         raise
     _start_background(injected, agent, ctx)
     return run_id
+
+
+def retry(run_id: str, request: RetryRequest | None = None, *, agent: CdcAgentClient | None = None,
+          ctx: Reporter | None = None) -> str:
+    """저장된 입력으로 이어서 실행한다. 비밀번호를 다시 받지 않는다. 고른 DB 이름만 받는다."""
+    request = request or RetryRequest()
+    _refuse_ended_run(run_id, agent)
+    if not _reserve(run_id):
+        raise NotAllowed(BUSY_MESSAGE.format(run_id=run_id))
+    try:
+        injected = reload_run(run_id, source_database=request.source_database, target_database=request.target_database)
+    except NoSavedInput:
+        with _active_lock:
+            _runs.pop(run_id, None)
+        _release(run_id)
+        raise NotAllowed(f"run {run_id} has no saved inputs; start it again with POST /runs") from None
+    except BaseException:
+        with _active_lock:
+            _runs.pop(run_id, None)
+        _release(run_id)
+        raise
+    _start_background(injected, agent, ctx)
+    return run_id
+
+
+def list_runs() -> list[RunSummary]:
+    """정리할 것이 남았거나 실행 중인 run. 깨끗하게 끝난 run은 목록에서 뺀다."""
+    with _active_lock:
+        active = _active | _cleaning
+    runs, finished = [], []
+    for run_id in known_runs():
+        if run_id in active or _remaining(run_id, None):
+            runs.append(RunSummary(run_id=run_id, route=_route(run_id, None), active=run_id in active))
+        else:
+            finished.append(run_id)
+    if finished:
+        forget_runs(finished)
+    return runs
 
 
 def _start_background(injected: InjectedRun, agent: CdcAgentClient | None, ctx: Reporter | None) -> None:
