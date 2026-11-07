@@ -234,6 +234,55 @@ def test_db_migration_runner_raises_on_background_error(engine, monkeypatch):
         run_db_migration(run, ctx=None, poll_interval_s=0.01)  # type: ignore[arg-type]
 
 
+def _slow_cdc_run(engine, monkeypatch, stop):
+    release = threading.Event()
+
+    def still_building_vpn(inp, proxy):
+        proxy.report("running", 0, None, "VPN 준비")
+        release.wait(timeout=5)
+        return {"state": "stopped", "job_id": inp["run_id"]}
+
+    monkeypatch.setattr("app.features.db_migration.service.run", still_building_vpn, raising=False)
+    monkeypatch.setattr("app.features.db_migration.service.stop", stop, raising=False)
+    run = engine.create_run(REQUEST).model_copy(update={"outputs": {
+        "planning": {"source": {"tables": ["public.users"]}},
+        "provisioning": {"target": {"project_id": "p-1"}},
+    }})
+    return run, release
+
+
+def test_cdc_ready_wait_is_long_enough_for_a_real_vpn():
+    import inspect
+
+    from app.features.workflows import runners
+
+    default = inspect.signature(run_db_migration).parameters["timeout_s"].default
+    assert default == runners.CDC_READY_TIMEOUT_S == 1800.0
+
+
+def test_cdc_ready_timeout_stops_the_unready_job_so_a_retry_is_not_blocked(engine, monkeypatch):
+    stopped = []
+    run, release = _slow_cdc_run(engine, monkeypatch, stop=lambda run_id: stopped.append(run_id))
+    try:
+        with pytest.raises(TimeoutError, match="정리를 요청했습니다"):
+            run_db_migration(run, ctx=None, poll_interval_s=0.001, timeout_s=0.05)  # type: ignore[arg-type]
+        assert stopped == [run.run_id]
+    finally:
+        release.set()
+
+
+def test_cdc_ready_timeout_says_so_when_the_stop_fails(engine, monkeypatch):
+    def broken_stop(run_id):
+        raise RuntimeError("agent down")
+
+    run, release = _slow_cdc_run(engine, monkeypatch, stop=broken_stop)
+    try:
+        with pytest.raises(TimeoutError, match="정리를 요청하지 못했습니다 \\(RuntimeError\\)"):
+            run_db_migration(run, ctx=None, poll_interval_s=0.001, timeout_s=0.05)  # type: ignore[arg-type]
+    finally:
+        release.set()
+
+
 
 def test_db_migration_runner_missing_outputs_raises(engine):
     run = engine.create_run(REQUEST)
@@ -768,6 +817,14 @@ def test_out_of_order_step_reports_only_the_displaced_name(engine, monkeypatch):
     m = reports[-1].metrics
     assert m["cutover_sequence"] == "INCOMPLETE"
     assert m["cutover_sequence_missing"] == ["validated"]
+
+
+def test_cutover_sequence_accepts_snapshot_fixed_for_fast_cutover(engine, monkeypatch):
+    evidence = _steps("hold", "marker_on_target", "snapshot_fixed", "switched_to_target", "released")
+    reports, _ = _drive_cutover(engine, monkeypatch, {**STABILIZING, "evidence": evidence})
+    m = reports[-1].metrics
+    assert m["cutover_sequence"] == "VERIFIED"
+    assert "cutover_sequence_missing" not in m
 
 
 @pytest.mark.parametrize(
