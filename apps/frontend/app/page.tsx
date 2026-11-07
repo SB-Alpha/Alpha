@@ -78,7 +78,7 @@ function toRequest(form: FormState): MigrationRequest {
     db_credentials_ref: optional(form.db_credentials_ref),
     db_admin_ref: optional(form.db_admin_ref),
     target_region: targetRegion,
-    target_infra: adapter.toConfig(targetRegion, form.target_project_id),
+    target_infra: adapter.toConfig(targetRegion, optional(form.target_project_id)),
   };
 }
 
@@ -123,7 +123,7 @@ export default function HomePage() {
         value={form[key]}
         onChange={(e) => setForm({ ...form, [key]: e.target.value })}
         placeholder={placeholder}
-        className={`${INPUT} mt-1 ${key.endsWith("_ref") ? "font-mono text-xs" : ""}`}
+        className={`${INPUT} mt-1 ${key.endsWith("_ref") || key === "target_project_id" ? "font-mono text-xs" : ""}`}
       />
     </div>
   );
@@ -180,14 +180,17 @@ export default function HomePage() {
                 ))}
               </select>
             </div>
-            {field(
-              {
-                key: "target_project_id",
-                label: `목적지 ${adapter.cloudName} ${adapter.projectIdLabel}`,
-                placeholder: adapter.projectIdPlaceholder,
-              },
-              false,
-            )}
+            <div>
+              {field(
+                {
+                  key: "target_project_id",
+                  label: adapter.projectIdLabel,
+                  placeholder: adapter.projectIdPlaceholder,
+                },
+                false,
+              )}
+              <p className="mt-1 min-h-[1.25rem] text-xs text-ink/50">{adapter.projectIdHint}</p>
+            </div>
           </div>
 
           <p className="text-xs text-ink/50">비밀번호·키 원문은 넣지 않습니다. Secret 경로 같은 참조만 넣으세요.</p>
