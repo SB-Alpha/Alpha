@@ -351,6 +351,18 @@ export function PhysicsControlsOverlay({
               onMouseDown={() => onUpdateDriveControl({ left: true })}
               onMouseUp={() => onUpdateDriveControl({ left: false })}
               onMouseLeave={() => onUpdateDriveControl({ left: false })}
+              onTouchStart={(e) => {
+                e.preventDefault();
+                onUpdateDriveControl({ left: true });
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                onUpdateDriveControl({ left: false });
+              }}
+              onTouchCancel={(e) => {
+                e.preventDefault();
+                onUpdateDriveControl({ left: false });
+              }}
               className="rounded border border-ink/25 bg-paper px-2.5 py-1.5 font-mono text-xs font-bold transition-transform hover:border-ink active:scale-[0.96] active:bg-ink active:text-paper"
             >
               ◀ 좌
@@ -360,6 +372,18 @@ export function PhysicsControlsOverlay({
               onMouseDown={() => onUpdateDriveControl({ forward: true })}
               onMouseUp={() => onUpdateDriveControl({ forward: false })}
               onMouseLeave={() => onUpdateDriveControl({ forward: false })}
+              onTouchStart={(e) => {
+                e.preventDefault();
+                onUpdateDriveControl({ forward: true });
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                onUpdateDriveControl({ forward: false });
+              }}
+              onTouchCancel={(e) => {
+                e.preventDefault();
+                onUpdateDriveControl({ forward: false });
+              }}
               className="rounded border border-ink bg-ink px-3 py-1.5 font-mono text-xs font-bold text-paper transition-transform active:scale-[0.96] active:opacity-80"
             >
               ▲ 전진 가속
@@ -369,6 +393,18 @@ export function PhysicsControlsOverlay({
               onMouseDown={() => onUpdateDriveControl({ backward: true })}
               onMouseUp={() => onUpdateDriveControl({ backward: false })}
               onMouseLeave={() => onUpdateDriveControl({ backward: false })}
+              onTouchStart={(e) => {
+                e.preventDefault();
+                onUpdateDriveControl({ backward: true });
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                onUpdateDriveControl({ backward: false });
+              }}
+              onTouchCancel={(e) => {
+                e.preventDefault();
+                onUpdateDriveControl({ backward: false });
+              }}
               className="rounded border border-ink/25 bg-paper px-2.5 py-1.5 font-mono text-xs font-bold transition-transform hover:border-ink active:scale-[0.96] active:bg-ink active:text-paper"
             >
               ▼ 후진
@@ -378,6 +414,18 @@ export function PhysicsControlsOverlay({
               onMouseDown={() => onUpdateDriveControl({ right: true })}
               onMouseUp={() => onUpdateDriveControl({ right: false })}
               onMouseLeave={() => onUpdateDriveControl({ right: false })}
+              onTouchStart={(e) => {
+                e.preventDefault();
+                onUpdateDriveControl({ right: true });
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                onUpdateDriveControl({ right: false });
+              }}
+              onTouchCancel={(e) => {
+                e.preventDefault();
+                onUpdateDriveControl({ right: false });
+              }}
               className="rounded border border-ink/25 bg-paper px-2.5 py-1.5 font-mono text-xs font-bold transition-transform hover:border-ink active:scale-[0.96] active:bg-ink active:text-paper"
             >
               우 ▶
