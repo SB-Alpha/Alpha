@@ -136,7 +136,7 @@ def test_new_incident_gets_past_cases_as_data_and_a_roomy_token_limit(monkeypatc
     seen = fake_anthropic(monkeypatch, ai_answer())
     diag = diagnose_run(failed_run(run_id="mig-new"), bank=bank)
     assert diag.diagnosed_by == "ai"
-    assert seen["max_tokens"] == healer.MAX_TOKENS >= 8000
+    assert seen["max_tokens"] == healer.MAX_TOKENS >= 4000
     payload = json.loads(seen["messages"][0]["content"])
     assert payload["past_cases"][0]["root_cause"] == "예전 사례 원인"
     assert payload["past_cases"][0]["resolved_count"] == 1

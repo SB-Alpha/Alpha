@@ -24,8 +24,9 @@ log = logging.getLogger(__name__)
 
 MODEL = "claude-opus-5-5"
 TIMEOUT_SECONDS = 30.0
-# 생각 토큰이 max_tokens 안에 들어가는 모델이 있어 넉넉히 잡습니다. 그래도 끝까지 못 쓰면 end_turn 이 아니라서 버립니다.
-MAX_TOKENS = 8000
+# 실호출(Opus 5.5, 8회)에서 출력이 514~709 토큰이었습니다. 생각 토큰이 한도에 들어가는 모델도 있어 여유를 두되,
+# 끝까지 못 쓴 응답(end_turn 이 아닌 것)은 버립니다.
+MAX_TOKENS = 4000
 CATEGORIES = ("environment_dependency", "credentials", "network", "schema", "unknown")
 
 
