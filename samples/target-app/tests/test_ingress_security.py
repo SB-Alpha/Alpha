@@ -30,8 +30,16 @@ def test_without_a_secret_in_local_mode_routes_stay_open():
         assert open_client.get("/health/live").status_code == 200
 
 
-def test_without_a_secret_in_non_local_mode_traffic_is_blocked_fail_closed():
-    with patch.dict(os.environ, {"APP_ENV": "gcp"}, clear=True), TestClient(app) as client:
+def test_aws_source_without_require_switch_stays_open():
+    # AWS 원본(APP_ENV=aws)에서는 REQUIRE_WORKER_SECRET 스위치가 없으면 비인가 차단 없이 정상 통과 (200)
+    with patch.dict(os.environ, {"APP_ENV": "aws"}, clear=True), TestClient(app) as client:
+        assert client.get("/").status_code == 200
+        assert client.get("/health/live").status_code == 200
+
+
+def test_require_worker_secret_without_secret_is_blocked_fail_closed():
+    # REQUIRE_WORKER_SECRET=true가 켜진 대상 환경(GCP 등)에서 시크릿이 누락되면 403으로 즉시 차단
+    with patch.dict(os.environ, {"APP_ENV": "gcp", "REQUIRE_WORKER_SECRET": "true"}, clear=True), TestClient(app) as client:
         res = client.get("/")
         assert res.status_code == 403
         assert "WORKER_SECRET is required" in res.json()["detail"]

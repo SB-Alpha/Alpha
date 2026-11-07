@@ -74,23 +74,28 @@ async def verify_proxy_secret(request: Request, call_next):
     """
     if request.url.path.startswith("/health/"):
         return await call_next(request)
+
+    required = os.getenv("REQUIRE_WORKER_SECRET", "").lower() in ("1", "true", "yes")
     expected = os.getenv("WORKER_SECRET")
-    if not expected:
-        # non-local 환경에서 시크릿이 설정되지 않은 채 배포되면 보호가 비활성화되는 fail-open 방지
-        if os.getenv("APP_ENV", SERVED_BY) != "local":
-            return Response(
-                content=json.dumps({"detail": "Server configuration error: WORKER_SECRET is required in non-local environments."}),
-                status_code=403,
-                media_type="application/json",
-            )
-        return await call_next(request)
-    token = request.headers.get(WORKER_SECRET_HEADER, "")
-    if not hmac.compare_digest(token.encode(), expected.encode()):
+
+    # REQUIRE_WORKER_SECRET이 켜진 환경에서 시크릿이 누락된 경우 fail-open 방지 (403)
+    if required and not expected:
         return Response(
-            content=json.dumps({"detail": "Direct access forbidden. Requests must pass through Cloudflare Worker."}),
+            content=json.dumps({"detail": "Server configuration error: WORKER_SECRET is required when REQUIRE_WORKER_SECRET is enabled."}),
             status_code=403,
             media_type="application/json",
         )
+
+    # 시크릿이 설정되었거나 필수 검증이 켜진 경우 헤더 검사
+    if expected or required:
+        token = request.headers.get(WORKER_SECRET_HEADER, "")
+        if not expected or not hmac.compare_digest(token.encode(), expected.encode()):
+            return Response(
+                content=json.dumps({"detail": "Direct access forbidden. Requests must pass through Cloudflare Worker."}),
+                status_code=403,
+                media_type="application/json",
+            )
+
     return await call_next(request)
 
 
