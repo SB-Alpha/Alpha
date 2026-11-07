@@ -24,6 +24,8 @@ PROBE_URL_ENV = "ALPHA_PROBE_URL"
 DEFAULT_INTERVAL_S = 0.2
 DEFAULT_TIMEOUT_S = 10.0
 ORIGIN_HEADER = "X-Gate-Origin"
+# urllib 기본값(Python-urllib/x.y)은 Cloudflare 봇 차단에 403 을 받아, 정상인 서비스가 실패로 집계됩니다.
+USER_AGENT = "alpha-workflows/1.0"
 
 
 def _percentile(values: list[float], percent: int) -> float:
@@ -83,7 +85,8 @@ class TrafficProber:
         started = time.perf_counter()
         origin: str | None = None
         try:
-            with urllib.request.urlopen(self._url, timeout=self._timeout_s) as response:
+            request = urllib.request.Request(self._url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(request, timeout=self._timeout_s) as response:
                 response.read()
                 origin = response.headers.get(ORIGIN_HEADER)
             is_failure = False

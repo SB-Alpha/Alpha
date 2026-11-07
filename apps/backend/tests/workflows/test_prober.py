@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from app.features.workflows.prober import ProbedContext, TrafficProber, prober_from_env
+from app.features.workflows.prober import USER_AGENT, ProbedContext, TrafficProber, prober_from_env
 
 
 class Upstream:
@@ -18,10 +18,12 @@ class Upstream:
         self.status = 200
         self.delay_s = 0.0
         self.origin: str | None = "SOURCE"
+        self.user_agent: str | None = None
         upstream = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
+                upstream.user_agent = self.headers.get("User-Agent")
                 time.sleep(upstream.delay_s)
                 self.send_response(upstream.status)
                 if upstream.origin:
@@ -64,6 +66,12 @@ def test_healthy_upstream_reports_zero_failures(upstream):
     assert metrics["failed_requests"] == 0
     assert metrics["probe_requests"] >= 3
     assert metrics["probe_last_origin"] == "SOURCE"
+
+
+def test_sends_its_own_user_agent_so_cloudflare_does_not_block_it(upstream):
+    _measure(upstream.url, count=1)
+    assert upstream.user_agent == USER_AGENT
+    assert not upstream.user_agent.startswith("Python-urllib")
 
 
 def test_server_errors_are_counted_as_failures(upstream):
