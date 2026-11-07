@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from app.core.secrets import has_secret, put_secret, resolve
 from app.features.db_migration import cloud_lookup, db_workflow, run_input
 from app.features.db_migration import router as db_router
+from app.features.db_migration.client import AgentError
 from app.features.db_migration.cloud_guides import CLOUD_GUIDES, credential_next_steps
 from app.main import app
 
@@ -352,3 +353,31 @@ def test_route_needs_the_credentials_of_both_clouds():
 
     with pytest.raises(run_input.MissingCredentials, match="azure"):
         run_input.inject("mig-001", run_input.parse(route_input("gcp", "azure")))
+
+
+class _NoJobAgent:
+    def get_job(self, job_id):
+        raise AgentError(404, "no such job")
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    [("aws", "gcp"), ("aws", "azure"), ("gcp", "aws"), ("gcp", "azure"), ("azure", "aws"), ("azure", "gcp")],
+)
+def test_status_gives_the_route_in_the_same_form_on_all_six_routes(source, target):
+    for cloud in (source, target):
+        put_secret(f"cloud/{cloud}", CREDENTIALS[cloud])
+    regions = {"aws": "ap-northeast-2", "gcp": "asia-northeast3", "azure": "koreacentral"}
+    body = copy.deepcopy(INPUT)
+    body["source"].update(cloud=source, region=regions[source])
+    body["target"].update(cloud=target, region=regions[target])
+
+    agent = _NoJobAgent()
+    run_id = _run_and_wait(body, agent=agent)
+    status = db_workflow.status(run_id, agent=agent)
+
+    assert status.route.model_dump() == {
+        "source": {"cloud": source, "region": regions[source]},
+        "target": {"cloud": target, "region": regions[target]},
+    }
+    assert SOURCE_PASSWORD not in status.model_dump_json() and TARGET_PASSWORD not in status.model_dump_json()

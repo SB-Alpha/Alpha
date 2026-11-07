@@ -209,9 +209,20 @@ class SourceLookup(BaseModel):
     db_admin_ref: str
 
 
+class RouteEnd(BaseModel):
+    cloud: str
+    region: str
+
+
+class Route(BaseModel):
+    source: RouteEnd
+    target: RouteEnd
+
+
 class RunStatus(BaseModel):
     run_id: str
     job_id: str
+    route: Route | None = None
     state: str
     phase: str
     progress: int

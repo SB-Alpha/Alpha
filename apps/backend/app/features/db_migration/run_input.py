@@ -148,7 +148,15 @@ def inject(run_id: str, inp: RunInput) -> InjectedRun:
     """권한을 모두 확인한 뒤에 DB 계정을 저장한다. 같은 run_id로 다시 부르면 계정을 덮어쓴다."""
     source_credentials = _credentials_ref(inp.source.cloud)
     target_credentials = _credentials_ref(inp.target.cloud)
-    put_secret(f"{run_id}/{CLOUDS_TAG}", {"source": inp.source.cloud, "target": inp.target.cloud})
+    put_secret(
+        f"{run_id}/{CLOUDS_TAG}",
+        {
+            "source": inp.source.cloud,
+            "target": inp.target.cloud,
+            "source_region": inp.source.region,
+            "target_region": inp.target.region,
+        },
+    )
     return InjectedRun(
         run_id=run_id,
         source=_inject_endpoint(run_id, inp.source, source_credentials, SOURCE_DB_TAG),
@@ -164,6 +172,18 @@ def saved_clouds(run_id: str) -> tuple[str, str] | None:
     except KeyError:
         return None
     return clouds["source"], clouds["target"]
+
+
+def saved_route(run_id: str) -> dict[str, dict[str, str]] | None:
+    """이 입구로 시작한 run의 경로. 다른 경로로 시작했으면 None."""
+    try:
+        saved = resolve(f"secret://{run_id}/{CLOUDS_TAG}")
+        return {
+            "source": {"cloud": saved["source"], "region": saved["source_region"]},
+            "target": {"cloud": saved["target"], "region": saved["target_region"]},
+        }
+    except KeyError:
+        return None
 
 
 def _field_name(error: Any) -> str:

@@ -58,7 +58,7 @@ from .progress_view import (
     network_exposure,
     to_metrics,
 )
-from .run_input import InjectedRun, InvalidInput, inject, parse, saved_clouds
+from .run_input import InjectedRun, InvalidInput, inject, parse, saved_clouds, saved_route
 from .schemas import (
     CutoverOutcome,
     CutoverResult,
@@ -67,6 +67,7 @@ from .schemas import (
     FinishResult,
     JobOptions,
     JobRequest,
+    Route,
     RunStatus,
     SourceSpec,
     TargetSpec,
@@ -136,6 +137,7 @@ class _Progress:
     message: str | None = None
     source: tuple[str, str] | None = None
     job_registered: bool = False
+    route: Route | None = None
     target_network: str | None = None
     lookup: cloud_lookup.FoundRoute | None = None
     execution: ExecutionModel | None = None
@@ -278,7 +280,7 @@ def status(run_id: str, *, agent: CdcAgentClient | None = None) -> RunStatus:
     if progress is not None and progress.target_network:
         metrics["target_db_network"] = progress.target_network
     return RunStatus(
-        run_id=run_id, job_id=job_id, state=job["state"], phase=job["phase"],
+        run_id=run_id, job_id=job_id, route=_route(run_id, progress), state=job["state"], phase=job["phase"],
         progress=clamp_progress(job["progress"]), message=_clean(run_id, message) if message else None,
         metrics=metrics,
         ready_for_cutover=job["phase"] == READY_PHASE and job["state"] == "waiting_approval",
@@ -1067,8 +1069,8 @@ def _run_result(run_id: str, state: str, job: dict, vpn_destroyed: bool, vpn_err
 def _status_from_memory(run_id: str, progress: _Progress) -> RunStatus:
     remaining = _remaining(run_id, None)
     return RunStatus(
-        run_id=run_id, job_id=to_job_id(run_id), state=progress.state, phase=progress.stage, progress=0,
-        message=progress.message,
+        run_id=run_id, job_id=to_job_id(run_id), route=_route(run_id, progress), state=progress.state,
+        phase=progress.stage, progress=0, message=progress.message,
         metrics={"target_db_network": progress.target_network} if progress.target_network else {},
         cleanup_required=progress.state in CLEANUP_STATES and bool(remaining), remaining=remaining,
     )
@@ -1076,8 +1078,20 @@ def _status_from_memory(run_id: str, progress: _Progress) -> RunStatus:
 
 def _unknown_status(run_id: str, message: str) -> RunStatus:
     remaining = _remaining(run_id, None)
-    return RunStatus(run_id=run_id, job_id=to_job_id(run_id), state="unknown", phase="unknown", progress=0,
-                     message=message, cleanup_required=bool(remaining), remaining=remaining)
+    return RunStatus(run_id=run_id, job_id=to_job_id(run_id), route=_route(run_id, None), state="unknown",
+                     phase="unknown", progress=0, message=message, cleanup_required=bool(remaining),
+                     remaining=remaining)
+
+
+def _route(run_id: str, progress: _Progress | None) -> Route | None:
+    if progress is not None and progress.route is not None:
+        return progress.route
+    try:
+        saved = saved_route(run_id)
+    except Exception:  # noqa: BLE001 - 표시용 값이 상태 조회를 막으면 안 된다
+        logger.warning("run %s: could not read its route", run_id)
+        return None
+    return Route.model_validate(saved) if saved else None
 
 
 def _ref(run_id: str, tag: str) -> str:
@@ -1169,7 +1183,14 @@ def execute(inp: DbMigrationInput | dict, ctx: Reporter | None = None, *,
     if not _reserve(mig.run_id):
         message = BUSY_MESSAGE.format(run_id=mig.run_id)
         return DbMigrationResult(run_id=mig.run_id, job_id=job_id, state="failed", message=message)
-    _set_progress(mig.run_id, target_network=network_exposure(mig.target.db.private_ip))
+    _set_progress(
+        mig.run_id,
+        route=Route(
+            source={"cloud": mig.source.cloud, "region": mig.source.region},
+            target={"cloud": mig.target.cloud, "region": mig.target.region},
+        ),
+        target_network=network_exposure(mig.target.db.private_ip),
+    )
     try:
         log.event("inputs.loaded", source_host=mig.source.db.host, target_host=mig.target.db.private_ip,
                   tables=len(mig.source.tables), skip_vpn=mig.options.skip_vpn)
