@@ -123,7 +123,7 @@
     {
       "order": 2,
       "module": "provisioning",
-      "action": "이미지 이동 ECR → Artifact Registry",
+      "action": "이미지 이동 원본 저장소(미제공) → Artifact Registry",
       "needs_approval": false
     },
     {

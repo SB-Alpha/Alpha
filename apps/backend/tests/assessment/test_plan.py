@@ -1,10 +1,12 @@
 import json
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.features.assessment.schemas import PlanningInput
 from app.features.assessment.plan import build as run
+from app.features.assessment import rules
 from app.features.assessment.rules import gcp_name
 from app.main import app
 
@@ -177,3 +179,15 @@ def test_cloud_neutral_fields_are_not_gcp_terraform_variables():
 
     tfvars = build_tfvars(run(_ready_input()).target_infra.to_tfvars(), project_id="p", deploy_app=False)
     assert not {"source_service_name", "db_memory_gib", "db_vcpu"} & set(tfvars)
+
+
+@pytest.mark.parametrize(("uri", "label"), [
+    ("123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/target-app:1.0", "ECR"),
+    ("registry.local:5000/work-items:1.4", "registry.local:5000"),
+    ("nginx:1.27", "Docker Hub"),
+    (None, "원본 저장소(미제공)"),
+])
+def test_image_move_step_names_the_real_source_registry(uri, label):
+    # AWS 가 아닌 원본(#56 manual)에서도 "ECR" 이라고 쓰지 않게 합니다
+    step = rules.build_steps(uri)[1]
+    assert step.action == f"이미지 이동 {label} → Artifact Registry"
