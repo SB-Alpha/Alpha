@@ -36,19 +36,18 @@ export default function JourneyCanvasView({ run }: Props) {
     [getScrollContainer]
   );
 
-  // 트랙패드 및 휠 스크롤 비활성화: 오작동 방지를 위해 휠/트랙패드 입력을 완전히 차단
+  // 트랙패드 및 휠 스크롤 비활성화: 오작동 및 화면 튐 방지를 위해 휠/트랙패드 입력을 capture 단계에서 원천 차단
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    const blockWheel = (e: WheelEvent) => {
+    const blockWheel = (e: Event) => {
       e.preventDefault();
       e.stopPropagation();
     };
 
-    container.addEventListener("wheel", blockWheel, { passive: false });
+    window.addEventListener("wheel", blockWheel, { capture: true, passive: false });
+    window.addEventListener("touchmove", blockWheel, { capture: true, passive: false });
     return () => {
-      container.removeEventListener("wheel", blockWheel);
+      window.removeEventListener("wheel", blockWheel, { capture: true });
+      window.removeEventListener("touchmove", blockWheel, { capture: true });
     };
   }, []);
 
