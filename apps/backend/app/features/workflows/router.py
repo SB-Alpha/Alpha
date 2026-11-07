@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from functools import lru_cache
 
@@ -12,6 +13,7 @@ from app.features.db_migration.guide_workflow import to_job_id
 
 from .engine import Engine, InvalidTransition
 from .healer import SelfHealingDiagnosis, diagnose_run
+from .reasoning_bank import default_bank
 from .preflight import evaluate_cutover
 from .readiness import cutover_readiness
 from .schemas import (
@@ -30,6 +32,7 @@ from .store import RunNotFound, RunStore
 from .target_adapters import UnsupportedTarget, adapter_for
 
 router = APIRouter(prefix="/runs", tags=["workflows"])
+logger = logging.getLogger(__name__)
 
 PreflightEvaluator = Callable[[RunStatus], PreflightReport]
 
@@ -37,7 +40,17 @@ PreflightEvaluator = Callable[[RunStatus], PreflightReport]
 @lru_cache
 def get_engine() -> Engine:
     # 연결된 모듈은 runners.RUNNERS 에 단계별로 등록합니다. 없는 단계는 수동 입력 대기입니다.
-    return Engine(RunStore(get_settings().workflows_db_path), RUNNERS, abort_cleanup=clean_up_cdc)
+    return Engine(
+        RunStore(get_settings().workflows_db_path), RUNNERS, abort_cleanup=clean_up_cdc, memory=_memory_or_none()
+    )
+
+
+def _memory_or_none():
+    try:
+        return default_bank()
+    except Exception:  # 기억 저장소를 못 열어도 workflows 는 그대로 돕니다
+        logger.warning("ReasoningBank 를 열지 못해 학습 없이 시작합니다", exc_info=True)
+        return None
 
 
 def get_preflight() -> PreflightEvaluator:
@@ -167,10 +180,19 @@ def get_preflight_report(
 
 
 @router.get("/{run_id}/diagnosis", response_model=SelfHealingDiagnosis)
-@router.post("/{run_id}/diagnose", response_model=SelfHealingDiagnosis)
 def get_diagnosis(run_id: str, engine: Engine = Depends(get_engine)) -> SelfHealingDiagnosis:
-    """장애 발생 시 AI 자가치유(Self-Healing) 진단 리포트를 생성합니다."""
+    """장애 발생 시 자가치유(Self-Healing) 진단 리포트를 돌려줍니다. 과거에 풀린 같은 장애면 기억으로 답합니다."""
+    return _diagnose(run_id, engine, use_memory=True)
+
+
+@router.post("/{run_id}/diagnose", response_model=SelfHealingDiagnosis)
+def rediagnose(run_id: str, engine: Engine = Depends(get_engine)) -> SelfHealingDiagnosis:
+    """기억을 건너뛰고 새로 진단합니다 (AI 재진단)."""
+    return _diagnose(run_id, engine, use_memory=False)
+
+
+def _diagnose(run_id: str, engine: Engine, *, use_memory: bool) -> SelfHealingDiagnosis:
     run = _apply(run_id, lambda: engine.get(run_id))
     if run.state != WorkflowState.FAILED:
         raise HTTPException(status.HTTP_409_CONFLICT, f"실패한 run 만 진단합니다 (현재 {run.state.value})")
-    return diagnose_run(run)
+    return diagnose_run(run, use_memory=use_memory)

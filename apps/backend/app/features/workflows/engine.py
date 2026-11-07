@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from .context import RunAborted, StoreRunContext, now, with_stage
 from .readiness import cutover_readiness
+from .reasoning_bank import ReasoningBank
 from .schemas import (
     GATE_BEFORE,
     STAGE_ORDER,
@@ -100,10 +101,12 @@ class Engine:
         store: RunStore,
         runners: Mapping[StageName, StageRunner] | None = None,
         abort_cleanup: AbortCleanup | None = None,
+        memory: ReasoningBank | None = None,
     ) -> None:
         self._store = store
         self._runners = dict(runners or {})
         self._abort_cleanup = abort_cleanup
+        self._memory = memory  # 자가치유 기억(#77). 없으면 학습하지 않습니다
 
     # -- 조회 ---------------------------------------------------------------
 
@@ -268,7 +271,9 @@ class Engine:
                 }
             )
 
-        return self._store.update(run_id, change)
+        updated = self._store.update(run_id, change)
+        self._learn(run_id, stage, "manual_input")
+        return updated
 
     def resume(self, run_id: str) -> RunStatus:
         """실패한 단계를 다시 시도하거나, 진행이 끊긴 run 을 다시 진행시킵니다. 이어서 advance() 를 부릅니다."""
@@ -384,6 +389,26 @@ class Engine:
             return updated.model_copy(update={"outputs": {**r.outputs, stage.value: data}})
 
         self._store.update(run.run_id, done)
+        self._learn(run.run_id, stage, "retry")
+
+    def _learn(self, run_id: str, stage: StageName, action: str) -> None:
+        """진단까지 거친 장애의 단계가 실제로 SUCCEEDED 로 회복됐을 때만 기억에 올립니다. 기억 오류는 run 에 영향을 주지 않습니다."""
+        if self._memory is None:
+            return
+        try:
+            if self._store.get(run_id).stage(stage).state == WorkflowState.SUCCEEDED:
+                self._memory.resolve(run_id, stage.value, action)
+        except Exception:
+            logger.warning("ReasoningBank 학습 실패 (run %s, %s)", run_id, stage.value, exc_info=True)
+
+    def _learn_failure(self, run_id: str, stage: StageName) -> None:
+        """기억을 따랐는데 같은 단계가 다시 실패하면 그 기억의 실패를 올립니다."""
+        if self._memory is None:
+            return
+        try:
+            self._memory.fail(run_id, stage.value)
+        except Exception:
+            logger.warning("ReasoningBank 실패 기록 실패 (run %s, %s)", run_id, stage.value, exc_info=True)
 
     def _mark_failed(self, run_id: str, stage: StageName | None, detail: str) -> None:
         """run(과 단계)을 failed 로 남깁니다. 이미 abort 됐으면 그대로 둡니다. 기록마저 실패하면 로그만 남깁니다.
@@ -416,3 +441,6 @@ class Engine:
             self._store.update(run_id, fail)
         except Exception:
             logger.exception("could not record failure for run %s", run_id)
+            return
+        if stage is not None:
+            self._learn_failure(run_id, stage)

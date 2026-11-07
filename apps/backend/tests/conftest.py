@@ -21,3 +21,9 @@ def local_access_open(request):
     app.dependency_overrides[require_local_access] = lambda: None
     yield
     app.dependency_overrides.pop(require_local_access, None)
+
+
+@pytest.fixture(autouse=True)
+def reasoning_bank_in_tmp(tmp_path, monkeypatch):
+    """The ReasoningBank (#77) writes next to the workflows DB by default. Keep every test off the real file."""
+    monkeypatch.setenv("REASONING_BANK_DB_PATH", str(tmp_path / "reasoning_bank.sqlite3"))
