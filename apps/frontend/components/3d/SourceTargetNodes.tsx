@@ -119,7 +119,7 @@ export function SourceTargetNodes({
 
         {/* 호버/클릭 상세 실측 카드 (화면 크기에 맞춘 컴팩트 2열 레이아웃) */}
         {showSourceTooltip && (
-          <Html position={[0, 0.95, 0]} center zIndexRange={[100, 50]}>
+          <Html position={[0, 0.62, 0]} center zIndexRange={[100, 50]}>
             <div
               onMouseEnter={() => setHoveredNode("source")}
               onMouseLeave={() => setHoveredNode(null)}
@@ -246,7 +246,7 @@ export function SourceTargetNodes({
 
         {/* 호버/클릭 상세 실측 카드 (화면 크기에 맞춘 컴팩트 2열 레이아웃) */}
         {showTargetTooltip && (
-          <Html position={[0, 0.95, 0]} center zIndexRange={[100, 50]}>
+          <Html position={[0, 0.58, 0]} center zIndexRange={[100, 50]}>
             <div
               onMouseEnter={() => setHoveredNode("target")}
               onMouseLeave={() => setHoveredNode(null)}
