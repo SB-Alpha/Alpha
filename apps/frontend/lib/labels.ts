@@ -1,4 +1,4 @@
-import type { CutoverSecondsSource } from "./dashboard";
+import type { CutoverSecondsSource, Verification } from "./dashboard";
 import type { Gate, PreflightVerdict, StageName, WorkflowState } from "./workflows";
 
 export const STAGE_LABEL: Record<StageName, string> = {
@@ -21,6 +21,14 @@ export const PREFLIGHT_VERDICT_LABEL: Record<PreflightVerdict, string> = {
 export const CUTOVER_SECONDS_SOURCE_LABEL: Record<CutoverSecondsSource, string> = {
   worker: "Worker 기준",
   agent: "에이전트 기준",
+};
+
+export const VERIFICATION_LABEL: Record<Verification, string> = {
+  running: "비교 중",
+  match: "일치",
+  mismatch: "불일치",
+  unverifiable: "비교 못 함",
+  unknown: "결과 미확인",
 };
 
 export const STATE_LABEL: Record<WorkflowState, string> = {

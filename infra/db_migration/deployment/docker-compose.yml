@@ -77,12 +77,15 @@ services:
       KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP}
       KAFKA_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR}
       WORKER_URL: ${WORKER_URL:-}
-      WORKER_TOKEN_FILE: /etc/alpha-cdc/secrets/worker.token
+      WORKER_TOKEN_FILE: /etc/alpha-cdc/agent-secrets/worker.token
+      AGENT_SECRETS_DIR: /etc/alpha-cdc/agent-secrets
       # 작업 비밀을 노드 사이에서 암호화하는 키. push-secrets.sh secrets-key로 넣는다.
       SECRETS_KEY: ${SECRETS_KEY:-}
     volumes:
       # 에이전트가 작업 비밀 파일을 직접 쓴다 (Connect는 읽기만).
       - /etc/alpha-cdc/secrets:/etc/alpha-cdc/secrets
+      # 관리자 계정과 Worker 토큰. Connect에는 마운트하지 않는다.
+      - /etc/alpha-cdc/agent-secrets:/etc/alpha-cdc/agent-secrets
 
   cloudflared:
     image: cloudflare/cloudflared:2024.12.2

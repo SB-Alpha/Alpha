@@ -1,6 +1,5 @@
 variable "region" {
-  type    = string
-  default = "ap-northeast-2"
+  type = string
 }
 
 variable "profile" {
@@ -27,8 +26,13 @@ variable "db_security_group_id" {
 }
 
 variable "oci_cidr" {
-  type    = string
-  default = "10.50.0.0/16"
+  description = "RDS에 접속을 허용할 CDC 노드 서브넷 (terraform/oci의 subnet_cidr)"
+  type        = string
+}
+
+variable "db_port" {
+  description = "원본 DB 포트"
+  type        = number
 }
 
 variable "tunnels" {

@@ -133,6 +133,8 @@ def collect(inp: AssessmentInput, session: AwsSession) -> AppAssessment:
     else:
         digest = _image_digest(image, session, call, gaps)
 
+    blockers, notes = cloud_run_compat(task, container)
+
     facts = AppInfo(
         service_name=service_name,
         image_uri=image,
@@ -143,8 +145,63 @@ def collect(inp: AssessmentInput, session: AwsSession) -> AppAssessment:
         health_check_path=health_path,
         env_vars=env_vars,
         secret_refs=secret_refs,
+        cloud_run_blockers=blockers,
+        cloud_run_notes=notes,
     )
     return AppAssessment(facts=facts, account_id=account_id, db_user=db_user, gaps=gaps)
+
+
+def cloud_run_compat(task: dict, container: dict) -> tuple[list[str], list[str]]:
+    """태스크 정의에서 Cloud Run 으로 옮길 수 없는 설정(blockers)과 확인이 필요한 설정(notes)을 찾습니다.
+
+    Cloud Run 은 HTTP 요청을 받는 x86-64 컨테이너이고, 호스트(VM)나 장치에 접근할 수 없습니다.
+    값은 읽지 않고 설정 이름만 남깁니다 (명령어·경로에 비밀이 있을 수 있음).
+    """
+    blockers: list[str] = []
+    notes: list[str] = []
+
+    if (container.get("privileged") is True):
+        blockers.append("privileged 컨테이너 (Cloud Run 은 특권 모드를 지원하지 않음)")
+    linux = container.get("linuxParameters") or {}
+    if linux.get("devices"):
+        blockers.append("호스트 장치 연결 (linuxParameters.devices)")
+    if (linux.get("capabilities") or {}).get("add"):
+        blockers.append("리눅스 capability 추가 (linuxParameters.capabilities.add)")
+    if any(str(p.get("protocol", "tcp")).lower() == "udp" for p in container.get("portMappings") or []):
+        blockers.append("UDP 포트 (Cloud Run 은 HTTP 요청만 받음)")
+    if any(r.get("type") == "GPU" for r in container.get("resourceRequirements") or []) or             task.get("inferenceAccelerators"):
+        blockers.append("GPU·추론 가속기 (이번 매핑은 GPU 를 다루지 않음)")
+    if str((task.get("runtimePlatform") or {}).get("cpuArchitecture", "")).upper() == "ARM64":
+        blockers.append("ARM64 이미지 (Cloud Run 은 x86-64 만 지원)")
+    for mode in ("pidMode", "ipcMode"):
+        if task.get(mode) == "host":  # "task" 는 같은 태스크 안 컨테이너끼리라 컨테이너 하나면 문제 없음
+            blockers.append(f"{mode}=host (호스트 VM 과 프로세스·IPC 를 공유)")
+
+    volumes = {v.get("name"): v for v in task.get("volumes") or []}
+    for mount in container.get("mountPoints") or []:
+        vol = volumes.get(mount.get("sourceVolume")) or {}
+        if (vol.get("host") or {}).get("sourcePath"):
+            blockers.append(f"호스트 경로 마운트 (볼륨 {vol.get('name')})")
+        elif vol.get("dockerVolumeConfiguration"):
+            blockers.append(f"Docker 볼륨 마운트 (볼륨 {vol.get('name')})")
+        elif vol.get("efsVolumeConfiguration"):
+            notes.append(f"EFS 볼륨 {vol.get('name')} 를 쓰고 있습니다. Cloud Run 매핑에는 파일 시스템 연결이 없어 "
+                         "데이터를 어떻게 옮길지 정해야 합니다.")
+        else:
+            notes.append(f"볼륨 {vol.get('name') or mount.get('sourceVolume')} 를 마운트합니다. "
+                         "Cloud Run 은 재시작하면 컨테이너 파일이 사라집니다.")
+
+    if container.get("command") or container.get("entryPoint"):
+        notes.append("태스크 정의가 이미지의 시작 명령(command·entryPoint)을 바꿔 둡니다. "
+                     "Cloud Run 매핑은 이 값을 옮기지 않아 이미지 기본 명령으로 시작합니다.")
+    others = [c.get("name") for c in task.get("containerDefinitions") or [] if c is not container and c.get("name")]
+    if others:
+        notes.append(f"함께 도는 컨테이너 {len(others)}개({', '.join(others)})는 옮기지 않습니다. "
+                     "앱이 이들에 의존하면 동작하지 않습니다.")
+    if task.get("proxyConfiguration"):
+        notes.append("App Mesh 프록시 설정이 있습니다. Cloud Run 에는 같은 구성이 없습니다.")
+
+    return blockers, notes
 
 
 def _only_one(res: dict | None, key: str, what: str, input_name: str, gaps: list[str]) -> str | None:

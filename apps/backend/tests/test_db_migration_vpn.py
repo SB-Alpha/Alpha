@@ -11,6 +11,7 @@ from cryptography.fernet import Fernet
 from app.core.secrets import put_secret, resolve
 from app.features.db_migration import vpn
 from app.features.db_migration.schemas import DbMigrationInput
+from app.features.db_migration.settings import MissingSetting
 
 RUN_ID = "mig-20261105-001"
 JOB_ID = "mig_20261105_001"
@@ -96,6 +97,9 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setenv("CDC_OCI_DRG_ID", "ocid-drg")
     monkeypatch.setenv("CDC_TFSTATE_BUCKET", "bucket")
     monkeypatch.setenv("CDC_TFSTATE_NAMESPACE", "ns")
+    monkeypatch.setenv("CDC_OCI_REGION", "oci-region-1")
+    monkeypatch.setenv("CDC_OCI_VCN_CIDR", "10.50.0.0/16")
+    monkeypatch.setenv("CDC_NODE_SUBNET_CIDR", "10.50.1.0/24")
     monkeypatch.setenv("AWS_PROFILE", "developer-own-login")
 
 
@@ -265,7 +269,7 @@ def test_aws_ip_change_stops_with_a_clear_error():
 
 
 def test_tunnels_that_never_come_up_fail(monkeypatch):
-    monkeypatch.setattr(vpn, "TUNNEL_WAIT_S", -1)
+    monkeypatch.setenv("CDC_TUNNEL_WAIT_S", "-1")
     clouds = FakeClouds(status="DOWN")
     with pytest.raises(RuntimeError, match="not up"):
         ensure(clouds)
@@ -313,3 +317,36 @@ def test_saved_context_has_references_not_values():
     saved = resolve(f"secret://{RUN_ID}/vpn-context")["json"]
 
     assert f"secret://{RUN_ID}/source-cloud" in saved and AWS_KEY not in saved
+
+
+def test_app_secrets_do_not_reach_terraform(monkeypatch):
+    monkeypatch.setenv("ALPHA_SECRETS_KEY", "app-key-marker")
+    monkeypatch.setenv("CDC_AGENT_ACCESS_CLIENT_SECRET", "access-marker")
+    monkeypatch.setenv("WHATEVER_ELSE", "other-marker")
+    monkeypatch.setenv("OCI_CLI_PROFILE", "kept")
+    monkeypatch.setenv("TF_LOG", "TRACE")
+    clouds = FakeClouds()
+    terraform = vpn.Terraform(vpn.OciSettings.from_env(), JOB_ID, {"aws_access_key_id": "k", "aws_secret_access_key": "s"},
+                              {"credentials_json": "{}"}, runner=clouds)
+    terraform.init(vpn.OCI)
+
+    env = clouds.envs[vpn.OCI]
+    for name in ("ALPHA_SECRETS_KEY", "CDC_AGENT_ACCESS_CLIENT_SECRET", "WHATEVER_ELSE", "TF_LOG", "AWS_PROFILE"):
+        assert name not in env
+    assert env["OCI_CLI_PROFILE"] == "kept" and "PATH" in env
+
+
+def test_rds_admits_only_the_node_subnet_on_the_db_port():
+    mig = DbMigrationInput.model_validate({**INPUT, "source": {
+        **INPUT["source"], "db": {**INPUT["source"]["db"], "port": 6543}}})
+    tfvars = vpn._aws_vars(vpn.VpnContext.from_input(mig, JOB_ID), vpn.OciSettings.from_env(),
+                           {"aws-0": "a", "aws-1": "b"}, {})
+
+    assert tfvars["oci_cidr"] == "10.50.1.0/24" and tfvars["db_port"] == 6543
+
+
+@pytest.mark.parametrize("name", ["CDC_OCI_REGION", "CDC_OCI_VCN_CIDR", "CDC_NODE_SUBNET_CIDR"])
+def test_environment_values_have_no_default(monkeypatch, name):
+    monkeypatch.delenv(name)
+    with pytest.raises(MissingSetting, match=name):
+        vpn.OciSettings.from_env()

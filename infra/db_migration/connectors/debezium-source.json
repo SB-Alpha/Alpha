@@ -17,6 +17,7 @@
     "table.include.list": "${TABLES}",
     "snapshot.mode": "initial",
     "heartbeat.interval.ms": "10000",
+    "poll.interval.ms": "100",
     "tombstones.on.delete": "false"
   }
 }

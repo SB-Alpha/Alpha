@@ -24,6 +24,13 @@ def test_sends_access_headers_and_body():
     assert b'"approved_by":"pm"' in seen["body"].replace(b" ", b"")
 
 
+def test_a_missing_agent_url_is_caught_as_key_error_with_a_plain_message(monkeypatch):
+    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
+    with pytest.raises(KeyError) as caught:
+        AgentSettings.from_env()
+    assert str(caught.value) == "environment variable CDC_AGENT_URL is required"
+
+
 def test_error_carries_agent_detail():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(409, json={"detail": "job is running/streaming"})
