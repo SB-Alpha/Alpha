@@ -59,6 +59,14 @@ def test_names_that_differ_only_by_case_or_separator_stay_distinct():
     assert len(set(names.values())) == 3
 
 
+def test_hashed_name_that_is_already_taken_gets_another_name():
+    # sha1("a_b")[:6] == "eb2980": the hashed name for a_b is the plain name of A_B_EB2980
+    names = secret_names("app", ["A_B", "A_B_EB2980", "a_b"])
+    assert len(set(names.values())) == 3
+    assert names["A_B_EB2980"] == "app-a-b-eb2980"
+    assert names["a_b"] == "app-a-b-eb2980-2"
+
+
 def test_secret_names_are_stable_and_independent_of_input_order():
     one = secret_names("app", ["A_B", "a_b", "DB_PASSWORD"])
     two = secret_names("app", ["DB_PASSWORD", "a_b", "A_B"])

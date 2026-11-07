@@ -284,13 +284,17 @@ def _secret_name(service_name: str, env_name: str) -> str:
 
 def secret_names(service_name: str, env_names) -> dict[str, str]:
     """환경 변수 이름 → 목적지 비밀 이름. 서로 다른 원본 비밀이 같은 이름으로 합쳐지거나 Terraform 이 만드는 비밀과 겹치면
-    그 이름 뒤에 원본 환경 변수 이름의 짧은 해시를 붙여 구분합니다 (같은 입력이면 항상 같은 결과)."""
+    그 이름 뒤에 원본 환경 변수 이름의 짧은 해시를 붙여 구분합니다 (같은 입력이면 항상 같은 결과).
+    해시를 붙인 이름도 이미 쓰였으면 -2, -3 … 을 더 붙여 빈 이름이 나올 때까지 고릅니다."""
     used = {f"{service_name}-{suffix}" for suffix in RESERVED_SECRET_SUFFIXES}
     names: dict[str, str] = {}
     for env in sorted(env_names):
         name = _secret_name(service_name, env)
         if name in used:
-            name = f"{name}-{hashlib.sha1(env.encode('utf-8')).hexdigest()[:6]}"
+            hashed = f"{name}-{hashlib.sha1(env.encode('utf-8')).hexdigest()[:6]}"
+            name, n = hashed, 2
+            while name in used:
+                name, n = f"{hashed}-{n}", n + 1
         used.add(name)
         names[env] = name
     return names
