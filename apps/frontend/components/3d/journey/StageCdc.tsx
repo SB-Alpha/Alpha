@@ -1,6 +1,6 @@
 "use client";
 
-import { Edges, Html } from "@react-three/drei";
+import { Edges } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
@@ -9,11 +9,13 @@ import type { RunStatus } from "@/lib/workflows";
 
 interface Props {
   run: RunStatus;
+  isActive?: boolean;
+  onSelect?: () => void;
 }
 
 const PACKET_COUNT = 6;
 
-export function StageCdc({ run }: Props) {
+export function StageCdc({ run, isActive: isStageActive = false, onSelect }: Props) {
   const cdc = extractCdcArcData(run);
   const packetsRef = useRef<(THREE.Mesh | null)[]>([]);
   const offsets = useMemo(
@@ -22,10 +24,11 @@ export function StageCdc({ run }: Props) {
   );
   const progressRef = useRef<number[]>([...offsets]);
 
-  const isActive = cdc.stageState === "running" || cdc.stageState === "succeeded" || cdc.copyPercent === 100;
+  const isFlowing =
+    cdc.stageState === "running" || cdc.stageState === "succeeded" || cdc.copyPercent === 100;
 
   useFrame((_, delta) => {
-    if (!isActive) return;
+    if (!isFlowing) return;
     const speed = cdc.stageState === "running" ? 0.5 : 0.22;
     progressRef.current.forEach((t, i) => {
       const nextT = (t + delta * speed) % 1.0;
@@ -38,12 +41,32 @@ export function StageCdc({ run }: Props) {
   });
 
   return (
-    <group position={[3, 0, 0]}>
+    <group
+      position={[2.1, 0, 0]}
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect?.();
+      }}
+      onPointerOver={(e) => {
+        e.stopPropagation();
+        document.body.style.cursor = "pointer";
+      }}
+      onPointerOut={() => {
+        document.body.style.cursor = "auto";
+      }}
+    >
+      {isStageActive && (
+        <mesh position={[0, -0.4, 0]}>
+          <boxGeometry args={[3.04, 0.06, 2.24]} />
+          <meshBasicMaterial color="#3730a3" />
+        </mesh>
+      )}
+
       {/* 베이스 플랫폼 */}
       <mesh position={[0, -0.35, 0]} receiveShadow>
         <boxGeometry args={[2.8, 0.14, 2.0]} />
-        <meshStandardMaterial color="#e7e5e0" roughness={0.8} />
-        <Edges color="#1c1917" threshold={15} />
+        <meshStandardMaterial color={isStageActive ? "#f5f5f4" : "#e7e5e0"} roughness={0.8} />
+        <Edges color={isStageActive ? "#3730a3" : "#1c1917"} threshold={15} />
       </mesh>
 
       {/* 좌측 Source DB 실린더 */}
@@ -70,7 +93,7 @@ export function StageCdc({ run }: Props) {
       </mesh>
 
       {/* 패킷 이동 */}
-      {isActive &&
+      {isFlowing &&
         offsets.map((_, i) => (
           <mesh
             key={i}
@@ -84,13 +107,6 @@ export function StageCdc({ run }: Props) {
             <Edges color="#1c1917" />
           </mesh>
         ))}
-
-      <Html position={[0, -0.75, 0]} center distanceFactor={10} zIndexRange={[10, 0]}>
-        <div className="whitespace-nowrap rounded border border-ink bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-ink shadow-[2px_2px_0_0_var(--color-ink)]">
-          04 DB MIGRATION · 복사 {cdc.copyPercent !== null ? `${cdc.copyPercent}%` : "미제공"} · 지연{" "}
-          {cdc.lagFormatted ?? "미제공"}
-        </div>
-      </Html>
     </group>
   );
 }

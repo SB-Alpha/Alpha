@@ -1,21 +1,20 @@
 "use client";
 
-import { Edges, Html } from "@react-three/drei";
+import { Edges } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
 import { useRef } from "react";
 import * as THREE from "three";
-import { METRIC_KEYS, numberMetric, servingSide } from "@/lib/dashboard";
-import { extractTargetNodeData } from "@/lib/topology3d";
+import { servingSide } from "@/lib/dashboard";
 import type { RunStatus } from "@/lib/workflows";
 
 interface Props {
   run: RunStatus;
+  activeIdx?: number | "overview";
+  onSelectStage?: (stageIdx: number) => void;
 }
 
-export function StageCutover({ run }: Props) {
-  const target = extractTargetNodeData(run);
+export function StageCutover({ run, activeIdx, onSelectStage }: Props) {
   const serving = servingSide(run);
-  const cutoverSec = numberMetric(run, METRIC_KEYS.cutoverSeconds);
   const isTargetServing = serving === "gcp" || run.state === "succeeded";
 
   const appDeployStage = run.stages.find((s) => s.stage === "app_deploy");
@@ -29,14 +28,37 @@ export function StageCutover({ run }: Props) {
     }
   });
 
+  const isStage4Active = activeIdx === 4;
+  const isStage5Active = activeIdx === 5;
+
   return (
     <>
-      {/* ==================== 05 APP DEPLOY (X = 9) ==================== */}
-      <group position={[9, 0, 0]}>
+      {/* ==================== 05 APP DEPLOY (X = 6.3) ==================== */}
+      <group
+        position={[6.3, 0, 0]}
+        onClick={(e) => {
+          e.stopPropagation();
+          onSelectStage?.(4);
+        }}
+        onPointerOver={(e) => {
+          e.stopPropagation();
+          document.body.style.cursor = "pointer";
+        }}
+        onPointerOut={() => {
+          document.body.style.cursor = "auto";
+        }}
+      >
+        {isStage4Active && (
+          <mesh position={[0, -0.4, 0]}>
+            <boxGeometry args={[3.04, 0.06, 2.24]} />
+            <meshBasicMaterial color="#3730a3" />
+          </mesh>
+        )}
+
         <mesh position={[0, -0.35, 0]} receiveShadow>
           <boxGeometry args={[2.8, 0.14, 2.0]} />
-          <meshStandardMaterial color="#e7e5e0" roughness={0.8} />
-          <Edges color="#1c1917" threshold={15} />
+          <meshStandardMaterial color={isStage4Active ? "#f5f5f4" : "#e7e5e0"} roughness={0.8} />
+          <Edges color={isStage4Active ? "#3730a3" : "#1c1917"} threshold={15} />
         </mesh>
 
         {/* Cloud Run 컨테이너 클러스터 */}
@@ -50,20 +72,34 @@ export function StageCutover({ run }: Props) {
             <Edges color="#1c1917" threshold={15} />
           </mesh>
         ))}
-
-        <Html position={[0, -0.75, 0]} center distanceFactor={10} zIndexRange={[10, 0]}>
-          <div className="whitespace-nowrap rounded border border-ink bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-ink shadow-[2px_2px_0_0_var(--color-ink)]">
-            05 APP DEPLOY · {target.healthCheck ?? "Health Check 미제공"}
-          </div>
-        </Html>
       </group>
 
-      {/* ==================== 06 CUTOVER (X = 15) ==================== */}
-      <group position={[15, 0, 0]}>
+      {/* ==================== 06 CUTOVER (X = 10.5) ==================== */}
+      <group
+        position={[10.5, 0, 0]}
+        onClick={(e) => {
+          e.stopPropagation();
+          onSelectStage?.(5);
+        }}
+        onPointerOver={(e) => {
+          e.stopPropagation();
+          document.body.style.cursor = "pointer";
+        }}
+        onPointerOut={() => {
+          document.body.style.cursor = "auto";
+        }}
+      >
+        {isStage5Active && (
+          <mesh position={[0, -0.4, 0]}>
+            <boxGeometry args={[3.04, 0.06, 2.24]} />
+            <meshBasicMaterial color="#047857" />
+          </mesh>
+        )}
+
         <mesh position={[0, -0.35, 0]} receiveShadow>
           <boxGeometry args={[2.8, 0.14, 2.0]} />
-          <meshStandardMaterial color="#e7e5e0" roughness={0.8} />
-          <Edges color="#1c1917" threshold={15} />
+          <meshStandardMaterial color={isStage5Active ? "#f5f5f4" : "#e7e5e0"} roughness={0.8} />
+          <Edges color={isStage5Active ? "#047857" : "#1c1917"} threshold={15} />
         </mesh>
 
         {/* 최종 전환 완료 타워 */}
@@ -82,13 +118,6 @@ export function StageCutover({ run }: Props) {
             <meshBasicMaterial color="#047857" side={THREE.DoubleSide} />
           </mesh>
         )}
-
-        <Html position={[0, -0.75, 0]} center distanceFactor={10} zIndexRange={[10, 0]}>
-          <div className="whitespace-nowrap rounded border border-ink bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-ink shadow-[2px_2px_0_0_var(--color-ink)]">
-            06 CUTOVER · {serving ? `${serving.toUpperCase()} SERVING` : "대기"}
-            {cutoverSec !== null && ` (${cutoverSec.toFixed(1)}s)`}
-          </div>
-        </Html>
       </group>
     </>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { Edges, Html, Line, useBounds } from "@react-three/drei";
+import { Edges, Html, Line } from "@react-three/drei";
 import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import { useMemo, useRef, useState } from "react";
 import * as THREE from "three";

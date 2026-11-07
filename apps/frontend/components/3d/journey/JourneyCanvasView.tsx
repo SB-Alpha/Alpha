@@ -1,141 +1,190 @@
 "use client";
 
-import { ScrollControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { STAGE_LABEL } from "@/lib/labels";
 import { STAGE_ORDER, type RunStatus } from "@/lib/workflows";
 import { JourneyHtmlOverlay } from "./JourneyHtmlOverlay";
-import { MigrationJourneyScene } from "./MigrationJourneyScene";
+import { MigrationJourneyScene, type JourneyViewMode } from "./MigrationJourneyScene";
 
 interface Props {
   run: RunStatus;
 }
 
 export default function JourneyCanvasView({ run }: Props) {
-  const [activeIdx, setActiveIdx] = useState(0);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const [activeStageIdx, setActiveStageIdx] = useState<number>(0);
+  const [isOverview, setIsOverview] = useState<boolean>(false);
+  const [flyTrigger, setFlyTrigger] = useState<number>(0);
+  const [zoomScale, setZoomScale] = useState<number>(1.0);
 
-  const getScrollContainer = useCallback(() => {
-    const container = containerRef.current;
-    if (!container) return null;
-    return container.querySelector<HTMLDivElement>(
-      'div[style*="overflow-y: auto"], div[style*="overflow-y:auto"], div[style*="overflow"]'
-    );
+  const selectStage = useCallback((stageIdx: number) => {
+    const clamped = Math.max(0, Math.min(5, stageIdx)) as 0 | 1 | 2 | 3 | 4 | 5;
+    setActiveStageIdx(clamped);
+    setIsOverview(false);
+    setFlyTrigger((prev) => prev + 1);
   }, []);
 
-  const scrollToStage = useCallback(
-    (stageIdx: number) => {
-      const scrollEl = getScrollContainer();
-      if (!scrollEl) return;
-      const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
-      const targetScroll = (maxScroll * stageIdx) / 5;
-      scrollEl.scrollTo({ top: targetScroll, behavior: "smooth" });
-      setActiveIdx(stageIdx);
-    },
-    [getScrollContainer]
-  );
-
-  // 트랙패드 및 휠 스크롤 비활성화: 오작동 및 화면 튐 방지를 위해 휠/트랙패드 입력을 capture 단계에서 원천 차단
-  useEffect(() => {
-    const blockWheel = (e: Event) => {
-      e.preventDefault();
-      e.stopPropagation();
-    };
-
-    window.addEventListener("wheel", blockWheel, { capture: true, passive: false });
-    window.addEventListener("touchmove", blockWheel, { capture: true, passive: false });
-    return () => {
-      window.removeEventListener("wheel", blockWheel, { capture: true });
-      window.removeEventListener("touchmove", blockWheel, { capture: true });
-    };
+  const toggleOverview = useCallback(() => {
+    setIsOverview((prev) => !prev);
+    setZoomScale(1.0);
+    setFlyTrigger((prev) => prev + 1);
   }, []);
 
-  // 키보드 방향키(←, →, Space) 탐색 지원
+  const resetCamera = useCallback(() => {
+    setZoomScale(1.0);
+    setFlyTrigger((prev) => prev + 1);
+  }, []);
+
+  // 키보드 좌/우 방향키 탐색 지원 (페이지 상하 스크롤을 방해하지 않도록 ArrowLeft/ArrowRight 만 사용)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if (e.key === "ArrowRight" || e.key === "ArrowDown" || e.key === " ") {
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement
+      ) {
+        return;
+      }
+      if (e.key === "ArrowRight" || e.key === " ") {
         e.preventDefault();
-        setActiveIdx((prev) => {
+        setIsOverview(false);
+        setActiveStageIdx((prev) => {
           const next = Math.min(5, prev + 1);
-          scrollToStage(next);
+          setFlyTrigger((t) => t + 1);
           return next;
         });
-      } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+      } else if (e.key === "ArrowLeft") {
         e.preventDefault();
-        setActiveIdx((prev) => {
+        setIsOverview(false);
+        setActiveStageIdx((prev) => {
           const next = Math.max(0, prev - 1);
-          scrollToStage(next);
+          setFlyTrigger((t) => t + 1);
           return next;
         });
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [scrollToStage]);
+  }, []);
+
+  const activeView: JourneyViewMode = isOverview
+    ? "overview"
+    : (activeStageIdx as 0 | 1 | 2 | 3 | 4 | 5);
 
   return (
-    <div
-      ref={containerRef}
-      style={{ overscrollBehavior: "contain", touchAction: "none" }}
-      className="relative h-full w-full overflow-hidden bg-paper select-none"
-    >
-      <Canvas
-        shadows
-        dpr={[1, 2]}
-        gl={{ antialias: true }}
-        className="h-full w-full"
-      >
-        <ScrollControls pages={6} damping={0.2}>
-          <MigrationJourneyScene run={run} onActiveStageChange={setActiveIdx} />
-          <JourneyHtmlOverlay run={run} />
-        </ScrollControls>
-      </Canvas>
+    <div className="flex h-full w-full flex-col overflow-hidden bg-paper select-none">
+      {/* 1. 상단 전용 컨트롤 헤더 바 (캔버스를 가리지 않는 분리형 헤더) */}
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-ink/15 bg-white px-3 py-2">
+        <div className="flex flex-wrap items-center gap-1">
+          <button
+            type="button"
+            onClick={() => selectStage(activeStageIdx - 1)}
+            disabled={!isOverview && activeStageIdx === 0}
+            className="cursor-pointer rounded border border-ink/20 bg-paper px-2 py-0.5 font-mono text-xs font-semibold text-ink hover:border-ink disabled:cursor-not-allowed disabled:opacity-35"
+            title="이전 단계 (←)"
+          >
+            ◀
+          </button>
 
-      {/* 우측 상단 6단계 진행 인디케이터 + 원클릭 단계 이동 & 이전/다음 버튼 */}
-      <div className="absolute right-4 top-3 z-10 flex flex-wrap items-center gap-1.5 rounded-md border border-ink/20 bg-white/95 p-1.5 shadow-[2px_2px_0_0_var(--color-ink)]">
-        <button
-          type="button"
-          onClick={() => scrollToStage(Math.max(0, activeIdx - 1))}
-          disabled={activeIdx === 0}
-          className="cursor-pointer rounded px-2 py-0.5 text-xs font-semibold text-ink/70 hover:bg-ink/10 disabled:cursor-not-allowed disabled:opacity-30"
-          title="이전 단계 (←)"
-        >
-          ◀
-        </button>
-        {STAGE_ORDER.map((stageName, i) => {
-          const isCurrent = activeIdx === i;
-          return (
-            <button
-              key={stageName}
-              type="button"
-              onClick={() => scrollToStage(i)}
-              className={`cursor-pointer rounded px-2 py-0.5 font-mono text-[11px] transition-all ${
-                isCurrent
-                  ? "bg-ink font-semibold text-paper shadow-sm scale-105"
-                  : "text-ink/60 hover:bg-ink/10 hover:text-ink font-medium"
-              }`}
-            >
-              {String(i + 1).padStart(2, "0")} {STAGE_LABEL[stageName]}
-            </button>
-          );
-        })}
-        <button
-          type="button"
-          onClick={() => scrollToStage(Math.min(5, activeIdx + 1))}
-          disabled={activeIdx === 5}
-          className="cursor-pointer rounded px-2 py-0.5 text-xs font-semibold text-ink/70 hover:bg-ink/10 disabled:cursor-not-allowed disabled:opacity-30"
-          title="다음 단계 (→ / Space)"
-        >
-          ▶
-        </button>
+          {STAGE_ORDER.map((stageName, i) => {
+            const isCurrent = !isOverview && activeStageIdx === i;
+            return (
+              <button
+                key={stageName}
+                type="button"
+                onClick={() => selectStage(i)}
+                className={`cursor-pointer rounded border px-2 py-0.5 font-mono text-[11px] transition-all ${
+                  isCurrent
+                    ? "border-ink bg-ink font-semibold text-paper shadow-xs"
+                    : "border-ink/15 bg-paper text-ink/70 hover:border-ink hover:text-ink font-medium"
+                }`}
+              >
+                {String(i + 1).padStart(2, "0")} {STAGE_LABEL[stageName]}
+              </button>
+            );
+          })}
+
+          <button
+            type="button"
+            onClick={() => selectStage(activeStageIdx + 1)}
+            disabled={!isOverview && activeStageIdx === 5}
+            className="cursor-pointer rounded border border-ink/20 bg-paper px-2 py-0.5 font-mono text-xs font-semibold text-ink hover:border-ink disabled:cursor-not-allowed disabled:opacity-35"
+            title="다음 단계 (→)"
+          >
+            ▶
+          </button>
+        </div>
+
+        {/* 우측 뷰포트 제어 도구 */}
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={toggleOverview}
+            className={`cursor-pointer rounded border px-2 py-0.5 font-mono text-[11px] font-medium transition-all ${
+              isOverview
+                ? "border-ink bg-ink text-paper shadow-xs"
+                : "border-ink/20 bg-paper text-ink/75 hover:border-ink hover:text-ink"
+            }`}
+          >
+            🌐 전체 6단계 조망
+          </button>
+          <button
+            type="button"
+            onClick={() => setZoomScale((z) => Math.max(0.65, +(z - 0.15).toFixed(2)))}
+            className="cursor-pointer rounded border border-ink/20 bg-paper px-1.5 py-0.5 font-mono text-[11px] text-ink/75 hover:border-ink hover:text-ink"
+            title="확대"
+          >
+            ＋
+          </button>
+          <button
+            type="button"
+            onClick={() => setZoomScale((z) => Math.min(1.45, +(z + 0.15).toFixed(2)))}
+            className="cursor-pointer rounded border border-ink/20 bg-paper px-1.5 py-0.5 font-mono text-[11px] text-ink/75 hover:border-ink hover:text-ink"
+            title="축소"
+          >
+            －
+          </button>
+          <button
+            type="button"
+            onClick={resetCamera}
+            className="cursor-pointer rounded border border-ink/20 bg-paper px-2 py-0.5 font-mono text-[11px] text-ink/75 hover:border-ink hover:text-ink"
+            title="카메라 시점 초기화"
+          >
+            시점 리셋
+          </button>
+        </div>
       </div>
 
-      {/* 하단 키보드 & 단계 안내 */}
-      <div className="absolute bottom-2.5 right-4 z-10 flex items-center gap-2 rounded border border-ink/15 bg-white/95 px-3 py-1 font-mono text-[11px] text-ink/75 shadow-sm">
-        <span>상단 단계 버튼(01~06) 클릭 또는 방향키(←/→/Space)로 이동</span>
-        <span className="font-semibold text-ink">({activeIdx + 1}/6)</span>
+      {/* 2. 본문 영역: 좌측 단일 실측 패널 + 우측 순수 3D 뷰포트 (팝업 중첩 0개) */}
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+        <JourneyHtmlOverlay
+          run={run}
+          activeStageIdx={activeStageIdx}
+          isOverview={isOverview}
+          onSelectStage={selectStage}
+        />
+
+        <div className="relative min-h-[260px] flex-1 bg-paper">
+          <Canvas
+            shadows
+            dpr={[1, 2]}
+            gl={{ antialias: true }}
+            className="h-full w-full"
+          >
+            <MigrationJourneyScene
+              run={run}
+              activeView={activeView}
+              flyTrigger={flyTrigger}
+              zoomScale={zoomScale}
+              onSelectStage={selectStage}
+            />
+          </Canvas>
+
+          {/* 하단 우측 최소 안내 배지 */}
+          <div className="pointer-events-none absolute bottom-2 right-3 rounded border border-ink/15 bg-white/90 px-2.5 py-0.5 font-mono text-[10px] text-ink/65 shadow-xs">
+            마우스 드래그: 3D 회전·이동 · 3D 블록 클릭 또는 ←/→ 키: 단계 이동 ({activeStageIdx + 1}/6)
+          </div>
+        </div>
       </div>
     </div>
   );

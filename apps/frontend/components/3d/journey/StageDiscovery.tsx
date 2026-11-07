@@ -1,19 +1,19 @@
 "use client";
 
-import { Edges, Html } from "@react-three/drei";
+import { Edges } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
 import { useRef } from "react";
 import * as THREE from "three";
-import { extractSourceNodeData } from "@/lib/topology3d";
 import type { RunStatus } from "@/lib/workflows";
 
 interface Props {
   run: RunStatus;
+  isActive?: boolean;
+  onSelect?: () => void;
 }
 
-export function StageDiscovery({ run }: Props) {
+export function StageDiscovery({ run, isActive = false, onSelect }: Props) {
   const scanBarRef = useRef<THREE.Mesh | null>(null);
-  const source = extractSourceNodeData(run);
   const stage = run.stages.find((s) => s.stage === "discovery");
   const isDone = stage?.state === "succeeded";
 
@@ -24,12 +24,33 @@ export function StageDiscovery({ run }: Props) {
   });
 
   return (
-    <group position={[-15, 0, 0]}>
+    <group
+      position={[-10.5, 0, 0]}
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect?.();
+      }}
+      onPointerOver={(e) => {
+        e.stopPropagation();
+        document.body.style.cursor = "pointer";
+      }}
+      onPointerOut={() => {
+        document.body.style.cursor = "auto";
+      }}
+    >
+      {/* 선택 강조 바닥 프레임 */}
+      {isActive && (
+        <mesh position={[0, -0.4, 0]}>
+          <boxGeometry args={[3.04, 0.06, 2.24]} />
+          <meshBasicMaterial color="#3730a3" />
+        </mesh>
+      )}
+
       {/* 베이스 플랫폼 */}
       <mesh position={[0, -0.35, 0]} receiveShadow>
         <boxGeometry args={[2.8, 0.14, 2.0]} />
-        <meshStandardMaterial color="#e7e5e0" roughness={0.8} />
-        <Edges color="#1c1917" threshold={15} />
+        <meshStandardMaterial color={isActive ? "#f5f5f4" : "#e7e5e0"} roughness={0.8} />
+        <Edges color={isActive ? "#3730a3" : "#1c1917"} threshold={15} />
       </mesh>
 
       {/* AWS ECS · RDS 아키텍처 블록 3열 */}
@@ -54,12 +75,6 @@ export function StageDiscovery({ run }: Props) {
         <meshStandardMaterial color="#3730a3" transparent opacity={0.45} />
         <Edges color="#3730a3" />
       </mesh>
-
-      <Html position={[0, -0.75, 0]} center distanceFactor={10} zIndexRange={[10, 0]}>
-        <div className="whitespace-nowrap rounded border border-ink bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-ink shadow-[2px_2px_0_0_var(--color-ink)]">
-          01 DISCOVERY · {source.region} ({source.serviceTitle})
-        </div>
-      </Html>
     </group>
   );
 }
