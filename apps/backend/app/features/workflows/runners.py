@@ -34,6 +34,10 @@ _DEFAULT_CUTOVER_PROGRESS = 75
 _PAST_CUTOVER_PHASES = {"cutover", "stabilizing", "closed"}
 
 PROBE_SETTLE_S = 3.0
+# CDC 스트리밍 진입까지 기다리는 전체 상한. 실제 클라우드에서는 VPN 생성과 터널 협상만으로 10분을 넘길 수 있습니다.
+# db_migration 의 각 단계에는 자기 상한이 있어서(VPN Terraform·터널 대기·접속 확인), 그 작업이 살아 있는 동안은
+# 이 상한까지 기다립니다.
+CDC_READY_TIMEOUT_S = 1800.0
 
 
 class MissingStageOutput(RuntimeError):
@@ -505,7 +509,7 @@ def run_db_migration(
     ctx: RunContext,
     *,
     poll_interval_s: float = 0.5,
-    timeout_s: float = 600.0,
+    timeout_s: float = CDC_READY_TIMEOUT_S,
 ) -> Any:
     # assessment(source)와 provisioning(target) 결과를 조립하여 CDC DB 마이그레이션을 실행합니다.
     planning_out = run.outputs.get(StageName.PLANNING.value)
@@ -635,9 +639,23 @@ def run_db_migration(
             }
 
         if time.monotonic() - start_t > timeout_s:
-            raise TimeoutError(f"CDC 스트리밍 진입 대기 시간({timeout_s}초)을 초과했습니다")
+            # 그냥 실패로 끝내면 뒤의 작업이 계속 돌아 같은 run 의 재시도가 "already running" 으로 막힙니다.
+            # 스트리밍 전이라 전환할 것이 없으므로 멈춤을 요청합니다.
+            note = _stop_unready_cdc(db_migration_service, run.run_id)
+            raise TimeoutError(f"CDC 스트리밍 진입 대기 시간({timeout_s:.0f}초)을 초과했습니다. {note}")
 
         time.sleep(poll_interval_s)
+
+
+def _stop_unready_cdc(service: Any, run_id: str) -> str:
+    """스트리밍에 들어가지 못한 db_migration 에 멈춤을 요청하고, 다음에 할 일을 문장으로 돌려줍니다."""
+    try:
+        service.stop(run_id)
+    except Exception as exc:
+        log.exception("스트리밍 전 CDC 작업을 멈추지 못했습니다 (run %s)", run_id)
+        return f"복제 작업 정리를 요청하지 못했습니다 ({type(exc).__name__}). 정리한 뒤 다시 시도하세요"
+    return ("복제 작업에 정리를 요청했습니다. 진행 중인 VPN 단계가 끝나면 정리되고, 그 뒤에 다시 시도할 수 있습니다 "
+            "(에이전트에 작업이 이미 등록됐다면 새 run 으로 시작하세요)")
 
 
 def run_app_deploy(run: RunStatus, ctx: RunContext) -> Any:
