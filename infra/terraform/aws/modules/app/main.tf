@@ -76,15 +76,43 @@ resource "aws_lb_target_group" "this" {
   }
 }
 
-# 인증서와 도메인이 없어서 HTTP(80)로 연다. HTTPS 는 도메인을 정한 뒤 추가한다.
+# 인증서와 도메인이 없어서 HTTP(80)로 연다. HTTPS 는 앞에 둔 CloudFront 가 맡는다 (루트의 https_front).
+# origin_guard 가 켜져 있으면 기본 응답은 403 이고, CloudFront 가 붙이는 비밀 헤더가 맞는 요청만 아래 규칙으로 앱에 전달한다.
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.this.arn
   port              = 80
   protocol          = "HTTP"
 
   default_action {
+    type             = var.origin_guard ? "fixed-response" : "forward"
+    target_group_arn = var.origin_guard ? null : aws_lb_target_group.this.arn
+
+    dynamic "fixed_response" {
+      for_each = var.origin_guard ? [1] : []
+      content {
+        content_type = "text/plain"
+        message_body = "forbidden"
+        status_code  = "403"
+      }
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "origin_verify" {
+  count        = var.origin_guard ? 1 : 0
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 1
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.this.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Origin-Verify"
+      values           = [var.origin_verify_secret]
+    }
   }
 }
 

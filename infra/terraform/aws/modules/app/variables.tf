@@ -88,3 +88,16 @@ variable "db_user" {
 variable "db_password_arn" {
   type = string
 }
+
+# true 이면 ALB 가 X-Origin-Verify 헤더가 비밀 값과 맞는 요청만 앱으로 전달하고 나머지는 403 으로 거절한다 (CloudFront 만 통과).
+# 비밀 값은 민감 값이라 count/for_each 에 쓸 수 없어서 켜고 끄는 스위치를 따로 둔다.
+variable "origin_guard" {
+  type    = bool
+  default = false
+}
+
+variable "origin_verify_secret" {
+  type      = string
+  default   = null
+  sensitive = true
+}

@@ -1,5 +1,11 @@
+# Worker 는 https 목적지만 받는다. CloudFront 를 켜면 https://xxxx.cloudfront.net, 끄면 http://ALB 주소다.
 output "app_url" {
-  description = "ALB 주소 (트래픽 전환에서 사용). 앱을 배포하기 전(deploy_app=false)에는 null"
+  description = "앱 주소 (트래픽 전환에서 사용). 기본은 CloudFront 의 https 주소. 앱을 배포하기 전(deploy_app=false)에는 null"
+  value       = try(module.https_front[0].url, module.app[0].app_url, null)
+}
+
+output "alb_url" {
+  description = "ALB 의 http 주소. CloudFront 를 켜면 ALB 는 CloudFront 에서 오는 요청만 받으므로 직접 접근에는 쓰지 않는다"
   value       = try(module.app[0].app_url, null)
 }
 

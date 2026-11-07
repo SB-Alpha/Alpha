@@ -47,6 +47,13 @@ Worker 를 거치지 않고 `*.run.app` 을 직접 부르는 것을 앱이 403 �
 - 배포 직후(`deploy_app`) 앱을 Worker 없이 직접 쳐 보고 결과를 `ingress_guard` 지표로 남깁니다: **SECURE**(헤더 없이 403, 시크릿이 있으면 헤더를 붙였을 때 통과), **EXPOSED**(헤더 없이 통과), **MISCONFIGURED**(헤더를 붙여도 403 이라 Worker 도 막힘). 404·5xx·연결 실패는 판단하지 않고 지표를 만들지 않습니다. 대시보드 "Cloud Run 인그레스 보호" 칸이 이 값을 보여 줍니다.
 - 한계: Azure·AWS 목적지에는 이 변수가 없어 시크릿을 넣지 않습니다 (측정은 같이 하므로 앱이 열려 있으면 EXPOSED 로 보입니다). 실제 GCP 에서 "직접 호출 403, Worker 경유 200" 은 아직 확인하지 못했습니다.
 
+## Worker에 알리는 앱 주소는 https여야 합니다
+Worker의 `/control/target`은 https 주소만 받습니다(localhost만 http 예외). 그래서 앱 배포 뒤 Worker에 주소를 알리기 전에(`update_worker_target`) `app_url`이 https인지 먼저 확인하고, 아니면 해결 방법과 함께 멈춥니다(앱을 이미 만든 뒤에 Worker가 400으로 거절해서 모호하게 알게 되는 것을 막으려는 것).
+
+- GCP Cloud Run(`….run.app`)과 Azure Container Apps(`….azurecontainerapps.io`)는 플랫폼이 https 주소를 자동으로 줍니다.
+- AWS는 ALB의 기본 주소로는 https를 붙일 수 없어서 Terraform이 ALB 앞에 CloudFront를 만들어 `https://….cloudfront.net`을 앱 주소로 냅니다(`enable_https_front`, 기본 켜짐). Worker의 허용 도메인에 `.cloudfront.net`이 있어야 합니다. 자세한 내용은 `infra/terraform/aws/README.md`.
+- Worker에 알리지 않는 배포(`update_worker_target = false`)에는 이 요건이 없습니다.
+
 ## 미정 사항 (합의 필요)
 - Terraform 실행 방식 (CLI 호출 등)과 상태 저장 위치
 - 장시간 작업의 상태 보고 방식

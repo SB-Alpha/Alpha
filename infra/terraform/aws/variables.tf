@@ -92,6 +92,12 @@ variable "secret_refs" {
   default     = {}
 }
 
+variable "enable_https_front" {
+  description = "ALB 앞에 CloudFront 를 둬서 https 주소(xxxx.cloudfront.net)를 만든다. Worker 는 https 목적지만 받으므로 기본은 켠다. 끄면 앱 주소가 http 라서 Worker 에 알릴 수 없다 (CloudFront 를 만들 수 없는 계정이 아니면 끄지 말 것)"
+  type        = bool
+  default     = true
+}
+
 variable "cdc_allowed_cidrs" {
   description = "DB(5432)에 접속을 허용할 추가 대역. CDC 가 VPN 으로 들어올 때 원격 대역(예: OCI 10.50.0.0/16)을 넣는다. 기본은 비어 있어 앱 보안 그룹에서 오는 접속만 허용한다"
   type        = list(string)

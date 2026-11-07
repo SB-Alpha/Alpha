@@ -11,6 +11,7 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from .image_transfer import DESTINATION_LOGINS, TransferResult, load_aws_credentials, parse_ecr_host, parse_image, transfer_image
 from .providers import DEFAULT_PROVIDER, GCP, WORKER_SECRET_ENV, get_provider, terraform_dir
@@ -213,6 +214,27 @@ def ingress_guard_state(
     return None, f"직접 호출 응답 {without} 이라 판단하지 않음"
 
 
+# Worker 의 /control/target 이 http 를 허용하는 호스트 (infra/cloudflare/worker/src/index.js 의 LOCAL_HOSTS 와 같다)
+_WORKER_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1"})
+
+
+def _require_https_for_worker(app_url: str, provider: str) -> None:
+    """Worker 에 앱 주소를 알리기 전에 https 인지 본다. Worker 는 https 목적지만 받고(localhost 만 예외),
+    그렇지 않으면 400 으로 거절한다. 앱을 다 만든 뒤에 모호하게 실패하지 않도록 해결 방법을 담아 먼저 멈춘다."""
+    parsed = urlparse(app_url)
+    if parsed.scheme == "https" or (parsed.scheme == "http" and parsed.hostname in _WORKER_HTTP_HOSTS):
+        return
+    hint = (
+        "AWS 는 Terraform 변수 enable_https_front 를 켜서(기본값) ALB 앞에 CloudFront 를 두거나, ALB 에 도메인 인증서를 붙이세요"
+        if provider == "aws"
+        else "목적지 앱 주소를 https 로 받을 수 있게 구성하세요"
+    )
+    raise ProvisioningError(
+        f"앱 주소({app_url})가 https 가 아니라서 Worker 가 목적지로 받지 못합니다 (Worker 는 https 만 허용). {hint}. "
+        "Worker 에 알리지 않으려면 입력의 update_worker_target 을 false 로 하세요"
+    )
+
+
 def _wait_healthy(
     url: str,
     ctx: Reporter,
@@ -343,6 +365,8 @@ def deploy_app(
         return AppDeployOutput(app_url=app_url, healthy=False, target=target, changes=counts, applied=False)
     if not app_url:
         raise ProvisioningError("app_url 출력이 없습니다. 앱이 배포되지 않았습니다")
+    if worker_client is not None:
+        _require_https_for_worker(app_url, inp.provider)
 
     _wait_healthy(
         app_url.rstrip("/") + "/health/ready",

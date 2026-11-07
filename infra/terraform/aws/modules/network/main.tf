@@ -61,16 +61,35 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# 주의: 관리형 접두사 목록은 항목 수만큼 보안 그룹 규칙 한도(기본 60)를 차지한다 (이 목록은 약 55개). 이 보안 그룹에 규칙을 더 넣지 말 것.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  count = var.alb_cloudfront_only ? 1 : 0
+  name  = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
 resource "aws_security_group" "alb" {
   name        = "${var.name}-alb"
-  description = "ALB: 인터넷에서 80 포트만 받는다"
+  description = var.alb_cloudfront_only ? "ALB: CloudFront 에서 오는 80 포트만 받는다" : "ALB: 인터넷에서 80 포트만 받는다"
   vpc_id      = aws_vpc.this.id
 
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  dynamic "ingress" {
+    for_each = var.alb_cloudfront_only ? [1] : []
+    content {
+      from_port       = 80
+      to_port         = 80
+      protocol        = "tcp"
+      prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront[0].id]
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = var.alb_cloudfront_only ? [] : [1]
+    content {
+      from_port   = 80
+      to_port     = 80
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
   }
 
   egress {
