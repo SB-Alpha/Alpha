@@ -69,7 +69,7 @@ def serve() -> int:
     os.environ.update(
         CDC_AGENT_URL="http://localhost:18080",
         WORKER_URL="http://localhost:18081",
-        WORKER_TOKEN_FILE=str(HERE / ".local" / "secrets" / "worker.token"),
+        WORKER_TOKEN_FILE=str(HERE / ".local" / "agent-secrets" / "worker.token"),
         ALPHA_PROBE_URL="http://localhost:18081/health/ready",
         ALPHA_DATA_DIR=data_dir,
         ALPHA_SECRETS_KEY=Fernet.generate_key().decode(),
