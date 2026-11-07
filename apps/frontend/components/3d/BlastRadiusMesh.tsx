@@ -6,7 +6,6 @@ import { useRef } from "react";
 import * as THREE from "three";
 
 // DynamicCanvas 가 조회하는 보안 모듈의 고정 노드 id. 이 run 의 원본 노드 값이 아님을 화면에 밝힙니다.
-const QUERIED_NODE_ID = "aws-ecs-workitems";
 
 interface Props {
   position: [number, number, number];
@@ -104,10 +103,10 @@ export function BlastRadiusMesh({
           <div className="text-center font-sans text-[10px] text-ink/75">
             {isQuarantined ? (
               <span className="text-emerald-700 font-medium">
-                격리 우회 요청 완료 (보안 API 응답 기준)
+                격리·우회를 Worker 에 반영했습니다
               </span>
             ) : (
-              <span>보안 API 영향 범위 · 조회 노드 {QUERIED_NODE_ID} (이 run 원본과 별개)</span>
+              <span>클라우드 보안 경보가 이 run 원본 자원에 맞았습니다 (보안 패널에서 경보 확인)</span>
             )}
           </div>
 

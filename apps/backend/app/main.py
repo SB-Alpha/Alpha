@@ -36,7 +36,24 @@ def create_app() -> FastAPI:
     app.include_router(live_router)
     app.include_router(finops_router)
     app.include_router(security_router)
+    _wire_security_topology()
     return app
+
+
+def _wire_security_topology() -> None:
+    """security 가 workflows 를 import 하지 않도록, run 토폴로지를 돌려주는 함수를 여기서 넣어 줍니다."""
+    from app.features.security.router import get_security_service
+    from app.features.workflows.router import get_engine
+    from app.features.workflows.store import RunNotFound
+    from app.features.workflows.topology import build_topology
+
+    def run_topology(run_id: str) -> dict | None:
+        try:
+            return build_topology(get_engine().get(run_id))
+        except RunNotFound:
+            return None
+
+    get_security_service().set_topology_provider(run_topology)
 
 
 app = create_app()
