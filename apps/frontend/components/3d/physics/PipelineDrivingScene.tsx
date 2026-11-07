@@ -55,6 +55,7 @@ export function PipelineDrivingScene({
   }
   const dynamicBlocksRef = useRef<DynamicBlock[]>([]);
   const lastStageIdxRef = useRef<number>(-1);
+  const lastSpeedRef = useRef<number>(0);
 
   // 키보드 입력 리스너 (WASD / 화살표)
   const keyStateRef = useRef({
@@ -401,6 +402,7 @@ export function PipelineDrivingScene({
     const forwardVelZ = -vehicle.chassisBody.velocity.z;
     const gear: "P" | "D" | "R" =
       Math.abs(forwardVelZ) < 0.15 ? "P" : forwardVelZ > 0.15 ? "D" : "R";
+    lastSpeedRef.current = speedKmh;
 
     if (onCheckpointChange && stageReports[closestIdx]) {
       if (closestIdx !== lastStageIdxRef.current || speedKmh > 0) {
@@ -410,10 +412,11 @@ export function PipelineDrivingScene({
     }
   });
 
-  // 초기 체크포인트 전달
+  // 처음에는 첫 체크포인트를 알립니다. 폴링으로 보고서가 바뀌면 지금 위치의 카드와 속도를 유지합니다.
   useEffect(() => {
-    if (stageReports[0] && onCheckpointChange) {
-      onCheckpointChange(stageReports[0], 0);
+    const report = stageReports[Math.max(lastStageIdxRef.current, 0)];
+    if (report && onCheckpointChange) {
+      onCheckpointChange(report, lastSpeedRef.current);
     }
   }, [stageReports, onCheckpointChange]);
 

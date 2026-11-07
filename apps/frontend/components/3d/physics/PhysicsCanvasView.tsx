@@ -29,9 +29,8 @@ export default function PhysicsCanvasView({
   initialMode = "cutover_valve",
   sequenceTrigger = 0,
 }: Props) {
-  const serving = servingSide(run);
-  const defaultPhase: CutoverPhase =
-    serving === "gcp" || run.approvals.includes("cutover") ? "gcp_serving" : "aws_serving";
+  // 승인만으로는 트래픽이 넘어갔다고 보지 않습니다. 보고된 serving 지표만 믿습니다.
+  const defaultPhase: CutoverPhase = servingSide(run) === "gcp" ? "gcp_serving" : "aws_serving";
 
   const [mode, setMode] = useState<Step3Mode>(initialMode);
   const [phase, setPhase] = useState<CutoverPhase>(defaultPhase);
