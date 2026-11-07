@@ -17,7 +17,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # "가장 많이 아끼는 후보는 gcp (월 90% 확정 절감) 입니다" 처럼 결론을 꾸밀 수 있어 모양을 막습니다.
 CLOUD_SLUG = r"^[a-z0-9]+(-[a-z0-9]+)*$"  # 예: aws, gcp, azure, on-prem
 ITEM_NAME = r"^[^\d%$]{1,40}$"  # 숫자·%·$ 없이 40자까지. 금액과 비율은 코드만 씁니다
-SOURCE_CLOUD = "aws"  # /estimate 의 원본은 항상 AWS 입니다
+SOURCE_CLOUD = "aws"  # /estimate 원본 클라우드 기본값 (CostRequest.source_cloud 로 바꿀 수 있음)
+SourceCloud = Literal["aws", "gcp", "azure"]
 
 # 크기 상한. 가장 큰 단일 인스턴스보다 넉넉한 값이고, 곱셈이 넘치거나 오타로 큰 값이 들어오는 것만 막습니다
 MAX_APP_VCPU = 64
@@ -165,6 +166,9 @@ class Traffic(BaseModel):
     rps: float = Field(default=0, ge=0, le=100_000, allow_inf_nan=False)  # 요청이 있는 시간의 초당 평균 요청 수
     # 요청 하나를 처리하는 평균 시간. RPS 교차점(필요한 Cloud Run 인스턴스 수)에만 씁니다. 모르면 None
     avg_latency_ms: float | None = Field(default=None, gt=0, le=60_000, allow_inf_nan=False)
+    # 읽기 요청 비율(0~1)과 평균 응답 크기(KB). 차익거래에만 씁니다. 모르면 None 이고 차익거래를 내지 않습니다 (기본값으로 채우지 않음)
+    read_ratio: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    avg_response_kb: float | None = Field(default=None, gt=0, le=10_000, allow_inf_nan=False)
     # 실행에서 잰 복제 지연(바이트). 모르면 None 이고, 차익거래는 지연 안전 판단을 하지 않았다고 적습니다 (0 으로 채우지 않음)
     replication_lag_bytes: int | None = Field(default=None, ge=0)
     max_safe_lag_bytes: int = Field(default=MAX_SAFE_LAG_BYTES, ge=0)
@@ -175,10 +179,16 @@ class CostRequest(BaseModel):
 
     # 크기는 모르면 None("미제공") 그대로 둡니다. 주면 0 보다 크고 상한 이하여야 합니다.
     # 상한은 클라우드 한 대가 실제로 낼 수 있는 크기보다 넉넉하게 잡아, 곱셈이 넘치는 값만 막습니다.
-    source_region: str  # 원본 AWS 리전. 예: "ap-northeast-2"
-    app_vcpu: float | None = Field(default=None, gt=0, le=MAX_APP_VCPU, allow_inf_nan=False)
+    source_cloud: SourceCloud = SOURCE_CLOUD  # 지금 원본 클라우드. 원본 비용은 이 클라우드의 가격 API 로 냅니다
+    source_region: str  # 원본 리전. 예: "ap-northeast-2", "asia-northeast3", "koreacentral"
+    app_vcpu: float | None = Field(default=None, gt=0, le=MAX_APP_VCPU, allow_inf_nan=False)  # 원본 앱 크기
     app_memory_mib: int | None = Field(default=None, gt=0, le=MAX_APP_MEMORY_MIB)
-    app_instances: int = Field(default=1, ge=1, le=MAX_APP_INSTANCES)  # 떠 있는 인스턴스(복제본) 수. assessment 가 아직 안 읽음
+    # 후보에 띄울 앱 크기 (예: 계획의 목적지 크기). 안 주면 원본과 같은 크기로 셉니다. 원본 크기를 모를 때
+    # 목적지 크기를 원본 크기로 바꿔 넣지 않게 따로 받습니다.
+    target_app_vcpu: float | None = Field(default=None, gt=0, le=MAX_APP_VCPU, allow_inf_nan=False)
+    target_app_memory_mib: int | None = Field(default=None, gt=0, le=MAX_APP_MEMORY_MIB)
+    # 떠 있는 인스턴스(복제본) 수. assessment 가 아직 안 읽어 모르면 None 이고, 1대로 계산했다고 가정에 적습니다
+    app_instances: int | None = Field(default=None, ge=1, le=MAX_APP_INSTANCES)
     db_instance_class: str | None = None  # 원본 RDS 등급. 예: "db.t3.micro"
     db_vcpu: int | None = Field(default=None, gt=0, le=MAX_DB_VCPU)
     db_memory_gib: float | None = Field(default=None, gt=0, le=MAX_DB_MEMORY_GIB, allow_inf_nan=False)
@@ -190,8 +200,22 @@ class CostRequest(BaseModel):
     @model_validator(mode="after")
     def _candidates_differ(self) -> CostRequest:
         # 가격 API 를 부르기 전에 막습니다. build_input 안에서 FinopsInput 검사에 걸리면 422 가 아니라 500 이 됩니다
-        _unique_clouds([c.cloud for c in self.candidates], SOURCE_CLOUD)
+        _unique_clouds([c.cloud for c in self.candidates], self.source_cloud)
         return self
+
+    @property
+    def instances(self) -> int:
+        """계산에 쓰는 인스턴스 수. 모르면 1대 (assumptions 가 그렇게 적습니다)."""
+        return self.app_instances or 1
+
+    def for_candidate(self) -> CostRequest:
+        """후보 견적용 요청. 목적지 앱 크기를 주었으면 그 크기로 바꿉니다."""
+        if self.target_app_vcpu is None and self.target_app_memory_mib is None:
+            return self
+        return self.model_copy(update={
+            "app_vcpu": self.target_app_vcpu if self.target_app_vcpu is not None else self.app_vcpu,
+            "app_memory_mib": self.target_app_memory_mib if self.target_app_memory_mib is not None else self.app_memory_mib,
+        })
 
 
 class FinopsEstimate(BaseModel):
