@@ -22,3 +22,28 @@ resource "google_secret_manager_secret" "refs" {
     auto {}
   }
 }
+
+# Cloudflare Worker 가 TARGET 으로 보낼 때 붙이는 X-Alpha-Worker-Secret 과 같은 값.
+# 앱이 이 값을 검사해 Worker 를 거치지 않은 직접 호출을 403 으로 막는다 (이슈 #34).
+resource "google_secret_manager_secret" "worker_secret" {
+  count     = var.protect_ingress ? 1 : 0
+  secret_id = "${var.name}-worker-secret"
+  project   = var.project_id
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "worker_secret" {
+  count       = var.protect_ingress ? 1 : 0
+  secret      = google_secret_manager_secret.worker_secret[0].id
+  secret_data = var.worker_secret
+
+  lifecycle {
+    precondition {
+      condition     = var.worker_secret != ""
+      error_message = "protect_ingress 가 켜져 있으면 worker_secret(TF_VAR_worker_secret)이 있어야 합니다."
+    }
+  }
+}

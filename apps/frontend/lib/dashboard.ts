@@ -29,6 +29,7 @@ export const METRIC_KEYS = {
   iamAuditStatus: "iam_audit_status", // "PASS" | "WARN" | "FAIL"
   cloudSqlPrivateIp: "cloud_sql_private_ip", // "SECURE" | "PUBLIC"
   secretEncryption: "secret_encryption", // "ENCRYPTED" | "PLAINTEXT"
+  ingressGuard: "ingress_guard", // 배포 직후 직접 호출을 실제로 쳐 본 결과: "SECURE" | "EXPOSED" | "MISCONFIGURED"
 } as const;
 
 const FINISHED: WorkflowState[] = ["succeeded", "failed", "aborted"];
@@ -85,7 +86,7 @@ export function stringMetric(run: RunStatus, key: string): string | null {
 }
 
 const SECURITY_GOOD = ["PASS", "SECURE", "ENCRYPTED"];
-const SECURITY_BAD = ["FAIL", "PUBLIC", "PLAINTEXT"];
+const SECURITY_BAD = ["FAIL", "PUBLIC", "PLAINTEXT", "EXPOSED", "MISCONFIGURED"];
 
 export type SecurityTone = "neutral" | "good" | "bad";
 
@@ -111,8 +112,9 @@ export function securityAuditSummary(run: RunStatus) {
   const iamAudit = stringMetric(run, METRIC_KEYS.iamAuditStatus);
   const cloudSql = stringMetric(run, METRIC_KEYS.cloudSqlPrivateIp);
   const secretEncryption = stringMetric(run, METRIC_KEYS.secretEncryption);
-  const isCompliant = [iamAudit, cloudSql, secretEncryption].every((v) => securityTone(v) === "good");
-  return { iamAudit, cloudSql, secretEncryption, isCompliant };
+  const ingressGuard = stringMetric(run, METRIC_KEYS.ingressGuard);
+  const isCompliant = [iamAudit, cloudSql, secretEncryption, ingressGuard].every((v) => securityTone(v) === "good");
+  return { iamAudit, cloudSql, secretEncryption, ingressGuard, isCompliant };
 }
 
 /** tables 지표의 행 수 합계. 보고 전이거나 형식이 다르면 null 입니다. */

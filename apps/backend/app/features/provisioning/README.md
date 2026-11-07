@@ -41,6 +41,12 @@
 - **메모리를 알면 vCPU는 보지 않습니다.** 메모리 4 GiB에 vCPU 16처럼 비율이 맞지 않는 입력(직접 입력에서만 가능)은 메모리 기준(`B_Standard_B2s`)으로 정해집니다. AWS 클래스는 메모리와 vCPU의 비율이 계열별로 고정이라 조사 결과에서는 영향이 작습니다.
 - **등급 이름은 조회 시점 기준입니다.** `az`·`aws` CLI로 확인한 목록이라, 다른 구독이나 리전에서 그 SKU가 열려 있는지(예: D 시리즈 v5)는 실제 `apply`까지 알 수 없습니다. 이 계정의 koreacentral에서는 후보 SKU가 모두 영역 1·2·3을 지원하는 것을 확인했습니다.
 
+## Cloud Run 직접 호출 차단 (이슈 #34)
+Worker 를 거치지 않고 `*.run.app` 을 직접 부르는 것을 앱이 403 으로 막게 합니다. 앱이 `X-Alpha-Worker-Secret` 헤더를 검사하는 미들웨어를 가지고 있어야 합니다 (샘플 앱 `samples/target-app` 은 있습니다).
+- 백엔드 환경에 `WORKER_SECRET`(Worker 의 `WORKER_SECRET` 과 **같은 값**)이 있으면 GCP 목적지 Terraform 에 `protect_ingress=true` 를 넘깁니다. 값은 tfvars 파일에 쓰지 않고 `TF_VAR_worker_secret` 환경변수로만 가며, Secret Manager 에 `<서비스>-worker-secret` 으로 저장되어 Cloud Run 에 `WORKER_SECRET`(비밀 환경 변수)과 `REQUIRE_WORKER_SECRET=true` 가 들어갑니다. 값이 빠지면 앱은 모든 요청을 거부합니다.
+- 배포 직후(`deploy_app`) 앱을 Worker 없이 직접 쳐 보고 결과를 `ingress_guard` 지표로 남깁니다: **SECURE**(헤더 없이 403, 시크릿이 있으면 헤더를 붙였을 때 통과), **EXPOSED**(헤더 없이 통과), **MISCONFIGURED**(헤더를 붙여도 403 이라 Worker 도 막힘). 404·5xx·연결 실패는 판단하지 않고 지표를 만들지 않습니다. 대시보드 "Cloud Run 인그레스 보호" 칸이 이 값을 보여 줍니다.
+- 한계: Azure·AWS 목적지에는 이 변수가 없어 시크릿을 넣지 않습니다 (측정은 같이 하므로 앱이 열려 있으면 EXPOSED 로 보입니다). 실제 GCP 에서 "직접 호출 403, Worker 경유 200" 은 아직 확인하지 못했습니다.
+
 ## 미정 사항 (합의 필요)
 - Terraform 실행 방식 (CLI 호출 등)과 상태 저장 위치
 - 장시간 작업의 상태 보고 방식

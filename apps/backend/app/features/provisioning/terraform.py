@@ -76,7 +76,13 @@ class TerraformCli:
     def _env(self) -> dict[str, str]:
         # 현재 환경변수를 그대로 쓰고(HCP·GCP 로그인 정보가 여기서 전달된다), 두 가지만 더한다.
         # TF_IN_AUTOMATION: 자동 실행 중이라고 알려 안내 문구를 줄임 / TF_INPUT=0: 물어보지 말고 진행
-        return {**os.environ, "TF_IN_AUTOMATION": "1", "TF_INPUT": "0"}
+        env = {**os.environ, "TF_IN_AUTOMATION": "1", "TF_INPUT": "0"}
+        # Worker 사전 공유 시크릿은 tfvars 파일(디스크)에 쓰지 않고 환경변수로만 넘긴다. 선언하지 않은 목적지에서는 무시된다.
+        # Windows 는 환경변수 이름 대소문자를 구분하지 않아 os.environ 에 대문자로 들어오므로 대소문자 없이 찾는다.
+        explicit = any(key.upper() == "TF_VAR_WORKER_SECRET" for key in env)
+        if env.get("WORKER_SECRET") and not explicit:
+            env["TF_VAR_worker_secret"] = env["WORKER_SECRET"]
+        return env
 
     def _stream(self, args: list[str], *, ok_codes: tuple[int, ...] = (0,), on_line: LineHandler | None = None) -> int:
         """명령을 실행하고 출력 줄을 실시간으로 on_line 에 넘긴다. on_line 이 예외를 내면 명령을 중단한다.

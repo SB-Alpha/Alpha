@@ -111,3 +111,16 @@ variable "db_logical_decoding" {
   type        = bool
   default     = true
 }
+
+variable "protect_ingress" {
+  description = "Worker 가 주입하는 사전 공유 시크릿(X-Alpha-Worker-Secret)을 Cloud Run 앱에 넘겨 직접 호출을 막게 할지. 켜면 worker_secret 이 필요하다"
+  type        = bool
+  default     = false
+}
+
+variable "worker_secret" {
+  description = "Cloudflare Worker 의 WORKER_SECRET 과 같은 값. TF_VAR_worker_secret 환경변수로 넘기며 tfvars 파일에는 쓰지 않는다"
+  type        = string
+  default     = ""
+  sensitive   = true
+}

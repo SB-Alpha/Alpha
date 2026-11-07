@@ -1,4 +1,8 @@
 locals {
+  # Worker 시크릿이 있으면 앱이 WORKER_SECRET 을 검사하게 켜고, 값이 빠지면 모든 요청을 거부(fail-closed)한다 (이슈 #34)
+  guard_env    = var.worker_secret_id == null ? {} : { REQUIRE_WORKER_SECRET = "true" }
+  guard_secret = var.worker_secret_id == null ? {} : { WORKER_SECRET = var.worker_secret_id }
+
   plain_env = merge(var.env_vars, {
     APP_ENV    = var.app_env
     PGHOST     = var.db_host
@@ -6,11 +10,11 @@ locals {
     PGDATABASE = var.db_name
     PGUSER     = var.db_user
     PGSSLMODE  = "require"
-  })
+  }, local.guard_env)
 
   secret_env = merge(var.secret_env, {
     PGPASSWORD = var.db_password_secret_id
-  })
+  }, local.guard_secret)
 }
 
 resource "google_cloud_run_v2_service" "this" {

@@ -99,6 +99,8 @@ export function DashboardPanel({ run }: Props) {
   const counts = stageCounts(run);
   const serving = servingSide(run);
   const security = securityAuditSummary(run);
+  const provider = run.request.target_infra?.provider ?? "gcp";
+  const ingressLabel = provider === "gcp" ? "Cloud Run 인그레스 보호" : "목적지 인그레스 보호";
 
   const lag = numberMetric(run, METRIC_KEYS.replicationLagBytes);
   const copyPercent = numberMetric(run, METRIC_KEYS.copyPercent);
@@ -218,10 +220,11 @@ export function DashboardPanel({ run }: Props) {
             </span>
           )}
         </div>
-        <div className="mt-2 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
+        <div className="mt-2 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
           <SecurityCell label="IAM 최소 권한 감사" value={security.iamAudit} />
           <SecurityCell label="Cloud SQL 사설망" value={security.cloudSql} />
           <SecurityCell label="비밀번호·키 암호화" value={security.secretEncryption} />
+          <SecurityCell label={ingressLabel} value={security.ingressGuard} />
         </div>
       </div>
     </section>

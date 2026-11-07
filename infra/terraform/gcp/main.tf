@@ -35,6 +35,9 @@ module "secrets" {
   name        = var.service_name
   db_password = module.database.db_password
   secret_refs = var.secret_refs
+
+  protect_ingress = var.protect_ingress
+  worker_secret   = var.worker_secret
 }
 
 module "iam" {
@@ -45,6 +48,7 @@ module "iam" {
   secret_ids = concat(
     [module.secrets.db_password_secret_id],
     values(module.secrets.secret_ref_ids),
+    module.secrets.worker_secret_ids,
   )
 }
 
@@ -69,6 +73,7 @@ module "app" {
   db_name               = module.database.db_name
   db_user               = module.database.db_user
   db_password_secret_id = module.secrets.db_password_secret_id
+  worker_secret_id      = one(module.secrets.worker_secret_ids)
 
   # 서비스 계정 권한, 비밀 값, DB, 사설 연결이 모두 준비된 뒤에 만들어야 한다
   depends_on = [module.iam, module.secrets, module.database, module.network]

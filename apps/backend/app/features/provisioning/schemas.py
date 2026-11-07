@@ -62,3 +62,6 @@ class AppDeployOutput(BaseModel):
     changes: dict[str, int]
     applied: bool
     worker_target_updated: bool = False  # Worker 의 원본 주소를 app_url 로 바꿨는지
+    # 배포 직후 직접 호출을 실제로 쳐 본 결과. SECURE=헤더 없이 403·헤더 있으면 통과, EXPOSED=헤더 없이 통과,
+    # MISCONFIGURED=헤더가 있어도 403(Worker 도 막힘). 판단할 수 없으면 None
+    ingress_guard: str | None = None

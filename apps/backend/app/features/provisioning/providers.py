@@ -33,6 +33,8 @@ class ProviderConfig:
     forced_variables: Mapping[str, Any] = field(default_factory=dict)
     # target_infra 를 이 목적지에 맞게 바꿈.
     adapt: Callable[[Mapping[str, Any]], tuple[dict[str, Any], list[str]]] | None = None
+    # Worker 사전 공유 시크릿을 앱에 넘겨 직접 호출을 막는 Terraform 변수 (이슈 #34). 없으면 이 목적지는 켜지 않는다.
+    ingress_guard_variable: str | None = None
 
 
 # infra/terraform/gcp 가 선언한 변수들.
@@ -67,7 +69,11 @@ GCP = ProviderConfig(
     scope_label="GCP 프로젝트 ID",
     # [GCP 는 VPN 용 서비스 계정 키를 항상 만들게 한다 (db_migration 이 VPN 을 만들 때 쓴다). Azure 에는 이 변수가 없다.
     forced_variables={"create_vpn_key": True},
+    ingress_guard_variable="protect_ingress",
 )
+
+# Cloudflare Worker 의 WORKER_SECRET 과 같은 값. 백엔드 환경에 있으면 GCP 목적지 Cloud Run 이 이 값을 검사하게 한다.
+WORKER_SECRET_ENV = "WORKER_SECRET"
 
 AZURE_MEMORY_PER_VCPU_MIB = 2048
 AZURE_MAX_MEMORY_MIB = 4096

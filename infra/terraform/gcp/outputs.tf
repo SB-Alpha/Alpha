@@ -91,3 +91,8 @@ output "vpn_credentials_json" {
   value       = module.iam.vpn_credentials_json
   sensitive   = true
 }
+
+output "ingress_guard" {
+  description = "Cloud Run 직접 호출 차단 설정. worker_secret = Worker 사전 공유 시크릿을 앱에 넘김, open = 켜지 않음"
+  value       = var.protect_ingress ? "worker_secret" : "open"
+}

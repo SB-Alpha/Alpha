@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .image_transfer import DESTINATION_LOGINS, TransferResult, load_aws_credentials, parse_ecr_host, parse_image, transfer_image
-from .providers import DEFAULT_PROVIDER, GCP, get_provider, terraform_dir
+from .providers import DEFAULT_PROVIDER, GCP, WORKER_SECRET_ENV, get_provider, terraform_dir
 from .schemas import AppDeployInput, AppDeployOutput, ProvisioningInput, ProvisioningOutput
 from .target import TargetBuildError, build_target, find_problems
 from .target_secrets import PutSecret, store_target_secrets
@@ -56,6 +56,8 @@ def build_tfvars(
     config = get_provider(provider)
     values = {key: value for key, value in target_infra.items() if key in config.known_variables and value is not None}
     values.update({config.scope_variable: project_id, "deploy_app": deploy_app, **config.forced_variables})
+    if config.ingress_guard_variable and os.getenv(WORKER_SECRET_ENV):
+        values[config.ingress_guard_variable] = True  # 값 자체는 TF_VAR_worker_secret 으로만 간다
     return values
 
 
@@ -175,6 +177,42 @@ def _default_http_get(url: str) -> int:
         return 0
 
 
+INGRESS_PROBE_HEADER = "X-Alpha-Worker-Secret"
+
+
+def _default_ingress_probe(url: str, secret: str | None) -> int:
+    request = urllib.request.Request(url, headers={INGRESS_PROBE_HEADER: secret} if secret else {})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310  (우리가 만든 https 주소만 쓴다)
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return 0
+
+
+def ingress_guard_state(
+    app_url: str, probe: Callable[[str, str | None], int], secret: str | None
+) -> tuple[str | None, str]:
+    """배포한 앱을 Worker 를 거치지 않고 직접 쳐 보고 (상태, 사람이 읽는 근거) 를 돌려준다. 판단할 수 없으면 상태는 None.
+
+    헤더 없이 403 이고 시크릿이 있을 때 시크릿을 붙이면 통과해야 SECURE 다. 헤더 없이 통과하면 EXPOSED,
+    헤더를 붙여도 403 이면 Worker 도 막히는 설정이라 MISCONFIGURED 다. 404·5xx·연결 실패는 판단하지 않는다.
+    """
+    url = app_url.rstrip("/") + "/"
+    without = probe(url, None)
+    if without == 403:
+        if secret:
+            with_secret = probe(url, secret)
+            if with_secret == 403:
+                return "MISCONFIGURED", "헤더를 붙여도 403 이라 Worker 요청도 막힘"
+            return "SECURE", f"헤더 없이 403, 헤더를 붙이면 {with_secret}"
+        return "SECURE", "헤더 없이 403"
+    if 200 <= without < 400:
+        return "EXPOSED", f"헤더 없이 직접 호출해도 {without}"
+    return None, f"직접 호출 응답 {without} 이라 판단하지 않음"
+
+
 def _wait_healthy(
     url: str,
     ctx: Reporter,
@@ -279,6 +317,7 @@ def deploy_app(
     clock: Callable[[], float] = time.monotonic,
     worker: WorkerClient | None = None,
     transfer: Callable[..., TransferResult] = transfer_image,
+    ingress_probe: Callable[[str, str | None], int] | None = None,
 ) -> AppDeployOutput:
   
     worker_client = None
@@ -315,6 +354,12 @@ def deploy_app(
     )
     ctx.report("running", 98, message="앱 상태 확인 완료 (/health/ready 200)")
 
+    guard, evidence = ingress_guard_state(app_url, ingress_probe or _default_ingress_probe, os.getenv(WORKER_SECRET_ENV) or None)
+    if guard is not None:
+        ctx.report("running", 98, {"ingress_guard": guard}, f"인그레스 보호 {guard}: {evidence}")
+    else:
+        ctx.report("running", 98, message=f"인그레스 보호는 판단하지 않음: {evidence}")
+
     if worker_client is not None:
         worker_client.set_target(app_url)
         ctx.report("running", 99, message="Worker 의 GCP 원본 주소를 새 앱 주소로 설정")
@@ -325,4 +370,5 @@ def deploy_app(
         changes=counts,
         applied=applied,
         worker_target_updated=worker_client is not None,
+        ingress_guard=guard,
     )

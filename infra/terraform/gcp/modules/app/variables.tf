@@ -95,3 +95,9 @@ variable "app_env" {
   type        = string
   default     = "gcp"
 }
+
+variable "worker_secret_id" {
+  description = "Worker 사전 공유 시크릿이 담긴 Secret Manager 비밀 이름. null 이면 직접 호출 차단을 켜지 않는다"
+  type        = string
+  default     = null
+}
