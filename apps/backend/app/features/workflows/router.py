@@ -29,6 +29,7 @@ from .schemas import (
 )
 from .runners import RUNNERS, clean_up_cdc, decommission_cdc
 from .store import RunNotFound, RunStore
+from .timings import RunTimings, TimingBaseline, run_timings, timing_baseline
 from .target_adapters import UnsupportedTarget, adapter_for
 from app.core.local_access import require_local_access
 
@@ -98,6 +99,23 @@ def list_runs(
     limit: int = Query(50, ge=1, le=200), engine: Engine = Depends(get_engine)
 ) -> list[RunStatus]:
     return engine.list(limit)
+
+
+@router.get("/stats/timings", response_model=TimingBaseline)
+def get_timing_baseline(
+    limit: int = Query(200, ge=1, le=200), engine: Engine = Depends(get_engine)
+) -> TimingBaseline:
+    """지난 실행들의 단계별 소요 시간 분포(최소·중앙값·최대, 표본 수). 예상이 아니라 과거 실측입니다."""
+    return timing_baseline(engine.list(limit))
+
+
+@router.get("/{run_id}/timings", response_model=RunTimings)
+def get_run_timings(run_id: str, engine: Engine = Depends(get_engine)) -> RunTimings:
+    """이 run 의 단계별 실제 소요 시간. 재지 못한 단계는 값 없이 이유(note)만 돌려줍니다."""
+    try:
+        return run_timings(engine.get(run_id))
+    except RunNotFound:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"run {run_id} 이(가) 없습니다") from None
 
 
 @router.get("/{run_id}", response_model=RunDetail)
