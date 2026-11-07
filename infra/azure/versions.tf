@@ -16,6 +16,11 @@ terraform {
     }
   }
 
-  # Alpha 는 사용자 PC 에서 도는 앱이라 상태도 PC 에 둔다. *.tfstate 는 커밋되지 않는다.
-  backend "local" {}
+  # 상태는 GCP 와 같이 HCP Terraform 에 둔다. 실행은 이 PC(백엔드)에서 하는 Local 모드여야 한다 (plan -out 계획 파일 방식).
+  cloud {
+    organization = "team-alpha"
+    workspaces {
+      name = "alpha-azure-destination"
+    }
+  }
 }

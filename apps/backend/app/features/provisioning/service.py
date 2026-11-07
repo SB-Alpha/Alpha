@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
-from .image_transfer import TransferResult, load_aws_credentials, parse_ecr_host, parse_image, transfer_image
+from .image_transfer import DESTINATION_LOGINS, TransferResult, load_aws_credentials, parse_ecr_host, parse_image, transfer_image
 from .providers import DEFAULT_PROVIDER, GCP, get_provider, terraform_dir
 from .schemas import AppDeployInput, AppDeployOutput, ProvisioningInput, ProvisioningOutput
 from .target import TargetBuildError, build_target, find_problems
@@ -218,6 +218,9 @@ def _image_step(
     if inp.dry_run:
         ctx.report("running", 2, message="dry_run 이라 이미지 복사를 건너뜁니다")
         return None
+    if inp.provider not in DESTINATION_LOGINS:
+        ctx.report("running", 2, message=f"목적지 '{inp.provider}' 는 이미지 복사 로그인이 없어 복사를 건너뜁니다 (목적지 저장소에 이미지가 이미 있어야 합니다)")
+        return None
     needs_aws_key = parse_ecr_host(parse_image(str(source_image)).registry) is not None
     if needs_aws_key and not inp.source_credentials_ref:
         ctx.report("running", 2, message="원본 AWS 키가 없어 이미지 복사를 건너뜁니다 (목적지 저장소에 이미지가 이미 있어야 합니다)")
@@ -231,7 +234,8 @@ def _image_step(
         raise ProvisioningError("service_name 이 없어 복사할 이미지의 목적지 이름을 정할 수 없습니다")
 
     def prepare(tf: TerraformCli) -> dict[str, Any]:
-        registry_url = _output_value(tf.output_json(), "registry_url")
+        outputs = tf.output_json()
+        registry_url = _output_value(outputs, "registry_url")
         if not registry_url:
             raise ProvisioningError("registry_url 출력이 없습니다. provisioning 단계가 먼저 끝나 있어야 합니다")
         credentials = load_aws_credentials(inp.source_credentials_ref) if needs_aws_key else None
@@ -245,6 +249,20 @@ def _image_step(
         )
         done = "목적지에 있던 이미지를 사용" if getattr(result, "reused", False) else "이미지 복사 완료"
         ctx.report("running", 12, message=f"{done} ({result.digest[:19]})")
+        # DR 을 켠 경우 DR 앱은 자기 저장소에서 받으므로 같은 이미지를 DR 저장소에도 복사한다 (digest 는 같다).
+        dr_registry_url = _output_value(outputs, "dr_registry_url")
+        if dr_registry_url:
+            dr_result = transfer(
+                source_image=str(source_image),
+                service_name=str(service_name),
+                registry_url=str(dr_registry_url),
+                provider=inp.provider,
+                aws_credentials=credentials,
+                report=lambda message: ctx.report("running", 13, message=f"DR: {message}"),
+            )
+            if dr_result.digest != result.digest:
+                raise ProvisioningError("DR 저장소에 복사한 이미지의 digest 가 주 저장소와 다릅니다")
+            ctx.report("running", 14, message=f"DR 저장소에도 복사 완료 ({dr_result.digest[:19]})")
         return {"container_image": result.container_image}
 
     return prepare

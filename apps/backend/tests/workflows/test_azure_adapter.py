@@ -112,3 +112,17 @@ def test_deploy_app_tells_the_worker_only_when_worker_url_is_set(seen, monkeypat
     AzureTargetAdapter().deploy_app("mig-1", {}, None, Ctx())
 
     assert seen["deploy_app"][0].update_worker_target is True
+
+
+def test_deploy_app_passes_the_source_key_reference_on(seen, monkeypatch):
+    monkeypatch.delenv("WORKER_URL", raising=False)
+    AzureTargetAdapter().deploy_app("mig-1", {}, None, Ctx(), source_credentials_ref="secret://mig-1/source-cloud")
+
+    assert seen["deploy_app"][0].source_credentials_ref == "secret://mig-1/source-cloud"
+
+
+def test_deploy_app_without_a_source_key_reference_still_works(seen, monkeypatch):
+    monkeypatch.delenv("WORKER_URL", raising=False)
+    AzureTargetAdapter().deploy_app("mig-1", {}, None, Ctx())
+
+    assert seen["deploy_app"][0].source_credentials_ref is None

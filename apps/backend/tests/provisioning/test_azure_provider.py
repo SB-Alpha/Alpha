@@ -27,11 +27,11 @@ ADMIN_PASSWORD = "FAKE-AZURE-ADMIN-PASSWORD-DO-NOT-LEAK"
 
 
 def azure_outputs() -> dict:
-    return json.loads(AZURE_FIXTURE.read_text())
+    return json.loads(AZURE_FIXTURE.read_text(encoding="utf-8"))
 
 
 def declared_variables(folder: Path) -> set[str]:
-    text = (folder / "variables.tf").read_text()
+    text = (folder / "variables.tf").read_text(encoding="utf-8")
     return set(re.findall(r'^variable "([a-z_0-9]+)"', text, re.MULTILINE))
 
 
@@ -72,7 +72,7 @@ def test_every_variable_we_pass_is_declared_by_that_terraform_folder(config):
 
 def test_size_constants_describe_the_same_memory_values_the_terraform_accepts():
     # infra/azure 의 memory 검증 목록이 바뀌면(예: 상한을 늘림) 이 테스트가 실패해서 상수도 같이 고치게 한다.
-    text = (AZURE.terraform_dir / "variables.tf").read_text()
+    text = (AZURE.terraform_dir / "variables.tf").read_text(encoding="utf-8")
     match = re.search(r"contains\(\[([0-9,\s]+)\],\s*var\.memory\)", text)
     assert match, "infra/azure/variables.tf 에서 memory 검증 목록을 찾지 못했습니다"
     accepted = {int(number) for number in match.group(1).split(",") if number.strip()}
@@ -241,6 +241,56 @@ def test_azure_deploy_app_turns_the_app_on_with_the_same_translated_size():
     assert result.healthy is True and result.app_url == "https://target-app.example.azurecontainerapps.io"
 
 
-def test_image_copy_to_azure_says_it_is_not_supported_yet():
-    with pytest.raises(ProvisioningError, match=r"'azure'.*아직 없습니다"):
-        destination_login("azure", "acrtargetapp.azurecr.io")
+def test_azure_login_uses_the_fixed_user_and_the_az_token():
+    from app.features.provisioning.image_transfer import ACR_TOKEN_USER, azure_login
+
+    seen = []
+    login = azure_login("acrtargetapp.azurecr.io", token_source=lambda registry: seen.append(registry) or "TOKEN")
+
+    assert (login.registry, login.username, login.password) == ("acrtargetapp.azurecr.io", ACR_TOKEN_USER, "TOKEN")
+    assert seen == ["acrtargetapp.azurecr.io"]
+    assert destination_login.__name__  # 등록된 목적지 로그인 목록에도 있다
+    from app.features.provisioning.image_transfer import DESTINATION_LOGINS
+
+    assert set(DESTINATION_LOGINS) == {"gcp", "azure"}
+
+
+def _fake_run(returncode=0, stdout="TOKEN\n", raises=None):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if raises:
+            raise raises
+        return type("Done", (), {"returncode": returncode, "stdout": stdout, "stderr": ""})()
+
+    return run, calls
+
+
+def test_the_az_token_command_gets_only_the_registry_name(monkeypatch):
+    from app.features.provisioning import image_transfer
+
+    run, calls = _fake_run()
+    monkeypatch.setattr(image_transfer.subprocess, "run", run)
+
+    assert image_transfer._az_acr_token("acrtargetapp.azurecr.io") == "TOKEN"
+    assert calls[0][:5] == ["az", "acr", "login", "--name", "acrtargetapp"]
+    assert "--expose-token" in calls[0]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"raises": FileNotFoundError()}, "az CLI"),
+        ({"returncode": 1, "stdout": ""}, "AcrPush"),
+        ({"stdout": "  \n"}, "AcrPush"),
+    ],
+)
+def test_a_failed_az_token_is_a_clear_error_without_output(monkeypatch, kwargs, message):
+    from app.features.provisioning import image_transfer
+
+    run, _ = _fake_run(**kwargs)
+    monkeypatch.setattr(image_transfer.subprocess, "run", run)
+
+    with pytest.raises(ProvisioningError, match=message):
+        image_transfer._az_acr_token("acrtargetapp.azurecr.io")

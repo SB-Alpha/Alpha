@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 # 입력으로 받을 수 있는 목적지 이름. 등록된 이름(providers.PROVIDERS)과 같아야 하고, 같은지는 tests/provisioning/test_providers.py 가 확인한다.
 # 이 파일이 구현(providers, terraform)을 import 하지 않게 이름만 여기에 둔다.
-ProviderName = Literal["gcp"]
+ProviderName = Literal["gcp", "azure"]
 DEFAULT_PROVIDER: ProviderName = "gcp"
 
 

@@ -19,7 +19,13 @@ Korea Central을 주 리전으로 사용하고, Korea South에 지역 장애 복
 
 앱은 Private Endpoint를 통해 DB에 연결합니다. OCI CDC에서 목적지 DB로 들어오는 외부 경로에는 VPN이 필요하며, 이 구성에는 GatewaySubnet만 포함됩니다. VPN Gateway와 터널은 별도 범위입니다.
 
-DB는 기본적으로 단일 영역이며, 지원 등급에서 영역 중복 HA를 선택할 수 있습니다. DB에는 삭제 잠금과 지역 중복 백업이 설정됩니다. 앱 리소스 생성은 인프라 생성과 분리되어 있습니다.
+DB는 기본적으로 단일 영역이며, 지원 등급에서 영역 중복 HA를 선택할 수 있습니다. DB에는 삭제 잠금과 지역 중복 백업이 설정됩니다. 앱 리소스 생성은 인프라 생성과 분리되어 있습니다. 첫 apply는 `deploy_app = false`(기본값)로 앱 없이 인프라만 만들고, DB 이주가 streaming에 들어가 테이블이 만들어진 뒤 `deploy_app = true`로 두 번째 apply를 합니다. 이 사이에 백엔드가 원본 이미지를 Container Registry(DR을 켠 경우 DR 저장소까지)에 복사하고, digest로 고정한 주소를 `container_image`로 넘깁니다.
+
+## 상태 저장과 로그인
+
+- 상태는 HCP Terraform의 `team-alpha` 조직, `alpha-azure-destination` 워크스페이스에 둡니다(GCP와 같은 방식). 워크스페이스 실행 모드는 **Local**이어야 합니다.
+- Terraform과 이미지 복사 모두 `az login` 신분을 씁니다. 이 신분에 Container Registry `AcrPush`가 부여되며(`modules/registry`), 역할 부여 직후에는 push가 잠시 실패할 수 있어 백엔드가 재시도합니다. 백엔드를 실행하는 환경에 `az` CLI와 `crane`이 필요합니다.
+- `ARM_*` 서비스 주체로 실행하는 경우는 아직 시험하지 않았습니다.
 
 ## 보조 리전 · Korea South
 

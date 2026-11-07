@@ -684,3 +684,115 @@ def test_a_failed_copy_stops_before_terraform_plans_or_applies(aws_key):
         deploy(app_input(), broken, tf=tf)
 
     assert "plan" not in tf.calls and "apply" not in tf.calls
+
+
+# ---------------------------------------------------------------------------
+# Azure: 역할 부여 직후 push 재시도, DR 저장소 복사, 로그인이 없는 목적지
+# ---------------------------------------------------------------------------
+
+
+class FlakyCopier:
+    """앞의 몇 번은 권한 오류로 실패하고 그 뒤에 성공하는 가짜."""
+
+    def __init__(self, failures, error="crane copy 실패 (종료 코드 1): UNAUTHORIZED: authentication required"):
+        self.failures = failures
+        self.error = error
+        self.attempts = 0
+
+    def copy(self, source, destination, logins):
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise ImageCopyError(self.error)
+        return DIGEST
+
+
+def test_azure_retries_a_permission_error_right_after_the_role_grant():
+    waits: list[float] = []
+    copier = FlakyCopier(failures=2)
+
+    result = run_transfer(copier, provider="azure", sleep=waits.append)
+
+    assert copier.attempts == 3
+    assert waits == [20.0, 20.0]
+    assert result.digest == DIGEST
+
+
+def test_azure_gives_up_after_the_last_attempt():
+    copier = FlakyCopier(failures=99)
+
+    with pytest.raises(ImageCopyError):
+        run_transfer(copier, provider="azure", sleep=lambda s: None)
+
+    assert copier.attempts == 4
+
+
+def test_azure_does_not_retry_an_error_that_is_not_about_permission():
+    copier = FlakyCopier(failures=99, error="crane copy 실패 (종료 코드 1): MANIFEST_UNKNOWN")
+
+    with pytest.raises(ImageCopyError):
+        run_transfer(copier, provider="azure", sleep=lambda s: pytest.fail("기다리면 안 됩니다"))
+
+    assert copier.attempts == 1
+
+
+def test_gcp_never_retries():
+    copier = FlakyCopier(failures=99)
+
+    with pytest.raises(ImageCopyError):
+        run_transfer(copier, provider="gcp", sleep=lambda s: pytest.fail("기다리면 안 됩니다"))
+
+    assert copier.attempts == 1
+
+
+def with_dr(outputs: dict, url="drregistry.azurecr.io") -> dict:
+    return {**outputs, "dr_registry_url": {"value": url}}
+
+
+def test_with_dr_enabled_the_same_image_is_copied_to_the_dr_registry_too(aws_key):
+    transfer = FakeTransfer()
+    tf = FakeTerraform(outputs=with_app_url(with_dr(json.loads(FIXTURE.read_text(encoding="utf-8")))))
+
+    result, _, ctx = deploy(app_input(), transfer, tf=tf)
+
+    assert [call["registry_url"] for call in transfer.calls] == [
+        "asia-northeast3-docker.pkg.dev/example-project/target-app",
+        "drregistry.azurecr.io",
+    ]
+    assert tf.var_values["container_image"] == PINNED  # 주 앱은 주 저장소 주소를 쓴다
+    assert any("DR 저장소에도 복사 완료" in (m or "") for _, _, m in ctx.calls)
+    assert result.healthy is True
+
+
+def test_without_dr_nothing_extra_is_copied(aws_key):
+    transfer = FakeTransfer()
+
+    deploy(app_input(), transfer)
+
+    assert len(transfer.calls) == 1
+
+
+def test_a_dr_copy_with_a_different_digest_fails(aws_key):
+    class Diverging(FakeTransfer):
+        def __call__(self, **kwargs):
+            result = super().__call__(**kwargs)
+            if len(self.calls) == 2:
+                return TransferResult(container_image=PINNED, source="s", destination="d", digest=OTHER_DIGEST)
+            return result
+
+    tf = FakeTerraform(outputs=with_app_url(with_dr(json.loads(FIXTURE.read_text(encoding="utf-8")))))
+
+    with pytest.raises(ProvisioningError, match="DR"):
+        deploy(app_input(), Diverging(), tf=tf)
+
+
+def test_a_destination_without_a_registry_login_skips_the_copy_instead_of_failing(aws_key, monkeypatch):
+    from app.features.provisioning import service
+
+    monkeypatch.setattr(service, "DESTINATION_LOGINS", {"gcp": object()})
+    transfer = FakeTransfer()
+
+    _, tf, ctx = deploy(app_input(provider="azure"), transfer)
+
+    assert transfer.calls == []
+    assert "container_image" not in tf.var_values
+    assert any("이미지 복사 로그인이 없어" in (m or "") for _, _, m in ctx.calls)

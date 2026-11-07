@@ -114,7 +114,12 @@ class AzureTargetAdapter:
         return provisioning_service.run(inp, ctx)
 
     def deploy_app(
-        self, run_id: str, target_infra: dict[str, Any], config: TargetInfraConfig | None, ctx: RunContext
+        self,
+        run_id: str,
+        target_infra: dict[str, Any],
+        config: TargetInfraConfig | None,
+        ctx: RunContext,
+        source_credentials_ref: str | None = None,
     ) -> Any:
         from app.features.provisioning import service as provisioning_service
         from app.features.provisioning.schemas import AppDeployInput
@@ -124,6 +129,7 @@ class AzureTargetAdapter:
             target_infra=_azure_infra(target_infra, config),
             provider=self.provider,
             project_id=_project_id(config),
+            source_credentials_ref=source_credentials_ref,
             update_worker_target=bool(os.environ.get("WORKER_URL")),
         )
         return provisioning_service.deploy_app(inp, ctx)

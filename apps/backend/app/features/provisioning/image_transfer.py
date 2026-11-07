@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -227,8 +228,43 @@ def gcp_login(registry: str, *, token_source: Callable[[], str] = _adc_token) ->
     return RegistryLogin(registry=registry, username="oauth2accesstoken", password=token_source())
 
 
-# 목적지 클라우드마다 로그인 방법이 다르다. 새 목적지는 여기에 등록한다 (Azure ACR 은 Azure 연결 때 추가).
-DESTINATION_LOGINS: dict[str, Callable[[str], RegistryLogin]] = {"gcp": gcp_login}
+AZ_TOKEN_TIMEOUT_S = 60.0
+ACR_TOKEN_USER = "00000000-0000-0000-0000-000000000000"  # az acr login --expose-token 토큰과 쓰는 고정 사용자 이름
+
+
+def _az_acr_token(registry: str) -> str:
+    """`az login` 신분으로 ACR 액세스 토큰(약 3시간)을 받는다. Terraform(azurerm)이 쓰는 로그인과 같은 신분이다."""
+    name = registry.partition(".")[0]  # --name 에는 레지스트리 이름만 준다 (myregistry.azurecr.io -> myregistry)
+    try:
+        done = subprocess.run(
+            ["az", "acr", "login", "--name", name, "--expose-token", "--output", "tsv", "--query", "accessToken"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=AZ_TOKEN_TIMEOUT_S,
+            check=False,
+        )
+    except FileNotFoundError:
+        raise ProvisioningError(
+            "az CLI 를 찾지 못했습니다. Azure CLI 를 설치하고 `az login` 을 실행하세요 (https://aka.ms/installazurecli)"
+        ) from None
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ProvisioningError(f"ACR 토큰을 받지 못했습니다 ({type(error).__name__})") from None
+    token = done.stdout.strip()
+    if done.returncode != 0 or not token:
+        raise ProvisioningError(
+            "ACR 토큰을 받지 못했습니다. `az login` 이 되어 있는지, 이 로그인에 해당 레지스트리의 AcrPush 권한이 있는지 확인하세요"
+        )
+    return token
+
+
+def azure_login(registry: str, *, token_source: Callable[[str], str] = _az_acr_token) -> RegistryLogin:
+    """Azure Container Registry 는 고정 사용자 이름(전부 0인 GUID) + az 액세스 토큰으로 로그인한다."""
+    return RegistryLogin(registry=registry, username=ACR_TOKEN_USER, password=token_source(registry))
+
+
+# 목적지 클라우드마다 로그인 방법이 다르다. 새 목적지는 여기에 등록한다.
+DESTINATION_LOGINS: dict[str, Callable[[str], RegistryLogin]] = {"gcp": gcp_login, "azure": azure_login}
 
 
 def destination_login(provider: str, registry: str) -> RegistryLogin:
@@ -357,6 +393,35 @@ class TransferResult:
     reused: bool = False
 
 
+# Azure 는 역할(AcrPush) 부여가 퍼지는 데 시간이 걸려, 부여 직후의 push 가 권한 오류로 실패할 수 있다. 그때만 다시 시도한다.
+PUSH_RETRY_PROVIDERS = frozenset({"azure"})
+PUSH_ATTEMPTS = 4
+PUSH_RETRY_WAIT_S = 20.0
+_AUTH_ERROR = re.compile(r"unauthorized|denied|forbidden|\b40[13]\b", re.IGNORECASE)
+
+
+def _copy_with_retry(
+    copier: ImageCopier,
+    source: str,
+    destination: str,
+    logins: Sequence[RegistryLogin],
+    *,
+    retry: bool,
+    sleep: Callable[[float], None],
+    say: Callable[[str], None],
+) -> str:
+    attempts = PUSH_ATTEMPTS if retry else 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return copier.copy(source, destination, logins)
+        except ImageCopyError as error:
+            if attempt == attempts or not _AUTH_ERROR.search(str(error)):
+                raise
+            say(f"목적지 저장소 권한이 아직 퍼지지 않은 것 같아 {PUSH_RETRY_WAIT_S:g}초 뒤 다시 시도합니다 ({attempt}/{attempts - 1})")
+            sleep(PUSH_RETRY_WAIT_S)
+    raise AssertionError("unreachable")
+
+
 def transfer_image(
     *,
     source_image: str,
@@ -368,6 +433,7 @@ def transfer_image(
     source_login: Callable[[str, Mapping[str, str | None]], RegistryLogin] = aws_ecr_login,
     dest_login: Callable[[str, str], RegistryLogin] = destination_login,
     report: Callable[[str], None] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> TransferResult:
     """원본 이미지를 `<registry_url>/<service_name>` 으로 복사하고 digest 로 고정한 주소를 돌려준다.
 
@@ -401,7 +467,15 @@ def transfer_image(
     image_copier = copier or CraneCopier()
     reused = False
     try:
-        digest = image_copier.copy(source.pull_ref, destination, logins)
+        digest = _copy_with_retry(
+            image_copier,
+            source.pull_ref,
+            destination,
+            logins,
+            retry=provider in PUSH_RETRY_PROVIDERS,
+            sleep=sleep,
+            say=say,
+        )
     except ImageCopyError as error:
         if is_ecr:
             raise  # 열쇠를 알고 있는 원본이 실패한 것이므로 그대로 알린다
