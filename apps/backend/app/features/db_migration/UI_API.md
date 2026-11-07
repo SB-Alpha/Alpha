@@ -104,7 +104,7 @@ interface MigrationRunStatus {
 
 ## 화면에서 바꿀 곳
 
-- 경로 문구는 `route`를 읽습니다. `layout.tsx`의 AWS → GCP 고정 문구를 대체합니다.
-- 전환 화면은 `serving`의 `source`, `target`으로 판정합니다. `dashboard.ts`의 `servingSide`는 `aws`, `gcp`만 인정합니다.
-- 네트워크 표시는 `cloud_sql_private_ip` 대신 `target_db_network`를 읽습니다.
+- 경로 문구는 `route`를 읽습니다. `layout.tsx`의 AWS → GCP 고정 문구는 지웠습니다.
+- 전환 화면은 `serving`의 `source`, `target`으로 판정합니다. `dashboard.ts`의 `servingSide`가 `source`, `target`을 돌려주고, 예전 run 의 `aws`, `gcp`도 같은 뜻으로 읽습니다.
+- 네트워크 표시는 `target_db_network`를 읽습니다. 예전 run 의 `cloud_sql_private_ip`(`SECURE`/`PUBLIC`)도 같은 뜻으로 읽습니다.
 - `copy_percent`, `replication_lag_bytes`처럼 지금 쓰는 지표 키는 이름이 같습니다.
