@@ -87,7 +87,7 @@ provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어
 - `serving`: 에이전트의 `traffic_mode` 에서 옮깁니다.
 - `cutover_seconds`·`cutover_seconds_source`: 팀 합의(박준서, 11/5)대로 Worker 의 `released_at - hold_started_at`(에이전트 `evidence.cutover.t0`·`t1`)을 씁니다 (`worker`). 두 값을 쓸 수 없으면 에이전트 `cutover_ms` 를 씁니다 (`agent`). 둘 다 없으면 "미제공" 입니다.
 - `cutover_steps`: 에이전트 `evidence.cutover.steps` 의 `step`·`elapsed_ms`·`waited_ms`·`mismatch`·`error`(접속 정보를 가린 뒤 300자까지)만 옮깁니다. 진행 중과 실패 직전에도 보고합니다.
-- `cutover_sequence`·`cutover_sequence_missing`: 성공 시 순서 검증 결과(`VERIFIED`/`INCOMPLETE`)와 빠진 단계입니다. 증적이 없으면(시뮬레이터 포함) 단계 지표는 모두 "미제공" 입니다.
+- `cutover_sequence`·`cutover_sequence_missing`: 성공 시 순서 검증 결과(`VERIFIED`/`INCOMPLETE`)와 빠진 단계입니다. 세 번째 단계는 `snapshot_fixed` 이고, 이전 에이전트의 `validated` 도 인정합니다. 증적이 없으면(시뮬레이터 포함) 단계 지표는 모두 "미제공" 입니다.
 - `cutover_outcome`: 처음 계약에 없던 값으로, 실패 직후 동작과 화면의 복귀 안내를 정하려고 workflows 가 추가했습니다. `not_started`(전환이 시작되지 않음), `rolled_back`(원본으로 복귀함), `unknown`(결과 불명), `post_switch_failed`(경로를 바꾼 뒤 오류), `switched`(전환 완료) 중 하나입니다.
   - `rolled_back` 은 에이전트 보고만으로 쓰지 않습니다. 복귀 단계에 실패가 없고, Worker 상태가 `mode`·`next_origin` 모두 `SOURCE` 일 때만 씁니다. `WORKER_URL` 이 없거나 읽지 못하면 `unknown` 입니다. 전환 요청 응답을 잃은 경우도 `unknown` 입니다.
   - 결과를 모르는데 트래픽이 원본이라고 확인되지 않으면 중단 뒤 복제 자원을 자동으로 정리하지 않습니다.

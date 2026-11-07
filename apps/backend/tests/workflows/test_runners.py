@@ -743,7 +743,12 @@ def test_plan_approver_is_not_used_for_cutover(engine, approver_agent):
 # -- 전환 시간·순서 검증·단계 증적 ---------------------------------------------------
 
 STEP_KEYS = {"cutover_steps", "cutover_sequence", "cutover_sequence_missing"}
-SEQUENCE = ("hold", "marker_on_target", "validated", "switched_to_target", "released")
+SEQUENCE = ("hold", "marker_on_target", "snapshot_fixed", "switched_to_target", "released")
+# 에이전트(jobs.py)가 실제로 남기는 순서입니다.
+AGENT_STEPS = (
+    "hold", "inflight_zero", "source_writes_blocked", "marker_on_target", "sink_paused",
+    "sequences_synced", "snapshot_fixed", "switched_to_target", "released",
+)
 STABILIZING = {"state": "running", "phase": "stabilizing", "progress": 90, "message": "완료"}
 
 
@@ -872,7 +877,19 @@ def test_out_of_order_step_reports_only_the_displaced_name(engine, monkeypatch):
     reports, _ = _drive_cutover(engine, monkeypatch, {**STABILIZING, "evidence": evidence})
     m = reports[-1].metrics
     assert m["cutover_sequence"] == "INCOMPLETE"
-    assert m["cutover_sequence_missing"] == ["validated"]
+    assert m["cutover_sequence_missing"] == ["snapshot_fixed"]
+
+
+@pytest.mark.parametrize(
+    "names",
+    [AGENT_STEPS, ("hold", "marker_on_target", "validated", "switched_to_target", "released")],
+    ids=["agent", "older-agent"],
+)
+def test_snapshot_fixed_or_validated_completes_the_sequence(engine, monkeypatch, names):
+    reports, _ = _drive_cutover(engine, monkeypatch, {**STABILIZING, "evidence": _steps(*names)})
+
+    assert reports[-1].metrics["cutover_sequence"] == "VERIFIED"
+    assert "경고" not in reports[-1].message
 
 
 @pytest.mark.parametrize(

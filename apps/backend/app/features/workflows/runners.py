@@ -26,7 +26,9 @@ from .target_adapters import adapter_for
 log = logging.getLogger(__name__)
 
 # 전환 순서. 실행은 에이전트가 하고 workflows 는 증적으로 확인만 합니다 (PR #45).
-CUTOVER_SEQUENCE = ("hold", "marker_on_target", "validated", "switched_to_target", "released")
+CUTOVER_SEQUENCE = ("hold", "marker_on_target", "snapshot_fixed", "switched_to_target", "released")
+# 이전 에이전트는 보류 중에 비교를 끝내고 snapshot_fixed 자리에 validated 를 남깁니다.
+_CUTOVER_STEP_ALIASES = {"snapshot_fixed": ("snapshot_fixed", "validated")}
 _STEP_NUMBER_KEYS = ("elapsed_ms", "waited_ms", "mismatch")
 _MAX_AGENT_TEXT = 300
 _MAX_AGENT_TEXT_SCANNED = 4000  # 아주 긴 값에 정규식이 오래 걸리지 않게 먼저 자릅니다
@@ -214,10 +216,12 @@ def _verify_cutover_sequence(evidence: Any) -> dict[str, Any]:
     position = 0
     missing = []
     for expected in CUTOVER_SEQUENCE:
-        try:
-            position = names.index(expected, position) + 1
-        except ValueError:
+        accepted = _CUTOVER_STEP_ALIASES.get(expected, (expected,))
+        found = next((i for i in range(position, len(names)) if names[i] in accepted), None)
+        if found is None:
             missing.append(expected)
+        else:
+            position = found + 1
     if missing:
         return {"cutover_sequence": "INCOMPLETE", "cutover_sequence_missing": missing}
     return {"cutover_sequence": "VERIFIED"}
