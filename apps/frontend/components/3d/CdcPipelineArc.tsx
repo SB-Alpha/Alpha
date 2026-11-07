@@ -4,6 +4,7 @@ import { Edges, Html, Line } from "@react-three/drei";
 import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import { useMemo, useRef, useState } from "react";
 import * as THREE from "three";
+import { MAX_SAFE_LAG_BYTES } from "@/lib/dashboard";
 import { extractCdcArcData } from "@/lib/topology3d";
 import type { RunStatus } from "@/lib/workflows";
 
@@ -35,7 +36,8 @@ export function CdcPipelineArc({
   // 상태 색상 (운영 콘솔 규칙: 정상=emerald, 진행=indigo, 경고=amber, 실패=rose, 대기=ink/30)
   const strokeColor = useMemo(() => {
     if (isFailed) return "#be123c"; // rose-700
-    if (cdc.lagBytes !== null && cdc.lagBytes > 1024 * 1024 * 5) return "#b45309"; // amber-700
+    // 전환 승인 ② 의 지연 기준(workflows/readiness.py MAX_REPLICATION_LAG_BYTES = 1 MiB)과 같은 값입니다.
+    if (cdc.lagBytes !== null && cdc.lagBytes > MAX_SAFE_LAG_BYTES) return "#b45309"; // amber-700
     if (isSucceeded) return "#047857"; // emerald-700
     if (isRunning) return "#3730a3"; // indigo-800 (--color-accent)
     return "#a8a29e"; // stone-400 (pending)
@@ -208,10 +210,6 @@ export function CdcPipelineArc({
                   >
                     {cdc.mismatchCount !== null ? `${cdc.mismatchCount}개` : "미제공"}
                   </dd>
-                </div>
-                <div>
-                  <dt className="text-ink/55">슬롯</dt>
-                  <dd className="font-mono truncate">{cdc.replicationSlot ?? "미제공"}</dd>
                 </div>
               </dl>
 

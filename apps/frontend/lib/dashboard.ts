@@ -2,14 +2,14 @@
 // db_migration 키는 #30·#31 이 실제로 보내는 이름입니다. serving 은 workflows 가 에이전트 보고로, cutover_seconds 는
 // 워커 측정값이나 에이전트 보고로 채웁니다(cutover_seconds_source). failed_requests·probe_* 는 프로버 실측값입니다.
 // 실제 run 에서 ALPHA_PROBE_URL 이 없으면 "미제공"이고, 시뮬레이터는 failed_requests 를 자체 값으로 보냅니다.
-// iam_audit_status 는 보내는 모듈이 아직 없어 "미제공"으로 남습니다.
+// 목적지 DB 네트워크는 db_migration 계약(UI_API.md)의 target_db_network 를 읽고, 예전 run 의 cloud_sql_private_ip 도 읽습니다.
 
 import { isRecord } from "./plan";
 import type { ApprovalRecord, PreflightReport, PreflightVerdict, RunStatus, StageStatus, WorkflowState } from "./workflows";
 
 export const METRIC_KEYS = {
   simulated: "simulated", // true: 실제 에이전트가 아닌 시뮬레이션 값
-  serving: "serving", // "aws" | "gcp": 지금 요청을 처리하는 쪽
+  serving: "serving", // "source" | "target": 지금 쓰기를 처리하는 쪽 (예전 run 은 "aws" | "gcp")
   replicationLagBytes: "replication_lag_bytes",
   copyPercent: "copy_percent",
   tables: "tables", // { 테이블명: { source_rows, target_rows, percent, match } }
@@ -26,8 +26,8 @@ export const METRIC_KEYS = {
   cutoverSequence: "cutover_sequence", // "VERIFIED" | "INCOMPLETE"
   cutoverSequenceMissing: "cutover_sequence_missing", // INCOMPLETE 일 때 빠진 단계 이름
   cutoverOutcome: "cutover_outcome", // "not_started" | "rolled_back" | "unknown" | "post_switch_failed" | "switched"
-  iamAuditStatus: "iam_audit_status", // "PASS" | "WARN" | "FAIL"
-  cloudSqlPrivateIp: "cloud_sql_private_ip", // "SECURE" | "PUBLIC"
+  targetDbNetwork: "target_db_network", // "PRIVATE" | "PUBLIC": 목적지 DB 주소가 사설망인지
+  legacyCloudSqlPrivateIp: "cloud_sql_private_ip", // 예전 run: "SECURE" | "PUBLIC"
   secretEncryption: "secret_encryption", // "ENCRYPTED" | "PLAINTEXT"
   ingressGuard: "ingress_guard", // 배포 직후 직접 호출을 실제로 쳐 본 결과: "SECURE" | "EXPOSED" | "MISCONFIGURED"
 } as const;
@@ -85,7 +85,7 @@ export function stringMetric(run: RunStatus, key: string): string | null {
   return null;
 }
 
-const SECURITY_GOOD = ["PASS", "SECURE", "ENCRYPTED"];
+const SECURITY_GOOD = ["PASS", "SECURE", "ENCRYPTED", "PRIVATE"];
 const SECURITY_BAD = ["FAIL", "PUBLIC", "PLAINTEXT", "EXPOSED", "MISCONFIGURED"];
 
 export type SecurityTone = "neutral" | "good" | "bad";
@@ -109,12 +109,20 @@ export function isSimulated(run: RunStatus): boolean {
 
 /** 모듈이 실제로 보고한 값만 돌려줍니다. 보고가 없으면 null 입니다. */
 export function securityAuditSummary(run: RunStatus) {
-  const iamAudit = stringMetric(run, METRIC_KEYS.iamAuditStatus);
-  const cloudSql = stringMetric(run, METRIC_KEYS.cloudSqlPrivateIp);
+  const targetDbNetwork = targetDbNetworkOf(run);
   const secretEncryption = stringMetric(run, METRIC_KEYS.secretEncryption);
   const ingressGuard = stringMetric(run, METRIC_KEYS.ingressGuard);
-  const isCompliant = [iamAudit, cloudSql, secretEncryption, ingressGuard].every((v) => securityTone(v) === "good");
-  return { iamAudit, cloudSql, secretEncryption, ingressGuard, isCompliant };
+  const isCompliant = [targetDbNetwork, secretEncryption, ingressGuard].every((v) => securityTone(v) === "good");
+  return { targetDbNetwork, secretEncryption, ingressGuard, isCompliant };
+}
+
+/** 목적지 DB 네트워크. 예전 run 의 cloud_sql_private_ip(SECURE) 는 PRIVATE 로 읽습니다. */
+export function targetDbNetworkOf(run: RunStatus): "PRIVATE" | "PUBLIC" | null {
+  const current = stringMetric(run, METRIC_KEYS.targetDbNetwork);
+  if (current === "PRIVATE" || current === "PUBLIC") return current;
+  const legacy = stringMetric(run, METRIC_KEYS.legacyCloudSqlPrivateIp);
+  if (legacy === "SECURE") return "PRIVATE";
+  return legacy === "PUBLIC" ? "PUBLIC" : null;
 }
 
 /** tables 지표의 행 수 합계. 보고 전이거나 형식이 다르면 null 입니다. */
@@ -236,11 +244,21 @@ export function formatBytes(bytes: number): string {
   return `${size.toFixed(1)}GB`;
 }
 
-/** 처리 중인 쪽. 보고값만 쓰고, 보고가 없으면 추정하지 않습니다. */
-export function servingSide(run: RunStatus): "aws" | "gcp" | null {
+export type ServingSide = "source" | "target";
+
+/** 전환 승인 ② 의 복제 지연 기준. workflows/readiness.py MAX_REPLICATION_LAG_BYTES 와 같은 값입니다. */
+export const MAX_SAFE_LAG_BYTES = 1024 * 1024;
+
+/** 쓰기를 처리하는 쪽. 보고값만 쓰고, 보고가 없으면 추정하지 않습니다.
+ * db_migration 계약은 source|target 입니다. 예전 run 에 저장된 aws(원본)·gcp(목적지)도 읽습니다. */
+export function servingSide(run: RunStatus): ServingSide | null {
   const reported = findMetric(run, METRIC_KEYS.serving);
-  return reported === "aws" || reported === "gcp" ? reported : null;
+  if (reported === "source" || reported === "target") return reported;
+  if (reported === "aws") return "source";
+  return reported === "gcp" ? "target" : null;
 }
+
+export const SERVING_LABEL: Record<ServingSide, string> = { source: "원본", target: "목적지" };
 
 export function formatDuration(totalSeconds: number): string {
   const h = Math.floor(totalSeconds / 3600);

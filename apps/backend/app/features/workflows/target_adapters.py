@@ -10,9 +10,9 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any, Protocol, get_args
 
-from .schemas import MigrationRequest, RunContext, TargetInfraConfig, TargetInfraType
+from .schemas import MigrationRequest, RunContext, TargetInfo, TargetInfraConfig, TargetInfraType
 
 DEFAULT_PROVIDER: TargetInfraType = "gcp"
 
@@ -217,6 +217,11 @@ TARGET_ADAPTERS: Mapping[TargetInfraType, TargetAdapter] = {
     "azure": AzureTargetAdapter(),
     "aws": AwsTargetAdapter(),
 }
+
+
+def describe_targets() -> list[TargetInfo]:
+    """화면의 목적지 선택지. 손으로 옮겨 적은 표 대신 등록된 어댑터에서 바로 만듭니다."""
+    return [TargetInfo(provider=p, available=p in TARGET_ADAPTERS) for p in get_args(TargetInfraType)]
 
 
 def provider_of(request: MigrationRequest) -> TargetInfraType:

@@ -19,8 +19,6 @@ export interface TargetInfraAdapter {
   projectIdLabel: string;
   projectIdPlaceholder: string;
   projectIdHint: string;
-  // backend `target_adapters.TARGET_ADAPTERS` 에 등록된 클라우드만 true 입니다. 등록 전에는 API 도 거절합니다.
-  isAvailable: boolean;
   toConfig: (region: string, projectId?: string | null) => TargetInfraConfig;
 }
 
@@ -39,9 +37,8 @@ export const GcpTargetAdapter: TargetInfraAdapter = {
   cloudName: "GCP",
   defaultRegion: "asia-northeast3",
   projectIdLabel: "목적지 프로젝트 ID (선택)",
-  projectIdPlaceholder: "alpha-target-513617",
+  projectIdPlaceholder: "GCP 프로젝트 ID",
   projectIdHint: DEFAULT_PROJECT_ID_HINT,
-  isAvailable: true,
   toConfig: toConfigFor("gcp"),
 };
 
@@ -53,7 +50,6 @@ export const AzureTargetAdapter: TargetInfraAdapter = {
   projectIdLabel: "목적지 구독 ID (선택)",
   projectIdPlaceholder: "00000000-0000-0000-0000-000000000000",
   projectIdHint: DEFAULT_PROJECT_ID_HINT,
-  isAvailable: true,
   toConfig: toConfigFor("azure"),
 };
 
@@ -66,7 +62,6 @@ export const AwsTargetAdapter: TargetInfraAdapter = {
   projectIdPlaceholder: "12자리 숫자 (예: 123456789012)",
   projectIdHint:
     "비워둘 시 백엔드 환경변수를 사용하며, 값과 환경변수가 모두 없으면 시작 전 오류('AWS 계정 ID가 없습니다')로 중단됩니다.",
-  isAvailable: true,
   toConfig: toConfigFor("aws"),
 };
 
@@ -78,7 +73,6 @@ export const NcpTargetAdapter: TargetInfraAdapter = {
   projectIdLabel: "목적지 프로젝트 ID (선택)",
   projectIdPlaceholder: "ncp-project",
   projectIdHint: DEFAULT_PROJECT_ID_HINT,
-  isAvailable: false,
   toConfig: toConfigFor("ncp"),
 };
 
@@ -88,6 +82,20 @@ export const TARGET_ADAPTERS: TargetInfraAdapter[] = [
   AwsTargetAdapter,
   NcpTargetAdapter,
 ];
+
+// 고를 수 있는 목적지는 백엔드에 어댑터가 등록된 클라우드뿐입니다 (GET /runs/targets).
+// 손으로 옮겨 적지 않고 백엔드 목록을 그대로 씁니다. 목록을 못 읽으면 아무것도 고를 수 없습니다.
+export interface TargetAvailability {
+  provider: TargetInfraType;
+  available: boolean;
+}
+
+export async function fetchTargetAvailability(): Promise<Set<TargetInfraType>> {
+  const res = await fetch("/api/runs/targets", { cache: "no-store" });
+  if (!res.ok) throw new Error(`목적지 목록을 읽지 못했습니다 (HTTP ${res.status})`);
+  const rows = (await res.json()) as TargetAvailability[];
+  return new Set(rows.filter((r) => r.available).map((r) => r.provider));
+}
 
 export function adapterFor(provider: TargetInfraType | null | undefined): TargetInfraAdapter {
   return TARGET_ADAPTERS.find((adapter) => adapter.provider === provider) ?? GcpTargetAdapter;

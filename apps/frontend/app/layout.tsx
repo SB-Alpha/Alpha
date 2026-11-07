@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "CloudMorph 이전 콘솔",
-  description: "AWS → GCP 무중단 이전 실행·승인 화면",
+  description: "AWS·GCP·Azure 간 무중단 이전 실행·승인 화면",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

@@ -11,6 +11,7 @@ import {
   formatBytes,
   numberMetric,
   overallProgress,
+  SERVING_LABEL,
   servingSide,
   tableRowTotals,
 } from "./dashboard";
@@ -46,7 +47,9 @@ export interface BlastRadiusInfo {
 
 export interface SourceNodeData {
   serviceTitle: string;
-  region: string;
+  /** 요청의 원본 종류 (AWS·GCP·Azure·수동) */
+  cloudName: string;
+  region: string | null;
   ecsService: string | null;
   rdsInstanceId: string | null;
   dbVersion: string | null;
@@ -62,7 +65,6 @@ export interface CdcArcData {
   lagBytes: number | null;
   lagFormatted: string | null;
   mismatchCount: number | null;
-  replicationSlot: string | null;
   cdcStatus: string | null;
   cdcJobId: string | null;
   tables: TableSyncItem[];
@@ -76,7 +78,8 @@ export interface TargetNodeData {
   cloudSqlIp: string | null;
   dbName: string | null;
   cloudRunUrl: string | null;
-  healthCheck: string | null;
+  /** app_deploy 가 실제로 쳐 본 헬스 체크 결과. 보고가 없으면 null */
+  healthy: boolean | null;
   cpuMemory: string | null;
   targetRows: number | null;
   isServing: boolean;
@@ -119,6 +122,8 @@ export function extractTables(run: RunStatus): TableSyncItem[] {
   return items;
 }
 
+const SOURCE_CLOUD_NAME: Record<string, string> = { aws: "AWS", gcp: "GCP", azure: "Azure", manual: "수동 입력" };
+
 export function extractSourceNodeData(run: RunStatus): SourceNodeData {
   const planningOut = isRecord(run.outputs.planning) ? run.outputs.planning : null;
   const sourceOut = planningOut && isRecord(planningOut.source) ? planningOut.source : null;
@@ -129,13 +134,16 @@ export function extractSourceNodeData(run: RunStatus): SourceNodeData {
 
   return {
     serviceTitle: runTitle(run.request),
-    region: run.request.aws_region,
+    cloudName: SOURCE_CLOUD_NAME[run.request.source_kind ?? "aws"],
+    // AWS 원본은 요청의 aws_region, GCP·Azure 원본은 cloud_source.region, 둘 다 없으면 assessment 결과를 씁니다.
+    region:
+      strOrNull(run.request.aws_region) ?? strOrNull(run.request.cloud_source?.region) ?? strOrNull(sourceOut?.region),
     ecsService: strOrNull(run.request.ecs_service) ?? strOrNull(run.request.service_name),
     rdsInstanceId: strOrNull(run.request.rds_instance_id) ?? strOrNull(dbOut?.instance_id),
     dbVersion: strOrNull(dbOut?.version),
     vpcId: strOrNull(netOut?.vpc_id),
     sourceRows: rows?.source ?? null,
-    isServing: serving === "aws",
+    isServing: serving === "source",
   };
 }
 
@@ -144,9 +152,11 @@ export function extractCdcArcData(run: RunStatus): CdcArcData {
   const dbOut = isRecord(run.outputs.db_migration) ? run.outputs.db_migration : null;
   const cutoverOut = isRecord(run.outputs.cutover) ? run.outputs.cutover : null;
 
-  const copyPercent = numberMetric(run, METRIC_KEYS.copyPercent) ?? numOrNull(dbOut?.copy_percent);
+  // runner 출력은 {job_id, phase, state, metrics} 입니다 (workflows/runners.py run_db_migration).
+  const dbMetrics = dbOut && isRecord(dbOut.metrics) ? dbOut.metrics : null;
+  const copyPercent = numberMetric(run, METRIC_KEYS.copyPercent) ?? numOrNull(dbMetrics?.copy_percent);
   const lagBytes =
-    numberMetric(run, METRIC_KEYS.replicationLagBytes) ?? numOrNull(dbOut?.replication_lag_bytes);
+    numberMetric(run, METRIC_KEYS.replicationLagBytes) ?? numOrNull(dbMetrics?.replication_lag_bytes);
   const mismatchCount = numberMetric(run, METRIC_KEYS.mismatchTables);
 
   return {
@@ -155,8 +165,7 @@ export function extractCdcArcData(run: RunStatus): CdcArcData {
     lagBytes,
     lagFormatted: lagBytes !== null ? formatBytes(lagBytes) : null,
     mismatchCount,
-    replicationSlot: strOrNull(dbOut?.replication_slot),
-    cdcStatus: strOrNull(dbOut?.status),
+    cdcStatus: strOrNull(dbOut?.state) ?? strOrNull(dbOut?.phase),
     cdcJobId: strOrNull(run.cdc_job_id) ?? strOrNull(cutoverOut?.job_id),
     tables: extractTables(run),
   };
@@ -185,19 +194,15 @@ export function extractTargetNodeData(run: RunStatus): TargetNodeData {
   return {
     providerSummary: targetSummary(run.request),
     region: strOrNull(run.request.target_region) ?? strOrNull(provTarget?.region) ?? strOrNull(targetInfra?.region),
-    vpcId: strOrNull(provNetwork?.vpc_name) ?? strOrNull(provOut?.vpc_id),
-    dbInstanceId: strOrNull(provDb?.instance) ?? strOrNull(provOut?.db_instance_id),
-    cloudSqlIp: strOrNull(provDb?.private_ip) ?? strOrNull(provOut?.cloud_sql_ip),
-    dbName: strOrNull(provDb?.database) ?? strOrNull(provOut?.db_name) ?? strOrNull(targetInfra?.db_name),
-    cloudRunUrl:
-      strOrNull(deployApp?.url) ??
-      strOrNull(provApp?.url) ??
-      strOrNull(deployOut?.app_url) ??
-      strOrNull(deployOut?.cloud_run_url),
-    healthCheck: strOrNull(deployOut?.health_check) ?? strOrNull(targetInfra?.health_check_path),
+    vpcId: strOrNull(provNetwork?.vpc_name),
+    dbInstanceId: strOrNull(provDb?.instance),
+    cloudSqlIp: strOrNull(provDb?.private_ip),
+    dbName: strOrNull(provDb?.database) ?? strOrNull(targetInfra?.db_name),
+    cloudRunUrl: strOrNull(deployApp?.url) ?? strOrNull(provApp?.url) ?? strOrNull(deployOut?.app_url),
+    healthy: typeof deployOut?.healthy === "boolean" ? deployOut.healthy : null,
     cpuMemory: cpu !== null && memory !== null ? `${cpu} vCPU / ${memory} MiB` : null,
     targetRows: rows?.target ?? null,
-    isServing: serving === "gcp",
+    isServing: serving === "target",
   };
 }
 
@@ -220,7 +225,7 @@ export function extractStageReports(run: RunStatus): StageReportCardData[] {
     const facts: StageReportCardData["facts"] = [];
 
     if (s.stage === "discovery") {
-      facts.push({ label: "원본 리전", value: source.region });
+      facts.push({ label: "원본 리전", value: source.region ?? "미제공" });
       facts.push({ label: "대상 서비스", value: source.ecsService ?? "미제공" });
       facts.push({ label: "RDS 인스턴스", value: source.rdsInstanceId ?? "미제공" });
       facts.push({
@@ -263,10 +268,6 @@ export function extractStageReports(run: RunStatus): StageReportCardData[] {
         tone: cdc.lagBytes === 0 ? "good" : "neutral",
       });
       facts.push({
-        label: "복제 슬롯",
-        value: cdc.replicationSlot ?? "미제공",
-      });
-      facts.push({
         label: "테이블 대조",
         value:
           cdc.tables.length > 0
@@ -278,15 +279,15 @@ export function extractStageReports(run: RunStatus): StageReportCardData[] {
       facts.push({ label: "Cloud Run URL", value: target.cloudRunUrl ?? "미제공" });
       facts.push({
         label: "헬스 체크",
-        value: target.healthCheck ?? "미제공",
-        tone: target.healthCheck?.includes("200") ? "good" : "neutral",
+        value: target.healthy === null ? "미제공" : target.healthy ? "정상" : "실패",
+        tone: target.healthy === null ? "neutral" : target.healthy ? "good" : "bad",
       });
       facts.push({ label: "목적지 리전", value: target.providerSummary });
     } else if (s.stage === "cutover") {
       facts.push({
         label: "현재 트래픽 처리",
-        value: serving ? serving.toUpperCase() : "미제공",
-        tone: serving === "gcp" ? "good" : "neutral",
+        value: serving ? SERVING_LABEL[serving] : "미제공",
+        tone: serving === "target" ? "good" : "neutral",
       });
       facts.push({
         label: "전환 소요 (T1−T0)",

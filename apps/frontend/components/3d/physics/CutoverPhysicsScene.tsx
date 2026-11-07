@@ -379,7 +379,7 @@ export function CutoverPhysicsScene({
         </mesh>
         <Html position={[0, -0.68, 0]} center distanceFactor={9} zIndexRange={[10, 0]}>
           <div className="whitespace-nowrap rounded border border-ink bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-ink shadow-[2px_2px_0_0_var(--color-ink)]">
-            원본 AWS ({source.region})
+            원본 {source.cloudName} ({source.region ?? "미제공"})
           </div>
         </Html>
       </group>

@@ -117,7 +117,7 @@ export function SourceTargetNodes({
             onClick={() => onSelectNode(selectedNode === "source" ? null : "source")}
             className="pointer-events-auto whitespace-nowrap rounded border border-ink bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-ink shadow-[1px_1px_0_0_var(--color-ink)] transition-transform hover:-translate-y-0.5"
           >
-            원본 AWS ({source.region})
+            원본 {source.cloudName} ({source.region ?? "미제공"})
             {source.isServing && (
               <span className="ml-1 rounded bg-indigo-100 px-1 text-[8px] font-bold text-indigo-900">
                 SERVING
@@ -148,7 +148,7 @@ export function SourceTargetNodes({
               <dl className="mt-1.5 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px]">
                 <div>
                   <dt className="text-ink/55">리전</dt>
-                  <dd className="font-mono font-medium truncate">{source.region}</dd>
+                  <dd className="font-mono font-medium truncate">{source.region ?? "미제공"}</dd>
                 </div>
                 <div>
                   <dt className="text-ink/55">원본 행 수</dt>
@@ -274,7 +274,7 @@ export function SourceTargetNodes({
 
               <dl className="mt-1.5 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px]">
                 <div>
-                  <dt className="text-ink/55">Cloud SQL</dt>
+                  <dt className="text-ink/55">목적지 DB</dt>
                   <dd className="truncate font-mono" title={target.dbInstanceId ?? undefined}>
                     {target.dbInstanceId ?? "미제공"}
                   </dd>
@@ -295,7 +295,9 @@ export function SourceTargetNodes({
                 </div>
                 <div className="col-span-2 flex justify-between border-t border-ink/10 pt-0.5">
                   <dt className="text-ink/55">상태 확인</dt>
-                  <dd className="font-mono text-emerald-700 truncate">{target.healthCheck ?? "미제공"}</dd>
+                  <dd className={`font-mono truncate ${target.healthy === false ? "text-rose-700" : target.healthy ? "text-emerald-700" : ""}`}>
+                    {target.healthy === null ? "미제공" : target.healthy ? "정상" : "실패"}
+                  </dd>
                 </div>
               </dl>
 

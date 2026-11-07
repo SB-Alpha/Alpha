@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { NOT_PROVIDED, type FinOpsInputParams, type TargetProvider } from "@/lib/finops";
+import type { ServingSide } from "@/lib/dashboard";
 import type { ArbitrageResult, CloudCost, Crossover, EstimateState, FinopsEstimate, Saving } from "@/lib/finopsApi";
 
 // 백엔드 /finops/estimate 결과를 그립니다. 슬라이더를 움직이면 백엔드가 준 가격 API 단가(앵커)에
@@ -36,7 +37,7 @@ export interface RealRunTelemetry {
   elapsedText: string;
   stageLabel: string;
   replicationLagBytes: number | null;
-  servingSide: "aws" | "gcp" | null;
+  servingSide: ServingSide | null;
 }
 
 const usd = (v: number | null | undefined) =>

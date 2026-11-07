@@ -37,7 +37,8 @@ export interface CloudSourceRequest {
 export interface MigrationRequest {
   github_repo_url?: string | null;
   service_name?: string | null;
-  aws_region: string;
+  /** AWS 원본일 때만 보냅니다. GCP·Azure 원본은 cloud_source.region 을 씁니다. */
+  aws_region?: string | null;
   aws_role_ref?: string | null;
   aws_credentials_ref?: string | null;
   ecs_service?: string | null;
@@ -54,6 +55,15 @@ export interface MigrationRequest {
 export function runTitle(request: MigrationRequest): string {
   const repository = request.github_repo_url?.replace(/^https?:\/\/(www\.)?github\.com\//, "");
   return request.service_name || repository || request.ecs_service || "이름 없는 서비스";
+}
+
+const SOURCE_NAME: Record<string, string> = { aws: "AWS", gcp: "GCP", azure: "Azure", manual: "수동 입력" };
+
+/** 원본 클라우드와 리전. AWS 는 aws_region, GCP·Azure 는 cloud_source.region 입니다. */
+export function sourceSummary(request: MigrationRequest): string {
+  const kind = request.source_kind ?? "aws";
+  const region = kind === "aws" ? request.aws_region : request.cloud_source?.region;
+  return `${SOURCE_NAME[kind] ?? kind} ${region || "미제공"}`;
 }
 
 export function targetSummary(request: MigrationRequest): string {

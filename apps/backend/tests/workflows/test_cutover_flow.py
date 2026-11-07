@@ -202,7 +202,7 @@ def test_approving_cutover_sends_the_approver_to_the_agent(engine, world):
     assert world.cutover_calls == [(to_job_id(run_id), "박준서")]
     assert run.state == WorkflowState.SUCCEEDED
     metrics = run.stage(StageName.CUTOVER).metrics
-    assert metrics["serving"] == "gcp"
+    assert metrics["serving"] == "target"
     assert metrics["cutover_seconds"] == 0.8
     assert metrics["cutover_seconds_source"] == "agent"
     assert metrics["cutover_sequence"] == "VERIFIED"
@@ -495,7 +495,7 @@ def test_overflowing_duration_is_reported_as_not_provided(fast, world):
     metrics = run.stage(StageName.CUTOVER).metrics
     assert "cutover_seconds" not in metrics
     assert "cutover_seconds_source" not in metrics
-    assert metrics["serving"] == "gcp"
+    assert metrics["serving"] == "target"
 
 
 @pytest.mark.parametrize("broken", ["_cutover_metrics", "_verify_cutover_sequence"])

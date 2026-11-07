@@ -25,8 +25,8 @@ type Props = {
 
 // 정리하지 않으면 남는 자원. 금액은 가격 API 로 계산하지 않아 적지 않습니다 (미제공).
 const LEFTOVER_RESOURCES = [
-  "AWS Site-to-Site VPN 연결과 GCP VPN 게이트웨이·터널 (시간 단위 과금)",
-  "CDC 서버 (Kafka·Debezium 커넥터)",
+  "원본·목적지 클라우드의 VPN 게이트웨이와 OCI CDC 노드로 가는 IPsec 터널 (시간 단위 과금)",
+  "CDC 복제 작업 (OCI 의 Kafka·Debezium 커넥터)",
   "원본 DB 복제 슬롯 (WAL 이 계속 쌓여 원본 디스크를 채움)",
 ];
 

@@ -83,6 +83,13 @@ class RunContext(Protocol):
 # ---------------------------------------------------------------------------
 
 
+class TargetInfo(BaseModel):
+    """목적지 클라우드 목록 한 줄. available 은 백엔드에 어댑터가 등록됐는지입니다."""
+
+    provider: TargetInfraType
+    available: bool
+
+
 class TargetInfraConfig(BaseModel):
     """목적지 클라우드 선택. 해석은 어댑터가 합니다 (docs/TARGET_ADAPTER_SPEC.md)."""
 

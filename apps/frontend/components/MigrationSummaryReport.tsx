@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { StateBadge } from "@/components/StateBadge";
 import { FinOpsGreenOpsCard } from "@/components/FinOpsGreenOpsCard";
-import { countTone, formatBytes, isFinished } from "@/lib/dashboard";
+import { countTone, formatBytes, isFinished, SERVING_LABEL } from "@/lib/dashboard";
 import { formatTime } from "@/lib/labels";
 import {
   extractCdcArcData,
@@ -72,7 +72,7 @@ export function MigrationSummaryReport({ run, standalone = false }: Props) {
             이전 요약 리포트 (3D 플라이스루)
           </h2>
           <p className="mt-0.5 text-xs text-ink/65">
-            {source.serviceTitle} · {source.region} → {target.providerSummary} ·{" "}
+            {source.serviceTitle} · {source.cloudName} {source.region ?? "미제공"} → {target.providerSummary} ·{" "}
             {run.state === "succeeded" ? "완료 시각" : "마지막 갱신 시각"} {formatTime(run.updated_at)}
           </p>
         </div>
@@ -110,10 +110,10 @@ export function MigrationSummaryReport({ run, standalone = false }: Props) {
           <dt className="text-[11px] text-ink/55">현재 트래픽 처리</dt>
           <dd
             className={`mt-0.5 font-mono text-base font-semibold ${
-              metrics.serving === "gcp" ? "text-emerald-700" : ""
+              metrics.serving === "target" ? "text-emerald-700" : ""
             }`}
           >
-            {metrics.serving ? metrics.serving.toUpperCase() : "미제공"}
+            {metrics.serving ? SERVING_LABEL[metrics.serving] : "미제공"}
           </dd>
         </div>
         <div className="rounded-lg border border-ink/15 bg-paper p-2.5">
@@ -165,11 +165,11 @@ export function MigrationSummaryReport({ run, standalone = false }: Props) {
                 <dd className="font-mono">{target.vpcId ?? "미제공"}</dd>
               </div>
               <div className="flex justify-between gap-2">
-                <dt className="text-ink/60">Cloud SQL 인스턴스</dt>
+                <dt className="text-ink/60">목적지 DB 인스턴스</dt>
                 <dd className="font-mono">{target.dbInstanceId ?? "미제공"}</dd>
               </div>
               <div className="flex justify-between gap-2">
-                <dt className="text-ink/60">Cloud SQL 사설 IP</dt>
+                <dt className="text-ink/60">목적지 DB 사설 IP</dt>
                 <dd className="font-mono">{target.cloudSqlIp ?? "미제공"}</dd>
               </div>
               <div className="flex justify-between gap-2">
@@ -177,7 +177,7 @@ export function MigrationSummaryReport({ run, standalone = false }: Props) {
                 <dd className="font-mono">{target.dbName ?? "미제공"}</dd>
               </div>
               <div className="flex justify-between gap-2">
-                <dt className="text-ink/60">Cloud Run 서비스 URL</dt>
+                <dt className="text-ink/60">목적지 앱 URL</dt>
                 <dd className="truncate font-mono">{target.cloudRunUrl ?? "미제공"}</dd>
               </div>
             </dl>

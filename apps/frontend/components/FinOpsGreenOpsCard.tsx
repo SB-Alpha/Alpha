@@ -476,7 +476,7 @@ function FinOpsCardBody({ run }: Props) {
   }, [running]);
 
   const realLag = numberMetric(run, METRIC_KEYS.replicationLagBytes);
-  const estimate = useFinopsEstimate(estimateRequest(params, run.request.aws_region, realLag));
+  const estimate = useFinopsEstimate(estimateRequest(params, run.request.aws_region ?? undefined, realLag));
   const liveEstimateData = useMemo(
     () => (estimate.data ? deriveLiveView(estimate.data, params, realLag) : null),
     [estimate.data, params, realLag],

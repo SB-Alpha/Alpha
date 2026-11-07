@@ -12,6 +12,7 @@ import {
   overallProgress,
   securityAuditSummary,
   securityTone,
+  SERVING_LABEL,
   servingSide,
   stageCounts,
   tableRowTotals,
@@ -173,7 +174,7 @@ export function DashboardPanel({ run }: Props) {
       </div>
 
       <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <MetricTile label="트래픽 처리" value={serving && serving.toUpperCase()} />
+        <MetricTile label="쓰기 처리" value={serving && SERVING_LABEL[serving]} />
         <MetricTile label="복제 지연" value={lag === null ? null : formatBytes(lag)} hint="CDC 원본 → 목적지" />
         <MetricTile
           label="행 수 (원본 / 목적지)"
@@ -220,9 +221,8 @@ export function DashboardPanel({ run }: Props) {
             </span>
           )}
         </div>
-        <div className="mt-2 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
-          <SecurityCell label="IAM 최소 권한 감사" value={security.iamAudit} />
-          <SecurityCell label="Cloud SQL 사설망" value={security.cloudSql} />
+        <div className="mt-2 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
+          <SecurityCell label="목적지 DB 사설망" value={security.targetDbNetwork} />
           <SecurityCell label="비밀번호·키 암호화" value={security.secretEncryption} />
           <SecurityCell label={ingressLabel} value={security.ingressGuard} />
         </div>

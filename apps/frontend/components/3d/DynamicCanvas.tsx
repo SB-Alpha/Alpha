@@ -151,7 +151,7 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
           <span className="font-semibold text-ink">토폴로지 & CDC 경로</span>
           <span className="text-ink/25">·</span>
           <span className="font-mono text-ink/65">
-            {source.region} → {target.providerSummary}
+            {source.cloudName} {source.region ?? "미제공"} → {target.providerSummary}
           </span>
           {cdc.tables.length > 0 && (
             <span className="rounded border border-ink/15 bg-paper px-1.5 py-0.5 font-mono text-[11px] text-ink/70">
@@ -177,7 +177,7 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
                 </button>
                 {(
                   [
-                    { key: "source", label: "☁️ 원본 AWS" },
+                    { key: "source", label: `☁️ 원본 ${source.cloudName}` },
                     { key: "cdc", label: "⚡ CDC 아치" },
                     { key: "target", label: "🚀 목적지 GCP" },
                   ] as const

@@ -265,3 +265,15 @@ def test_target_infra_extra_params_rejects_nested_raw_secrets():
 
 def test_aws_is_a_known_provider_with_an_adapter(client):
     assert client.post("/runs", json={**SIMPLE_BODY, "target_infra": {"provider": "aws"}}).status_code == 201
+
+
+def test_describe_targets_lists_every_provider_with_its_registration():
+    described = {t.provider: t.available for t in target_adapters.describe_targets()}
+    assert described == {"gcp": True, "azure": True, "aws": True, "ncp": False}
+    assert {p for p, ok in described.items() if ok} == set(target_adapters.TARGET_ADAPTERS)
+
+
+def test_targets_route_is_not_read_as_a_run_id(client):
+    res = client.get("/runs/targets")
+    assert res.status_code == 200
+    assert {"provider": "ncp", "available": False} in res.json()

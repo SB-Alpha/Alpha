@@ -71,8 +71,11 @@ def _secret_encryption_metric(run: RunStatus) -> dict[str, str]:
     return {}
 
 
-def _private_ip_metric(output: Any) -> dict[str, str]:
-    """provisioning 이 돌려준 Cloud SQL 주소를 직접 확인합니다. 주소가 없으면 보고하지 않습니다."""
+def _target_db_network_metric(output: Any) -> dict[str, str]:
+    """provisioning 이 돌려준 목적지 DB 주소를 직접 확인합니다. 주소가 없으면 보고하지 않습니다.
+
+    키와 값은 db_migration 계약(UI_API.md)의 target_db_network 와 같습니다: PRIVATE | PUBLIC.
+    """
     target = output.get("target") if isinstance(output, Mapping) else getattr(output, "target", None)
     db = target.get("db") if isinstance(target, Mapping) else None
     ip = db.get("private_ip") if isinstance(db, Mapping) else None
@@ -80,7 +83,7 @@ def _private_ip_metric(output: Any) -> dict[str, str]:
         is_private = ipaddress.ip_address(ip).is_private
     except (TypeError, ValueError):
         return {}
-    return {"cloud_sql_private_ip": "SECURE" if is_private else "PUBLIC"}
+    return {"target_db_network": "PRIVATE" if is_private else "PUBLIC"}
 
 
 def _is_number(value: Any) -> bool:
@@ -241,7 +244,8 @@ def _cutover_metrics(metrics: Any, evidence: Any = None) -> dict[str, Any]:
     """에이전트 보고를 화면 키로 옮깁니다. 보고 없는 값은 만들지 않습니다."""
     result = _without_raw_errors(metrics) if isinstance(metrics, Mapping) else {}
     if result.get("traffic_mode") == "TARGET":
-        result["serving"] = "gcp"
+        # db_migration 계약(UI_API.md)과 같은 어휘입니다. 목적지가 Azure·AWS 여도 "target" 입니다.
+        result["serving"] = "target"
     worker_seconds = _worker_cutover_seconds(evidence)
     cutover_ms = result.get("cutover_ms")
     if worker_seconds is not None:
@@ -519,7 +523,7 @@ def run_provisioning(run: RunStatus, ctx: RunContext) -> Any:
     _check_target_account(run)
     _check_cdc_settings()
     res = adapter_for(run.request).provision(run.run_id, target_infra, run.request.target_infra, ctx)
-    metrics = _private_ip_metric(res)
+    metrics = _target_db_network_metric(res)
     if ctx is not None and metrics:
         ctx.report("running", 100, metrics)
     return res

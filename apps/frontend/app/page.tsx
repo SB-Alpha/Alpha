@@ -4,7 +4,13 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import { StateBadge } from "@/components/StateBadge";
-import { TARGET_ADAPTERS, adapterFor, GcpTargetAdapter, type TargetInfraType } from "@/lib/adapters/types";
+import {
+  TARGET_ADAPTERS,
+  adapterFor,
+  fetchTargetAvailability,
+  GcpTargetAdapter,
+  type TargetInfraType,
+} from "@/lib/adapters/types";
 import { STAGE_LABEL, formatTime } from "@/lib/labels";
 import { BUTTON_PRIMARY, INPUT } from "@/lib/ui";
 import { runTitle, workflows, type MigrationRequest, type RunStatus, type SourceKind } from "@/lib/workflows";
@@ -116,7 +122,6 @@ function toRequest(form: FormState): MigrationRequest {
   const common = {
     service_name: serviceName,
     github_repo_url: optional(form.github_repo_url),
-    aws_region: form.aws_region.trim() || DEFAULT_AWS_REGION,
     db_admin_ref: optional(form.db_admin_ref),
     target_region: targetRegion,
     target_infra: adapter.toConfig(targetRegion, optional(form.target_project_id)),
@@ -139,6 +144,7 @@ function toRequest(form: FormState): MigrationRequest {
   }
   return {
     ...common,
+    aws_region: form.aws_region.trim() || DEFAULT_AWS_REGION,
     aws_role_ref: optional(form.aws_role_ref),
     aws_credentials_ref: optional(form.aws_credentials_ref),
     ecs_service: optional(form.ecs_service) ?? serviceName,
@@ -154,6 +160,8 @@ export default function HomePage() {
   const [runs, setRuns] = useState<RunStatus[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // 백엔드에 어댑터가 등록된 목적지만 고를 수 있습니다. 읽기 전에는 모두 막습니다.
+  const [availableTargets, setAvailableTargets] = useState<Set<TargetInfraType> | null>(null);
 
   const adapter = adapterFor(form.target_preset);
   const ecsPreview = form.ecs_service.trim() || form.service_name.trim();
@@ -166,6 +174,9 @@ export default function HomePage() {
     workflows
       .list()
       .then(setRuns)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+    fetchTargetAvailability()
+      .then(setAvailableTargets)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
 
@@ -295,9 +306,13 @@ export default function HomePage() {
                 className={`${INPUT} mt-1`}
               >
                 {TARGET_ADAPTERS.map((option) => (
-                  <option key={option.provider} value={option.provider} disabled={!option.isAvailable}>
+                  <option
+                    key={option.provider}
+                    value={option.provider}
+                    disabled={!availableTargets?.has(option.provider)}
+                  >
                     {option.label}
-                    {option.isAvailable ? "" : " · 어댑터 준비 중"}
+                    {availableTargets === null ? " · 확인 중" : availableTargets.has(option.provider) ? "" : " · 어댑터 준비 중"}
                   </option>
                 ))}
               </select>

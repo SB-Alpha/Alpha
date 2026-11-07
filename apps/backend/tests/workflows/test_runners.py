@@ -13,7 +13,7 @@ from app.features.provisioning.terraform import ProvisioningError
 from app.features.workflows.context import with_stage
 from app.features.workflows.engine import Engine
 from app.features.workflows.runners import (
-    _private_ip_metric,
+    _target_db_network_metric,
     _scrub_agent_text,
     _write_request_metrics,
     clean_up_cdc,
@@ -596,7 +596,7 @@ def test_cutover_runner_with_simulation_fallback(engine, monkeypatch):
     last_report = reports[-1]
     assert last_report[1] == 100
     assert last_report[2]["simulated"] is True
-    assert last_report[2]["serving"] == "gcp"
+    assert last_report[2]["serving"] == "target"
 
 
 def _run_cutover_with_agent_metrics(engine, monkeypatch, metrics, **cutover_options):
@@ -625,7 +625,7 @@ def _run_cutover_with_agent_metrics(engine, monkeypatch, metrics, **cutover_opti
 
 def test_cutover_metrics_come_from_agent_report(engine, monkeypatch):
     m = _run_cutover_with_agent_metrics(engine, monkeypatch, {"traffic_mode": "TARGET", "cutover_ms": 1250.0})
-    assert m["serving"] == "gcp"
+    assert m["serving"] == "target"
     assert m["cutover_seconds"] == 1.25
 
 
@@ -677,16 +677,16 @@ def test_planning_omits_encryption_when_a_ref_is_not_a_secret_ref(engine, fake_a
 @pytest.mark.parametrize(
     ("output", "expected"),
     [
-        ({"target": {"db": {"private_ip": "10.31.0.5"}}}, {"cloud_sql_private_ip": "SECURE"}),
-        ({"target": {"db": {"private_ip": "34.64.0.1"}}}, {"cloud_sql_private_ip": "PUBLIC"}),
-        (SimpleNamespace(target={"db": {"private_ip": "10.31.0.5"}}), {"cloud_sql_private_ip": "SECURE"}),
+        ({"target": {"db": {"private_ip": "10.31.0.5"}}}, {"target_db_network": "PRIVATE"}),
+        ({"target": {"db": {"private_ip": "34.64.0.1"}}}, {"target_db_network": "PUBLIC"}),
+        (SimpleNamespace(target={"db": {"private_ip": "10.31.0.5"}}), {"target_db_network": "PRIVATE"}),
         ({"target": {"db": {}}}, {}),
         ({"target": {"db": {"private_ip": "not-an-ip"}}}, {}),
         ({}, {}),
     ],
 )
-def test_private_ip_metric_checks_the_returned_address(output, expected):
-    assert _private_ip_metric(output) == expected
+def test_target_db_network_metric_checks_the_returned_address(output, expected):
+    assert _target_db_network_metric(output) == expected
 
 
 def _run_db_migration_capturing_input(engine, monkeypatch, ctx):

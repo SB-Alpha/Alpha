@@ -25,12 +25,13 @@ from .schemas import (
     RunDetail,
     RunStatus,
     StageName,
+    TargetInfo,
     WorkflowState,
 )
 from .runners import RUNNERS, clean_up_cdc, decommission_cdc
 from .store import RunNotFound, RunStore
 from .timings import RunTimings, TimingBaseline, run_timings, timing_baseline
-from .target_adapters import UnsupportedTarget, adapter_for
+from .target_adapters import UnsupportedTarget, adapter_for, describe_targets
 from app.core.local_access import require_local_access
 
 router = APIRouter(prefix="/runs", tags=["workflows"])
@@ -99,6 +100,12 @@ def list_runs(
     limit: int = Query(50, ge=1, le=200), engine: Engine = Depends(get_engine)
 ) -> list[RunStatus]:
     return engine.list(limit)
+
+
+@router.get("/targets", response_model=list[TargetInfo])
+def list_targets() -> list[TargetInfo]:
+    """목적지 클라우드 선택지와 어댑터 등록 여부. /{run_id} 보다 먼저 선언해야 run id 로 읽히지 않습니다."""
+    return describe_targets()
 
 
 @router.get("/stats/timings", response_model=TimingBaseline)

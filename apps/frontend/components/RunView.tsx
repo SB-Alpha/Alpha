@@ -16,7 +16,7 @@ import { SelfHealingCard } from "@/components/SelfHealingCard";
 import { StageStepper } from "@/components/StageStepper";
 import { StateBadge } from "@/components/StateBadge";
 import { formatTime } from "@/lib/labels";
-import { runTitle, targetSummary, workflows, type RunStatus } from "@/lib/workflows";
+import { runTitle, sourceSummary, targetSummary, workflows, type RunStatus } from "@/lib/workflows";
 
 const POLL_MS = 2000;
 
@@ -105,7 +105,7 @@ export function RunView() {
                 {runTitle(run.request)}
               </h1>
               <p className="mt-1 text-sm text-ink/60">
-                {run.request.aws_region} → {targetSummary(run.request)} · 시작 {formatTime(run.created_at)}
+                {sourceSummary(run.request)} → {targetSummary(run.request)} · 시작 {formatTime(run.created_at)}
               </p>
             </div>
             <div className="text-right">
