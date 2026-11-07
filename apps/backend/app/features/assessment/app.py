@@ -174,8 +174,8 @@ def cloud_run_compat(task: dict, container: dict) -> tuple[list[str], list[str]]
     if str((task.get("runtimePlatform") or {}).get("cpuArchitecture", "")).upper() == "ARM64":
         blockers.append("ARM64 이미지 (Cloud Run 은 x86-64 만 지원)")
     for mode in ("pidMode", "ipcMode"):
-        if task.get(mode) in ("host", "task"):
-            blockers.append(f"{mode}={task[mode]} (프로세스·IPC 를 컨테이너 밖과 공유)")
+        if task.get(mode) == "host":  # "task" 는 같은 태스크 안 컨테이너끼리라 컨테이너 하나면 문제 없음
+            blockers.append(f"{mode}=host (호스트 VM 과 프로세스·IPC 를 공유)")
 
     volumes = {v.get("name"): v for v in task.get("volumes") or []}
     for mount in container.get("mountPoints") or []:

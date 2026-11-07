@@ -44,6 +44,12 @@ def test_blocking_settings_are_found(c, task, expected):
     assert len(blockers) == 1 and expected in blockers[0]
 
 
+def test_task_scoped_pid_and_ipc_are_not_blockers():
+    c = container()
+    blockers, _ = cloud_run_compat(_task(c, pidMode="task", ipcMode="task"), c)
+    assert blockers == []
+
+
 def test_command_override_other_containers_and_volumes_are_notes_not_blockers():
     cont = container(command=["sh", "-c", "run --token abc123"],
                      mountPoints=[{"sourceVolume": "efs", "containerPath": "/data"}])
