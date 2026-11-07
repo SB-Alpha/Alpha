@@ -69,7 +69,7 @@ data "aws_ec2_managed_prefix_list" "cloudfront" {
 
 resource "aws_security_group" "alb" {
   name        = "${var.name}-alb"
-  description = var.alb_cloudfront_only ? "ALB: CloudFront 에서 오는 80 포트만 받는다" : "ALB: 인터넷에서 80 포트만 받는다"
+  description = var.alb_cloudfront_only ? "ALB: accepts port 80 from CloudFront only" : "ALB: accepts port 80 from the internet"
   vpc_id      = aws_vpc.this.id
 
   dynamic "ingress" {
@@ -102,7 +102,7 @@ resource "aws_security_group" "alb" {
 
 resource "aws_security_group" "app" {
   name        = "${var.name}-app"
-  description = "앱: ALB 에서 오는 컨테이너 포트만 받는다"
+  description = "App: accepts the container port from the ALB only"
   vpc_id      = aws_vpc.this.id
 
   ingress {
@@ -122,7 +122,7 @@ resource "aws_security_group" "app" {
 
 resource "aws_security_group" "db" {
   name        = "${var.name}-db"
-  description = "DB: 앱 보안 그룹(과 지정한 추가 대역)에서 오는 5432 만 받는다"
+  description = "DB: accepts 5432 from the app security group (and given extra CIDRs) only"
   vpc_id      = aws_vpc.this.id
 
   ingress {
