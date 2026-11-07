@@ -34,6 +34,13 @@ ECR_IMAGE = re.compile(
 URL_PATH = re.compile(r"https?://[^/\s'\"]+(/[^\s'\"|;&?#]*)")
 
 
+# provisioning 이 직접 채우는 환경 변수 (DB 접속은 Terraform 출력, PORT 는 Cloud Run 이 넣음).
+# 이 이름들은 원본 값을 넘기지 않아도 목적지에서 앱이 쓸 수 있으므로, 비밀 이름이어도 승인자에게 알릴 일이 아닙니다.
+PROVISIONING_INJECTED_ENV = {
+    "PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGSSLMODE", "APP_ENV", "PORT",
+}
+
+
 def looks_secret(name: str) -> bool:
     upper = name.upper()
     return any(hint in upper for hint in SECRET_NAME_HINTS) or upper == "KEY" or upper.endswith("_KEY")
@@ -103,7 +110,10 @@ def collect(inp: AssessmentInput, session: AwsSession) -> AppAssessment:
         if not name:
             continue
         if looks_secret(name):
-            gaps.append(f"평문 환경 변수 {name} 가 비밀로 보여 값을 넘기지 않음 (Secrets Manager 로 옮겨야 함)")
+            # 값은 항상 넘기지 않습니다. provisioning 이 채우는 이름(PGPASSWORD 등)은 목적지에서 따로 만들어지므로
+            # 알릴 필요가 없고, 그 밖의 비밀은 목적지에 값이 없다는 것을 승인자가 알아야 해서 gaps 에 남깁니다.
+            if name not in PROVISIONING_INJECTED_ENV:
+                gaps.append(f"평문 환경 변수 {name} 가 비밀로 보여 값을 넘기지 않음 (Secrets Manager 로 옮겨야 함)")
             continue
         if has_secret_value(value):  # 값은 gaps 에도 남기지 않음
             gaps.append(f"평문 환경 변수 {name} 의 값에 비밀(접속 정보·키)이 들어 있어 값을 넘기지 않음 "
