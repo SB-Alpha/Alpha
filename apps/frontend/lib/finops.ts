@@ -1,5 +1,9 @@
-// FinOps & GreenOps 계량경제학 및 다중 클라우드 TCO/탄소 분석 라이브러리
-// SoftBank Hackathon Project Alpha - CloudMorph Nexus Specification
+// 클라우드별 월 비용 추정. 서울 리전 공시가와 아래 가정으로 계산하며, 실제 청구액이나 측정값이 아닙니다.
+// 공시가의 출처와 확인일은 PRICE_SOURCES, PRICE_AS_OF 에 있습니다. 근거가 없는 값은 null("미제공")로 둡니다.
+
+export type TargetProvider = "gcp" | "azure";
+export type DbClass = "db.t3.micro" | "db.t3.small" | "db.t3.medium";
+export type CostVerdict = "COST_LOWER" | "SIMILAR" | "COST_HIGHER";
 
 export interface CostBreakdown {
   compute: number;
@@ -8,202 +12,230 @@ export interface CostBreakdown {
   total: number;
 }
 
-export interface CarbonBreakdown {
-  intensity: number; // gCO2eq/kWh
-  estimatedKWh: number; // monthly kWh
-  totalKgCO2e: number; // monthly kg CO2e
-  cfePercent: number; // Carbon-Free Energy 24/7 matching %
+export interface CarbonFacts {
+  gridIntensity: number | null; // gCO2eq/kWh. 공개값이 없으면 null
+  cfePercent: number | null; // 공개값이 없으면 null
 }
 
 export interface ProviderFinOpsProfile {
-  provider: "aws" | "gcp" | "azure";
+  provider: "aws" | TargetProvider;
   providerName: string;
   region: string;
   regionName: string;
+  services: string;
+  computeNote: string;
   cost: CostBreakdown;
-  carbon: CarbonBreakdown;
+  carbon: CarbonFacts;
 }
 
 export interface FinOpsComparisonResult {
   source: ProviderFinOpsProfile;
   target: ProviderFinOpsProfile;
-  monthlySavingsUsd: number;
-  savingsPercent: number;
-  annualSavingsUsd: number;
-  carbonReductionKg: number;
-  carbonReductionPercent: number;
-  equivalentTrees: number; // 연간 탄소 감축 환산 나무 그루 수 (1그루 = 연간 약 22kg CO2 흡수)
-  itoKellyScore: number; // 0.0 ~ 1.0 (Itô-Kelly 최적 자원 차익거래 가치 지수)
-  roiPaybackMonths: number; // 손익분기 회수 기간 (개월)
-  recommendation: "STRONG_MIGRATE" | "MIGRATE" | "NEUTRAL";
-  recommendationReason: string;
+  monthlyDeltaUsd: number; // 목적지 - 원본. 양수면 비용이 늘어납니다
+  deltaPercent: number;
+  annualDeltaUsd: number;
+  verdict: CostVerdict;
+  verdictReason: string;
 }
 
 export interface FinOpsInputParams {
-  rps: number; // 초당 평균 요청 수 (1 ~ 200)
-  idlePercent: number; // 야간/비수기 Scale-to-Zero 유휴 비율 (0 ~ 80%)
-  dbSizeGb: number; // 데이터베이스 크기 (GB)
-  targetProvider: "gcp" | "azure";
-  cpuCount?: number;
-  memoryMb?: number;
+  rps: number; // 활성 시간 동안의 초당 평균 요청 수
+  idlePercent: number; // 요청이 없는 시간 비율 (0 ~ 80%)
+  avgRequestMs: number; // 요청당 처리 시간
+  dbSizeGb: number;
+  dbClass: DbClass;
+  cpuCount: number;
+  memoryMb: number;
+  targetProvider: TargetProvider;
 }
 
-// 리전별 그리드 탄소 집약도 (gCO2eq/kWh) 및 구글/MS 청정에너지(CFE) 매칭 실측치
-const CARBON_SPECS: Record<string, { intensity: number; cfePercent: number }> = {
-  "aws:ap-northeast-2": { intensity: 478, cfePercent: 12 }, // 한국 전력망 기준
-  "gcp:asia-northeast3": { intensity: 209, cfePercent: 88 }, // 구글 서울 24/7 CFE 매칭
-  "azure:koreacentral": { intensity: 391, cfePercent: 35 }, // MS 한국 중부 PPA 기준
+export interface PriceSource {
+  label: string;
+  url: string;
+}
+
+export const PRICE_AS_OF = "2026-11-07";
+export const CARBON_DATA_YEAR = 2024;
+export const SIMILAR_COST_BAND_PERCENT = 15;
+const HOURS_PER_MONTH = 730;
+const SECONDS_PER_HOUR = 3600;
+const RESPONSE_KB_PER_REQUEST = 12; // 가정: 실측 트래픽이 없어 요청당 응답 크기를 고정합니다
+
+export const FINOPS_DEFAULTS = {
+  rps: 10,
+  idlePercent: 40,
+  avgRequestMs: 100,
+  dbSizeGb: 50,
+  dbClass: "db.t3.medium",
+  cpuCount: 1,
+  memoryMb: 2048,
+} as const satisfies Omit<FinOpsInputParams, "targetProvider">;
+
+// ECS Fargate(Linux/x86), RDS Single-AZ, 인터넷 전송 첫 10TB 구간
+const AWS_SEOUL = {
+  fargateVcpuHour: 0.04656,
+  fargateGbHour: 0.00511,
+  rdsStorageGbMonth: 0.131,
+  egressGb: 0.126,
 };
 
-/**
- * 주어진 부하와 인프라 스펙을 기준으로 AWS vs 타깃(GCP/Azure)의 TCO 및 탄소 지표를 산출합니다.
- */
+// Cloud Run 요청 기반 과금(Tier 2 활성 시간), Cloud SQL Enterprise, Premium Tier 한국 목적지 첫 10TiB 구간.
+// 팀 Terraform 이 min_instance_count = 0 이고 CPU 상시 할당을 켜지 않아 요청 기반 과금입니다.
+const GCP_SEOUL = {
+  cloudRunVcpuSecond: 0.0000336,
+  cloudRunGibSecond: 0.0000035,
+  requestsPerMillion: 0.4,
+  sqlSsdGibMonth: 0.221,
+  egressGb: 0.19,
+};
+
+// Container Apps 소비 플랜, PostgreSQL Flexible Server, 인터넷 전송(Microsoft 네트워크) 첫 구간.
+// 최소 복제본 2개는 infra/azure 의 app_min_replicas 기본값입니다. 0 으로 두면 이 추정보다 낮아집니다.
+const AZURE_KOREA_CENTRAL = {
+  appsActiveVcpuSecond: 0.000024,
+  appsIdleVcpuSecond: 0.000003,
+  appsGibSecond: 0.000003,
+  requestsPerMillion: 0.4,
+  minReplicas: 2,
+  pgStorageGbMonth: 0.131,
+  egressGb: 0.12,
+};
+
+// 목적지 등급은 원본 메모리 이상인 가장 작은 등급입니다 (assessment/rules.py 와 같은 기준).
+// Cloud SQL 맞춤 등급은 vCPU $0.0537/시간 + 메모리 $0.0091/GiB·시간 으로 계산했습니다.
+export const DB_CLASSES: Record<
+  DbClass,
+  { awsHour: number; gcpTier: string; gcpHour: number; azureSku: string; azureHour: number }
+> = {
+  "db.t3.micro": { awsHour: 0.028, gcpTier: "db-g1-small", gcpHour: 0.0455, azureSku: "B1ms", azureHour: 0.026 },
+  "db.t3.small": { awsHour: 0.056, gcpTier: "db-custom-1-3840", gcpHour: 0.087825, azureSku: "B1ms", azureHour: 0.026 },
+  "db.t3.medium": { awsHour: 0.112, gcpTier: "db-custom-1-4096", gcpHour: 0.0901, azureSku: "B2s", azureHour: 0.104 },
+};
+
+// Google 이 공개한 서울 리전 값입니다. AWS·Azure 는 같은 형식의 리전별 공개값을 확인하지 못했습니다.
+const GCP_SEOUL_CARBON: CarbonFacts = { gridIntensity: 356.57, cfePercent: 37 };
+const CARBON_NOT_PROVIDED: CarbonFacts = { gridIntensity: null, cfePercent: null };
+
+export const PRICE_SOURCES: readonly PriceSource[] = [
+  { label: "AWS Fargate (Price List, 서울)", url: "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonECS/current/ap-northeast-2/index.json" },
+  { label: "AWS RDS (Price List, 서울)", url: "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonRDS/current/ap-northeast-2/index.json" },
+  { label: "AWS 데이터 전송 (Price List, 서울)", url: "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AWSDataTransfer/current/ap-northeast-2/index.json" },
+  { label: "Cloud Run 가격", url: "https://cloud.google.com/run/pricing" },
+  { label: "Cloud SQL 가격", url: "https://cloud.google.com/sql/pricing" },
+  { label: "Google Cloud 네트워크 가격", url: "https://cloud.google.com/vpc/network-pricing" },
+  { label: "Azure Retail Prices API", url: "https://prices.azure.com/api/retail/prices" },
+  { label: "Google 리전별 탄소 데이터", url: "https://cloud.google.com/sustainability/region-carbon" },
+];
+
+export const EXCLUDED_COSTS: readonly string[] = [
+  "로드밸런서, NAT, 로그, 백업",
+  "Cloudflare Worker",
+  "CDC 노드와 VPN",
+  "이전 기간의 양쪽 동시 가동",
+  "무료 사용량과 약정 할인",
+];
+
+const roundUsd = (value: number): number => Number(value.toFixed(2));
+
+function breakdown(compute: number, database: number, egress: number): CostBreakdown {
+  return {
+    compute: roundUsd(compute),
+    database: roundUsd(database),
+    egress: roundUsd(egress),
+    total: roundUsd(compute + database + egress),
+  };
+}
+
+function judge(deltaUsd: number, deltaPercent: number): { verdict: CostVerdict; reason: string } {
+  const amount = Math.abs(deltaUsd).toFixed(2);
+  if (deltaPercent <= -SIMILAR_COST_BAND_PERCENT) {
+    return { verdict: "COST_LOWER", reason: `공시가 기준 월 $${amount} 적게 듭니다.` };
+  }
+  if (deltaPercent >= SIMILAR_COST_BAND_PERCENT) {
+    return { verdict: "COST_HIGHER", reason: `공시가 기준 월 $${amount} 더 듭니다.` };
+  }
+  return { verdict: "SIMILAR", reason: `차이가 ±${SIMILAR_COST_BAND_PERCENT}% 안이라 입력값에 따라 달라집니다.` };
+}
+
+/** 같은 부하를 AWS 와 목적지에 올렸을 때의 월 비용을 공시가로 추정합니다. */
 export function computeFinOpsComparison(params: FinOpsInputParams): FinOpsComparisonResult {
-  const { rps, idlePercent, dbSizeGb, targetProvider } = params;
-  const hoursPerMonth = 730;
-  const idleFactor = Math.max(0, Math.min(0.8, idlePercent / 100));
-  const activeHoursRatio = 1 - idleFactor;
+  const { rps, idlePercent, avgRequestMs, dbSizeGb, dbClass, cpuCount, memoryMb, targetProvider } = params;
+  const memoryGib = memoryMb / 1024;
+  const db = DB_CLASSES[dbClass];
 
-  // 1. AWS (Source) 비용 계산 (ECS Fargate 1 vCPU / 2GB + RDS PostgreSQL db.t3.medium + 100GB Egress)
-  // AWS Fargate: Always-on 프로비저닝 (유휴 시간에도 인스턴스 점유)
-  const awsComputeHourly = 0.04048 + 0.004445 * 2; // ~$0.04937/hr
-  const awsCompute = awsComputeHourly * hoursPerMonth; // ~$36.04
-  const awsDb = 0.068 * hoursPerMonth + dbSizeGb * 0.115; // ~$49.64 + storage
-  const monthlyRequests = rps * 3600 * hoursPerMonth;
-  const estimatedEgressGb = (monthlyRequests * 12) / (1024 * 1024); // 요청당 12KB 가정
-  const awsEgress = estimatedEgressGb * 0.09; // AWS 인터넷 아웃바운드 $0.09/GB
-  const awsTotal = awsCompute + awsDb + awsEgress;
+  const idleRatio = Math.min(0.8, Math.max(0, idlePercent / 100));
+  const activeHours = HOURS_PER_MONTH * (1 - idleRatio);
+  const monthlyRequests = rps * SECONDS_PER_HOUR * activeHours;
+  const egressGb = (monthlyRequests * RESPONSE_KB_PER_REQUEST) / (1024 * 1024);
+  // 요청이 무작위로 들어올 때 하나 이상 처리 중인 시간 비율입니다.
+  const busyRatio = 1 - Math.exp(-rps * (avgRequestMs / 1000));
+  const busySeconds = activeHours * busyRatio * SECONDS_PER_HOUR;
 
-  // 2. Target (GCP / Azure) 비용 계산
-  let targetCompute = 0;
-  let targetDb = 0;
-  let targetEgress = 0;
-  let targetProviderName = "GCP";
-  let targetRegion = "asia-northeast3";
-  let targetRegionName = "Seoul (asia-northeast3)";
+  const source: ProviderFinOpsProfile = {
+    provider: "aws",
+    providerName: "AWS",
+    region: "ap-northeast-2",
+    regionName: "Seoul (ap-northeast-2)",
+    services: `ECS Fargate + RDS (${dbClass})`,
+    computeNote: "상시 가동",
+    cost: breakdown(
+      (cpuCount * AWS_SEOUL.fargateVcpuHour + memoryGib * AWS_SEOUL.fargateGbHour) * HOURS_PER_MONTH,
+      db.awsHour * HOURS_PER_MONTH + dbSizeGb * AWS_SEOUL.rdsStorageGbMonth,
+      egressGb * AWS_SEOUL.egressGb,
+    ),
+    carbon: CARBON_NOT_PROVIDED,
+  };
 
-  if (targetProvider === "gcp") {
-    targetProviderName = "GCP";
-    targetRegion = "asia-northeast3";
-    targetRegionName = "Seoul (asia-northeast3)";
+  const target: ProviderFinOpsProfile =
+    targetProvider === "gcp"
+      ? {
+          provider: "gcp",
+          providerName: "GCP",
+          region: "asia-northeast3",
+          regionName: "Seoul (asia-northeast3)",
+          services: `Cloud Run + Cloud SQL (${db.gcpTier})`,
+          computeNote: "요청 처리 시간 + 요청 수수료",
+          cost: breakdown(
+            (cpuCount * GCP_SEOUL.cloudRunVcpuSecond + memoryGib * GCP_SEOUL.cloudRunGibSecond) * busySeconds +
+              (monthlyRequests / 1_000_000) * GCP_SEOUL.requestsPerMillion,
+            db.gcpHour * HOURS_PER_MONTH + dbSizeGb * GCP_SEOUL.sqlSsdGibMonth,
+            egressGb * GCP_SEOUL.egressGb,
+          ),
+          carbon: GCP_SEOUL_CARBON,
+        }
+      : {
+          provider: "azure",
+          providerName: "Azure",
+          region: "koreacentral",
+          regionName: "Korea Central (koreacentral)",
+          services: `Container Apps + PostgreSQL (${db.azureSku})`,
+          computeNote: `최소 복제본 ${AZURE_KOREA_CENTRAL.minReplicas}개 유지 + 요청 수수료`,
+          cost: breakdown(
+            AZURE_KOREA_CENTRAL.minReplicas *
+              (cpuCount * AZURE_KOREA_CENTRAL.appsIdleVcpuSecond + memoryGib * AZURE_KOREA_CENTRAL.appsGibSecond) *
+              HOURS_PER_MONTH *
+              SECONDS_PER_HOUR +
+              cpuCount *
+                (AZURE_KOREA_CENTRAL.appsActiveVcpuSecond - AZURE_KOREA_CENTRAL.appsIdleVcpuSecond) *
+                busySeconds +
+              (monthlyRequests / 1_000_000) * AZURE_KOREA_CENTRAL.requestsPerMillion,
+            db.azureHour * HOURS_PER_MONTH + dbSizeGb * AZURE_KOREA_CENTRAL.pgStorageGbMonth,
+            egressGb * AZURE_KOREA_CENTRAL.egressGb,
+          ),
+          carbon: CARBON_NOT_PROVIDED,
+        };
 
-    // Cloud Run: Scale-to-Zero 지원 (유휴 시간에는 vCPU/메모리 비용 $0)
-    const gcpActiveComputeHourly = 0.024 + 0.0025 * 2; // ~$0.029/hr
-    targetCompute = gcpActiveComputeHourly * (hoursPerMonth * activeHoursRatio);
-
-    // Cloud SQL db-custom-1-3840 + SSD
-    targetDb = 0.052 * hoursPerMonth + dbSizeGb * 0.17;
-
-    // Cloudflare Worker 연동 + Google Cloud Network Egress (할인율 적용 $0.045/GB)
-    targetEgress = estimatedEgressGb * 0.045;
-  } else {
-    targetProviderName = "Azure";
-    targetRegion = "koreacentral";
-    targetRegionName = "Korea Central (koreacentral)";
-
-    // Azure Container Apps: 유휴 시 최소 복제본 축소
-    const azureActiveComputeHourly = 0.032 + 0.004 * 2;
-    targetCompute = azureActiveComputeHourly * (hoursPerMonth * (activeHoursRatio + idleFactor * 0.2));
-
-    // Azure PostgreSQL Flexible Server Standard_D2ds_v4
-    targetDb = 0.062 * hoursPerMonth + dbSizeGb * 0.13;
-    targetEgress = estimatedEgressGb * 0.08;
-  }
-
-  const targetTotal = targetCompute + targetDb + targetEgress;
-
-  // 3. 탄소 배출량(GreenOps) 모델링
-  // 월간 인프라 전력 소비량 추산 (kWh)
-  const baseKWhPerMonth = 75 + dbSizeGb * 0.15 + (rps / 10) * 12;
-  const awsCarbonSpec = CARBON_SPECS["aws:ap-northeast-2"];
-  const awsKWh = baseKWhPerMonth;
-  const awsKgCO2e = (awsKWh * awsCarbonSpec.intensity) / 1000;
-
-  const targetCarbonSpec =
-    CARBON_SPECS[`${targetProvider}:${targetRegion}`] ?? { intensity: 250, cfePercent: 70 };
-  // 타깃 클라우드는 Scale-to-Zero 및 고효율 Arm/Xeon 인스턴스로 전력 소비 약 22% 절감
-  const targetKWh = baseKWhPerMonth * (targetProvider === "gcp" ? 0.78 : 0.88);
-  const targetKgCO2e = (targetKWh * targetCarbonSpec.intensity) / 1000;
-
-  // 4. 경제적 지표 계산
-  const monthlySavingsUsd = Math.max(0, awsTotal - targetTotal);
-  const savingsPercent = (monthlySavingsUsd / (awsTotal || 1)) * 100;
-  const annualSavingsUsd = monthlySavingsUsd * 12;
-
-  const carbonReductionKg = Math.max(0, awsKgCO2e - targetKgCO2e);
-  const carbonReductionPercent = (carbonReductionKg / (awsKgCO2e || 1)) * 100;
-  const equivalentTrees = Math.round((carbonReductionKg * 12) / 22);
-
-  // 5. Itô-Kelly 최적 자원 차익거래 지수 (0.00 ~ 1.00)
-  // K = (p * b - q) / b (p: 가용성 신뢰도 0.999, b: 비용 절감 배수, q: 0.001)
-  const costRatioAdvantage = awsTotal / (targetTotal || 1);
-  const rawKelly = (0.999 * costRatioAdvantage - 0.001) / costRatioAdvantage;
-  const itoKellyScore = Math.min(0.98, Math.max(0.65, Number(rawKelly.toFixed(2))));
-
-  // 이전 소요 비용(마이그레이션 트래픽 및 듀얼 런닝 비용 약 $15 가정) 대비 회수 기간
-  const migrationCost = 15.0;
-  const roiPaybackMonths = monthlySavingsUsd > 0 ? Number((migrationCost / monthlySavingsUsd).toFixed(1)) : 99;
-
-  let recommendation: "STRONG_MIGRATE" | "MIGRATE" | "NEUTRAL" = "STRONG_MIGRATE";
-  let recommendationReason = "";
-
-  if (savingsPercent >= 35 && carbonReductionPercent >= 40) {
-    recommendation = "STRONG_MIGRATE";
-    recommendationReason = `Scale-to-Zero 및 24/7 무탄소 에너지 매칭으로 월 $${monthlySavingsUsd.toFixed(1)} (${savingsPercent.toFixed(1)}%) 절감 및 탄소 ${carbonReductionPercent.toFixed(1)}% 감축이 입증되었습니다.`;
-  } else if (savingsPercent >= 15) {
-    recommendation = "MIGRATE";
-    recommendationReason = `인프라 TCO 절감 효과(월 $${monthlySavingsUsd.toFixed(1)})가 이전 비용을 1개월 이내에 상쇄합니다.`;
-  } else {
-    recommendation = "NEUTRAL";
-    recommendationReason = "현재 인프라 규모에서는 비용 절감 효과가 유의미하지 않으므로 추가 워크로드 통합을 권장합니다.";
-  }
+  const deltaUsd = target.cost.total - source.cost.total;
+  const deltaPercent = (deltaUsd / source.cost.total) * 100;
+  const { verdict, reason } = judge(deltaUsd, deltaPercent);
 
   return {
-    source: {
-      provider: "aws",
-      providerName: "AWS",
-      region: "ap-northeast-2",
-      regionName: "Seoul (ap-northeast-2)",
-      cost: {
-        compute: Number(awsCompute.toFixed(2)),
-        database: Number(awsDb.toFixed(2)),
-        egress: Number(awsEgress.toFixed(2)),
-        total: Number(awsTotal.toFixed(2)),
-      },
-      carbon: {
-        intensity: awsCarbonSpec.intensity,
-        estimatedKWh: Number(awsKWh.toFixed(1)),
-        totalKgCO2e: Number(awsKgCO2e.toFixed(1)),
-        cfePercent: awsCarbonSpec.cfePercent,
-      },
-    },
-    target: {
-      provider: targetProvider,
-      providerName: targetProviderName,
-      region: targetRegion,
-      regionName: targetRegionName,
-      cost: {
-        compute: Number(targetCompute.toFixed(2)),
-        database: Number(targetDb.toFixed(2)),
-        egress: Number(targetEgress.toFixed(2)),
-        total: Number(targetTotal.toFixed(2)),
-      },
-      carbon: {
-        intensity: targetCarbonSpec.intensity,
-        estimatedKWh: Number(targetKWh.toFixed(1)),
-        totalKgCO2e: Number(targetKgCO2e.toFixed(1)),
-        cfePercent: targetCarbonSpec.cfePercent,
-      },
-    },
-    monthlySavingsUsd: Number(monthlySavingsUsd.toFixed(2)),
-    savingsPercent: Number(savingsPercent.toFixed(1)),
-    annualSavingsUsd: Number(annualSavingsUsd.toFixed(2)),
-    carbonReductionKg: Number(carbonReductionKg.toFixed(1)),
-    carbonReductionPercent: Number(carbonReductionPercent.toFixed(1)),
-    equivalentTrees,
-    itoKellyScore,
-    roiPaybackMonths,
-    recommendation,
-    recommendationReason,
+    source,
+    target,
+    monthlyDeltaUsd: roundUsd(deltaUsd),
+    deltaPercent: Number(deltaPercent.toFixed(1)),
+    annualDeltaUsd: roundUsd(deltaUsd * 12),
+    verdict,
+    verdictReason: reason,
   };
 }

@@ -119,7 +119,7 @@ export function RunView() {
 
           <DashboardPanel run={run} />
 
-          {/* Nexus FinOps & GreenOps 계량경제학 및 ESG 의사결정 위젯 */}
+          {/* 공시가 기준 월 비용 추정 (실측 아님) */}
           <FinOpsGreenOpsCard run={run} />
 
           <div id="stage-stepper-section">
