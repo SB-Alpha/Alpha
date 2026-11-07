@@ -1,12 +1,13 @@
 """Request shapes for the CDC agent and the run input. The agent validates the details (names, tables)."""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from .settings import tunables
 
 RUN_ID_PATTERN = r"^[a-z][a-z0-9-]{1,30}$"
+CutoverOutcome = Literal["not_started", "rolled_back", "switched", "post_switch_failed", "unknown"]
 
 
 def single_line(value: str) -> bool:
@@ -224,12 +225,13 @@ class RunStatus(BaseModel):
 class CutoverResult(BaseModel):
     run_id: str
     job_id: str
-    outcome: str = Field(description="switched, returned_to_source, manual_check or timed_out")
+    outcome: CutoverOutcome
     state: str
     phase: str
     message: str
     detail: str | None = None
     hold_ms: float | None = None
+    metrics: dict[str, Any] = {}
     evidence: dict[str, Any] = {}
 
 

@@ -47,8 +47,20 @@ from .cloud_guides import credential_next_steps
 from .execution_model import ExecutionModel, ExecutionModelError, build_execution_model
 from .input_secrets import INPUT_SECRETS
 from .progress_log import ProgressLog
+from .progress_view import (
+    CLOSED_PHASE,
+    CUTOVER_PHASE,
+    READY_PHASE,
+    STABILIZING_PHASE,
+    SWITCHED_PHASES,
+    clamp_progress,
+    classify_cutover,
+    network_exposure,
+    to_metrics,
+)
 from .run_input import InjectedRun, InvalidInput, inject, parse, saved_clouds
 from .schemas import (
+    CutoverOutcome,
     CutoverResult,
     DbMigrationInput,
     DbMigrationResult,
@@ -63,16 +75,11 @@ from .settings import MissingSetting, tunables
 
 logger = logging.getLogger(__name__)
 
-READY_PHASE = "cutover_ready"
-CUTOVER_PHASE = "cutover"
-STABILIZING_PHASE = "stabilizing"
-CLOSED_PHASE = "closed"
 METRIC_PHASES = {"streaming", READY_PHASE}
 # 복사가 빨리 끝나면 streaming 없이 READY_PHASE로 간다.
 APP_DEPLOY_PHASES = {"streaming", READY_PHASE}
 TERMINAL_STATES = {"succeeded", "failed", "aborted"}
 ENDED_STATES = {"succeeded", "aborted"}
-SWITCHED_PHASES = {STABILIZING_PHASE, CLOSED_PHASE}
 # 이 상태에서는 정리할 것이 남았는지가 호출자에게 필요하다.
 CLEANUP_STATES = {"failed", "stopped", "aborted", "succeeded", "unknown"}
 # 마커 테이블은 에이전트가 관리한다. 복제 대상에 넣지 않는다.
@@ -267,16 +274,29 @@ def status(run_id: str, *, agent: CdcAgentClient | None = None) -> RunStatus:
 
     message = job.get("message") or (progress.message if progress else None)
     remaining = _remaining(run_id, job)
+    metrics = to_metrics(job, lambda text: _clean(run_id, text))
+    if progress is not None and progress.target_network:
+        metrics["target_db_network"] = progress.target_network
     return RunStatus(
-        run_id=run_id, job_id=job_id, state=job["state"], phase=job["phase"], progress=job["progress"],
-        message=_clean(run_id, message) if message else None, metrics=job.get("metrics", {}),
+        run_id=run_id, job_id=job_id, state=job["state"], phase=job["phase"],
+        progress=clamp_progress(job["progress"]), message=_clean(run_id, message) if message else None,
+        metrics=metrics,
         ready_for_cutover=job["phase"] == READY_PHASE and job["state"] == "waiting_approval",
         cleanup_required=job["state"] in CLEANUP_STATES and bool(remaining), remaining=remaining,
     )
 
 
-def cutover(run_id: str, approved_by: str, *, agent: CdcAgentClient | None = None) -> CutoverResult:
-    """cutover_ready에서만 시작한다. 진행 중이면 다시 시작하지 않고 그 결과를 돌려준다."""
+def cutover(
+    run_id: str,
+    approved_by: str,
+    *,
+    agent: CdcAgentClient | None = None,
+    confirm_source: Callable[[], bool] | None = None,
+) -> CutoverResult:
+    """cutover_ready에서만 시작한다. 진행 중이면 다시 시작하지 않고 그 결과를 돌려준다.
+
+    confirm_source는 트래픽이 원본에 있는지 확인한다. 없으면 원본 복귀를 unknown으로 답한다.
+    """
     if not approved_by.strip():
         raise InvalidInput(["approved_by"])
     with _active_lock:
@@ -287,7 +307,7 @@ def cutover(run_id: str, approved_by: str, *, agent: CdcAgentClient | None = Non
     if not owner:
         return pending.result()
     try:
-        result = _start_or_join_cutover(run_id, approved_by, agent or _default_agent())
+        result = _start_or_join_cutover(run_id, approved_by, agent or _default_agent(), confirm_source)
     except BaseException as exc:
         pending.set_exception(exc)
         raise
@@ -418,9 +438,12 @@ def run_migration(
     poll_s = settings.job_poll_s if poll_s is None else poll_s
     log_interval_s = settings.log_interval_s if log_interval_s is None else log_interval_s
 
+    target_network = network_exposure((target.get("db") or {}).get("private_ip"))
+
     def report(progress: int, metrics: dict | None = None, message: str | None = None) -> None:
         if ctx is not None:
-            ctx.report("running", progress, metrics, message)
+            shared = {"target_db_network": target_network} if target_network else {}
+            ctx.report("running", clamp_progress(progress), {**shared, **(metrics or {})} or None, message)
 
     def check_stop() -> None:
         # 작업 등록 전에는 에이전트로 멈출 수 없다.
@@ -524,15 +547,18 @@ def _follow(
         if job["phase"] in METRIC_PHASES and time.monotonic() - last_metrics >= log_interval_s:
             last_metrics = time.monotonic()
             log.event("metrics", **{**job.get("metrics", {}), "phase": job["phase"], "progress": job["progress"]})
-        # metrics의 phase는 한 단계 늦을 수 있다.
-        report(job["progress"], {**job.get("metrics", {}), "phase": job["phase"]}, job.get("message") or None)
+        message = job.get("message")
+        report(job["progress"], to_metrics(job, lambda text: _clean(run_id, text)),
+               _clean(run_id, message) if message else None)
         time.sleep(log_interval_s if ready else poll_s)
 
 
 # ---- 컷오버 ----
 
 
-def _start_or_join_cutover(run_id: str, approved_by: str, agent: CdcAgentClient) -> CutoverResult:
+def _start_or_join_cutover(
+    run_id: str, approved_by: str, agent: CdcAgentClient, confirm_source: Callable[[], bool] | None
+) -> CutoverResult:
     job_id = to_job_id(run_id)
     try:
         job = agent.get_job(job_id)
@@ -552,10 +578,12 @@ def _start_or_join_cutover(run_id: str, approved_by: str, agent: CdcAgentClient)
                 raise NotAllowed(_clean(run_id, exc.detail)) from None
     elif job["phase"] != CUTOVER_PHASE and job["phase"] not in SWITCHED_PHASES:
         raise NotAllowed(f"cutover needs phase {READY_PHASE}, the job is {job['state']}/{job['phase']}")
-    return _wait_cutover(run_id, job, agent)
+    return _wait_cutover(run_id, job, agent, confirm_source)
 
 
-def _wait_cutover(run_id: str, job: dict, agent: CdcAgentClient) -> CutoverResult:
+def _wait_cutover(
+    run_id: str, job: dict, agent: CdcAgentClient, confirm_source: Callable[[], bool] | None
+) -> CutoverResult:
     settings = tunables()
     job_id = to_job_id(run_id)
     deadline = time.monotonic() + settings.cutover_wait_s
@@ -567,11 +595,11 @@ def _wait_cutover(run_id: str, job: dict, agent: CdcAgentClient) -> CutoverResul
             if isinstance(exc, AgentError) and exc.status_code < 500:
                 raise
         else:
-            outcome = _cutover_outcome(job)
+            outcome = classify_cutover(job, confirm_source)
             if outcome:
                 return _cutover_result(run_id, job, outcome)
         if time.monotonic() > deadline:
-            return _cutover_result(run_id, job, "timed_out")
+            return _cutover_result(run_id, job, "unknown")
         time.sleep(settings.cutover_poll_s)
 
 
@@ -584,34 +612,24 @@ def _switched(job: dict) -> bool:
     return "switched_to_target" in _cutover_steps(job)
 
 
-def _cutover_outcome(job: dict) -> str | None:
-    if job["state"] in ("failed", "aborted"):
-        return "manual_check"
-    if job["phase"] in SWITCHED_PHASES:
-        return "switched"
-    steps = _cutover_steps(job)
-    # failed 기록 없는 대기 상태는 전환 시작이 아직 읽히지 않은 것이다.
-    if job["phase"] == READY_PHASE and "failed" in steps:
-        # 쓰기 차단 해제 같은 복귀 단계가 실패하면 원본이 막혀 있을 수 있다.
-        return "manual_check" if any(s.endswith("_failed") for s in steps) else "returned_to_source"
-    return None
-
-
-CUTOVER_MESSAGES = {
+CUTOVER_MESSAGES: dict[CutoverOutcome, str] = {
+    "not_started": "전환을 시작하지 않았습니다. 쓰기는 원본으로 갑니다.",
+    "rolled_back": "전환하지 못해 원본으로 복귀했습니다. 쓰기는 원본으로 갑니다. 원인을 확인한 뒤 다시 시도하세요.",
     "switched": "전환이 끝났습니다. 전환 시점 데이터 비교(metrics의 verification)와 안정화를 확인한 뒤 finish를 부르세요.",
-    "returned_to_source": "전환하지 못해 원본으로 복귀했습니다. 쓰기는 원본으로 갑니다. 원인을 확인한 뒤 다시 부를 수 있습니다.",
-    "manual_check": "자동으로 복구하지 못했습니다. 트래픽 방향과 원본 쓰기 차단을 직접 확인하세요.",
-    "timed_out": "기다리는 시간이 지났습니다. 전환은 끝나지 않았을 수 있으니 status로 확인하세요.",
+    "post_switch_failed": "전환 단계에서 실패했습니다. 트래픽이 목적지로 넘어갔을 수 있습니다. 트래픽 방향과 원본 쓰기 차단을 직접 확인하세요.",
+    "unknown": "트래픽 위치를 확인하지 못했습니다. 전환이 아직 진행 중일 수 있으니 status와 트래픽 방향, 원본 쓰기 차단을 직접 확인하세요.",
 }
 
 
-def _cutover_result(run_id: str, job: dict, outcome: str) -> CutoverResult:
+def _cutover_result(run_id: str, job: dict, outcome: CutoverOutcome) -> CutoverResult:
     cutover_evidence = (job.get("evidence") or {}).get("cutover") or {}
     detail = job.get("message") or ""
     return CutoverResult(
         run_id=run_id, job_id=to_job_id(run_id), outcome=outcome, state=job["state"], phase=job["phase"],
         message=CUTOVER_MESSAGES[outcome], detail=_clean(run_id, detail) or None,
-        hold_ms=cutover_evidence.get("hold_ms"), evidence=job.get("evidence", {}),
+        hold_ms=cutover_evidence.get("hold_ms"),
+        metrics={**to_metrics(job, lambda text: _clean(run_id, text)), "cutover_outcome": outcome},
+        evidence=job.get("evidence", {}),
     )
 
 
@@ -1151,6 +1169,7 @@ def execute(inp: DbMigrationInput | dict, ctx: Reporter | None = None, *,
     if not _reserve(mig.run_id):
         message = BUSY_MESSAGE.format(run_id=mig.run_id)
         return DbMigrationResult(run_id=mig.run_id, job_id=job_id, state="failed", message=message)
+    _set_progress(mig.run_id, target_network=network_exposure(mig.target.db.private_ip))
     try:
         log.event("inputs.loaded", source_host=mig.source.db.host, target_host=mig.target.db.private_ip,
                   tables=len(mig.source.tables), skip_vpn=mig.options.skip_vpn)

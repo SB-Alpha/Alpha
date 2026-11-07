@@ -428,18 +428,27 @@ def test_cutover_success(fake, vpn_calls):
     assert result.outcome == "switched" and result.hold_ms == 120.0
 
 
-def test_cutover_returned_to_source(fake, vpn_calls):
+def test_cutover_returned_to_source_when_the_caller_confirms_it(fake, vpn_calls):
     fake.on_cutover = lambda job: {**job, **READY, "evidence": steps("hold", "failed", "released_to_source")}
     start_to_ready(fake)
 
-    assert db_workflow.cutover(RUN_ID, "pm", agent=fake.client()).outcome == "returned_to_source"
+    result = db_workflow.cutover(RUN_ID, "pm", agent=fake.client(), confirm_source=lambda: True)
+
+    assert result.outcome == "rolled_back" and result.metrics["cutover_outcome"] == "rolled_back"
+
+
+def test_reported_return_to_source_is_unknown_without_a_confirmation(fake, vpn_calls):
+    fake.on_cutover = lambda job: {**job, **READY, "evidence": steps("hold", "failed", "released_to_source")}
+    start_to_ready(fake)
+
+    assert db_workflow.cutover(RUN_ID, "pm", agent=fake.client()).outcome == "unknown"
 
 
 def test_cutover_that_could_not_undo_its_block_needs_a_person(fake, vpn_calls):
     fake.on_cutover = lambda job: {**job, **READY, "evidence": steps("failed", "source_writes_unblocked_failed")}
     start_to_ready(fake)
 
-    assert db_workflow.cutover(RUN_ID, "pm", agent=fake.client()).outcome == "manual_check"
+    assert db_workflow.cutover(RUN_ID, "pm", agent=fake.client()).outcome == "unknown"
 
 
 def test_failure_after_the_switch_needs_a_person(fake, vpn_calls):
@@ -447,7 +456,7 @@ def test_failure_after_the_switch_needs_a_person(fake, vpn_calls):
                                    "evidence": steps("switched_to_target", "failed")}
     start_to_ready(fake)
 
-    assert db_workflow.cutover(RUN_ID, "pm", agent=fake.client()).outcome == "manual_check"
+    assert db_workflow.cutover(RUN_ID, "pm", agent=fake.client()).outcome == "post_switch_failed"
 
 
 def test_cutover_past_the_wait_says_look_again(fake, vpn_calls, monkeypatch):
@@ -457,7 +466,7 @@ def test_cutover_past_the_wait_says_look_again(fake, vpn_calls, monkeypatch):
 
     result = db_workflow.cutover(RUN_ID, "pm", agent=fake.client())
 
-    assert result.outcome == "timed_out" and result.phase == "cutover"
+    assert result.outcome == "unknown" and result.phase == "cutover"
 
 
 def test_second_call_during_a_cutover_does_not_start_another(fake, vpn_calls, monkeypatch):
