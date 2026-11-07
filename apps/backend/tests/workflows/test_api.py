@@ -53,6 +53,59 @@ def test_manual_inputs_reach_plan_approval_and_approve(client):
     assert run["current_stage"] == "provisioning"
 
 
+def test_cutover_approval_enforces_readiness_on_the_server(client):
+    run_id = client.post("/runs", json=BODY).json()["run_id"]
+    for stage in ("discovery", "planning"):
+        client.post(f"/runs/{run_id}/stages/{stage}/manual", json={"output": {"stage": stage}})
+    client.post(f"/runs/{run_id}/approve", json={"gate": "plan"})
+    for stage in ("provisioning", "db_migration", "app_deploy"):
+        client.post(f"/runs/{run_id}/stages/{stage}/manual", json={"output": {"stage": stage}})
+
+    run = client.get(f"/runs/{run_id}").json()
+    assert run["waiting_gate"] == "cutover"
+    readiness = run["cutover_readiness"]
+    assert readiness["decision"] == "needs_confirmation"
+    assert {c["id"] for c in readiness["checks"]} == {"cdc", "copy", "lag", "mismatch", "app_health"}
+
+    refused = client.post(f"/runs/{run_id}/approve", json={"gate": "cutover"})
+    assert refused.status_code == 409
+    assert "확인되지 않은" in refused.json()["detail"]
+
+    approved = client.post(f"/runs/{run_id}/approve", json={"gate": "cutover", "acknowledge_unknown": True})
+    assert approved.status_code == 200
+    assert client.get(f"/runs/{run_id}").json()["cutover_readiness"] is None
+
+
+def test_abort_runs_cleanup_and_a_failed_cleanup_can_be_retried(tmp_path):
+    attempts = []
+
+    def cleanup(run) -> bool:
+        attempts.append(run.run_id)
+        if len(attempts) == 1:
+            raise RuntimeError("커넥터 서버 응답 없음")
+        return True
+
+    engine = Engine(RunStore(tmp_path / "workflows.sqlite3"), abort_cleanup=cleanup)
+    app.dependency_overrides[get_engine] = lambda: engine
+    try:
+        http = TestClient(app)
+        run_id = http.post("/runs", json=BODY).json()["run_id"]
+
+        assert http.post(f"/runs/{run_id}/cleanup").status_code == 409  # 중단 전
+
+        assert http.post(f"/runs/{run_id}/abort").json()["cleanup_state"] == "running"
+        run = http.get(f"/runs/{run_id}").json()  # TestClient 는 백그라운드 작업까지 끝낸 상태
+        assert run["cleanup_state"] == "failed"
+        assert "커넥터 서버 응답 없음" in run["cleanup_message"]
+
+        assert http.post(f"/runs/{run_id}/cleanup").json()["cleanup_state"] == "running"
+        assert http.get(f"/runs/{run_id}").json()["cleanup_state"] == "done"
+        assert http.post(f"/runs/{run_id}/cleanup").status_code == 409
+        assert attempts == [run_id, run_id]
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_abort_then_commands_conflict(client):
     run_id = client.post("/runs", json=BODY).json()["run_id"]
 
@@ -66,7 +119,7 @@ def test_abort_then_commands_conflict(client):
 def test_errors_for_unknown_run_and_bad_input(client):
     assert client.get("/runs/mig-missing").status_code == 404
     assert client.post("/runs/mig-missing/abort").status_code == 404
-    assert client.post("/runs", json={"aws_region": "ap-northeast-2"}).status_code == 422
+    assert client.post("/runs", json={"github_repo_url": "https://github.com/example/target-app"}).status_code == 422
 
     run_id = client.post("/runs", json=BODY).json()["run_id"]
     assert client.post(f"/runs/{run_id}/stages/unknown/manual", json={"output": {}}).status_code == 422
@@ -75,4 +128,8 @@ def test_errors_for_unknown_run_and_bad_input(client):
 
 def test_openapi_lists_workflows_routes(client):
     paths = client.get("/openapi.json").json()["paths"]
-    assert {"/runs", "/runs/{run_id}", "/runs/{run_id}/approve", "/runs/{run_id}/abort"} <= set(paths)
+    assert {"/runs", "/runs/{run_id}", "/runs/{run_id}/approve", "/runs/{run_id}/abort", "/runs/{run_id}/diagnosis"} <= set(paths)
+
+
+def test_diagnosis_route_answers_404_for_unknown_run(client):
+    assert client.get("/runs/mig-unknown/diagnosis").status_code == 404

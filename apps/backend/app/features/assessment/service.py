@@ -1,15 +1,19 @@
 """assessment 진입 함수. workflows 가 run() 을 호출합니다. (결과 조립: 이주호)
 
-흐름: AWS 세션 → db.py(김준석) · app.py(이주호) 조회 → 합쳐서 plan.py 판정 → AssessmentOutput
+흐름: source_kind 로 원본 읽기 → 합쳐서 plan.py 판정 → AssessmentOutput (어느 쪽이든 같은 형식)
+- aws(기본): AWS 세션 → db.py(김준석) · app.py(이주호) 동시 조회
+- manual: manual.py 가 사람이 입력한 값으로 같은 형식을 만듦 (GCP·Azure·온프레미스 원본용)
 """
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Protocol
 
 from . import ai as ai_part
 from . import app as app_part
 from . import db as db_part
+from . import manual as manual_part
 from . import plan as plan_part
 from .aws import AwsSession, session_for
 from .schemas import (
@@ -42,21 +46,13 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
 
     gaps: list[str] = []
 
-    report(5, "원본 AWS 연결")
-    if session is None:
-        session, reason = session_for(inp.aws_credentials_ref, inp.aws_region)
-        if reason:
-            gaps.append(reason)
-
-    if session is None:
-        db_res = DbAssessment()
-        app_res = AppAssessment(facts=AppInfo(service_name=app_part.fallback_name(inp)))
+    if inp.source_kind == "manual":
+        report(20, "직접 입력한 원본 정보 정리")
+        db_res, app_res = manual_part.collect(inp)
+        region = inp.manual.region if inp.manual else None
     else:
-        report(20, "DB·네트워크 조회")
-        db_res = _safe("DB·네트워크 조회", lambda: db_part.collect(inp, session), DbAssessment(), gaps)
-        report(50, "앱 조회")
-        app_res = _safe("앱 조회", lambda: app_part.collect(inp, session),
-                        AppAssessment(facts=AppInfo(service_name=app_part.fallback_name(inp))), gaps)
+        region = inp.aws_region
+        db_res, app_res = _collect_aws(inp, session, report, gaps)
     gaps += db_res.gaps + app_res.gaps
 
     report(80, "필수 조건 판정·목적지 계획")
@@ -72,7 +68,7 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
 
     source = SourceInfo(
         account_id=app_res.account_id,
-        region=inp.aws_region,
+        region=region,
         db=db_res.source_db,
         network=db_res.network,
         app=SourceApp(db_user=app_res.db_user),
@@ -83,6 +79,36 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
     # 단계 성공은 run() 반환으로 workflows 가 정합니다. report 는 진행 중 상태만 (PR #22 RunContext)
     report(100, "계획 생성 완료")
     return AssessmentOutput(source=source, plan=plan, gaps=gaps)
+
+
+def _collect_aws(inp: AssessmentInput, session: AwsSession | None, report, gaps: list[str]):
+    """AWS 계정 조회 (source_kind="aws"). 실패 이유는 gaps 에 넣고, 조회 결과 두 개를 돌려줍니다."""
+    report(5, "원본 AWS 연결")
+    if session is None:
+        session, reason = session_for(inp.aws_credentials_ref, inp.aws_region)
+        if reason:
+            gaps.append(reason)
+
+    if session is None:
+        db_res = DbAssessment()
+        app_res = AppAssessment(facts=AppInfo(service_name=app_part.fallback_name(inp)))
+    else:
+        # DB 쪽(RDS → bastion → SSM 터널 → PG)과 앱 쪽(ECS·ECR)은 서로 기다릴 게 없어 동시에 조회합니다.
+        # 진행 보고(ctx.report)는 이 스레드에서만 합니다.
+        report(20, "DB·네트워크·앱 동시 조회")
+        db_gaps: list[str] = []
+        app_gaps: list[str] = []
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="assessment") as pool:
+            db_job = pool.submit(_safe, "DB·네트워크 조회", lambda: db_part.collect(inp, session),
+                                 DbAssessment(), db_gaps)
+            app_job = pool.submit(_safe, "앱 조회", lambda: app_part.collect(inp, session),
+                                  AppAssessment(facts=AppInfo(service_name=app_part.fallback_name(inp))), app_gaps)
+            app_res = app_job.result()
+            if not db_job.done():
+                report(50, "앱 조회 완료, DB·네트워크 조회 중")
+            db_res = db_job.result()
+        gaps += db_gaps + app_gaps  # 순서는 예전(DB → 앱)과 같게
+    return db_res, app_res
 
 
 def _safe(what: str, fn, fallback, gaps: list[str]):

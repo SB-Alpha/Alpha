@@ -75,3 +75,27 @@ def test_run_router():
     res = TestClient(app).post("/assessment/run", json=body)
     assert res.status_code == 200
     assert res.json()["plan"]["approvable"] is False
+
+
+def test_db_and_app_lookups_run_at_the_same_time(monkeypatch):
+    import threading
+
+    from app.features.assessment import app as app_part
+    from app.features.assessment.schemas import AppAssessment, AppInfo
+
+    app_started = threading.Event()
+    seen = {}
+
+    def fake_app(inp, sess):
+        app_started.set()
+        return AppAssessment(facts=AppInfo(service_name="target-app"))
+
+    def fake_db(inp, sess):
+        seen["app_ran_meanwhile"] = app_started.wait(timeout=2)  # 차례로 돌면 2초 기다리다 False
+        return DbAssessment(gaps=["db gap"])
+
+    monkeypatch.setattr(app_part, "collect", fake_app)
+    monkeypatch.setattr(db_part, "collect", fake_db)
+    out = service.run(INP, session=session())
+    assert seen["app_ran_meanwhile"] is True
+    assert "db gap" in out.gaps

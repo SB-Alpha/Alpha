@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -21,6 +22,7 @@ log = logging.getLogger(__name__)
 MODEL = "claude-opus-5-5"
 TIMEOUT_SECONDS = 30.0
 MAX_AI_RISKS = 5
+AWS_ACCOUNT = re.compile(r"(?<!\d)\d{12}(?!\d)")
 
 SYSTEM = (
     "너는 AWS → GCP 이전 계획을 승인자에게 설명하는 도우미다. 입력 JSON 은 규칙 코드가 이미 판정한 결과다.\n"
@@ -75,7 +77,8 @@ def _plan_for_prompt(plan: MigrationPlan) -> str:
     data = plan.model_dump(mode="json", exclude={"generated_at", "summary", "summary_source"})
     infra = data["target_infra"]
     infra["env_vars"] = sorted(infra.get("env_vars", {}))
-    return json.dumps(data, ensure_ascii=False, sort_keys=True)
+    # 판단에 필요 없는 AWS 계정 ID(이미지 주소 등)는 가려서 보냅니다
+    return AWS_ACCOUNT.sub("<aws-account>", json.dumps(data, ensure_ascii=False, sort_keys=True))
 
 
 def _ask_claude(plan: MigrationPlan) -> AiNotes | None:

@@ -34,10 +34,10 @@ class WorkerClient:
             raise ProvisioningError("WORKER_URL 은 있는데 토큰이 없습니다. WORKER_TOKEN_FILE 이나 WORKER_TOKEN 을 지정하세요")
         return cls(base_url, token)
 
-    def _send(self, method: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _send(self, method: str, body: dict[str, Any] | None = None, *, command: str = "target") -> dict[str, Any]:
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(
-            f"{self.base_url}/control/target",
+            f"{self.base_url}/control/{command}",
             data=data,
             method=method,
             headers={
@@ -55,9 +55,12 @@ class WorkerClient:
                 detail = json.loads(exc.read()).get("error", "")
             except (ValueError, AttributeError):
                 pass
-            raise ProvisioningError(f"Worker target 명령 실패 (HTTP {exc.code}) {detail}".strip()) from None
+            raise ProvisioningError(f"Worker {command} 명령 실패 (HTTP {exc.code}) {detail}".strip()) from None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             raise ProvisioningError(f"Worker 에 연결하지 못했습니다: {type(exc).__name__}") from None
+
+    def status(self) -> dict[str, Any]:
+        return self._send("GET", command="status")
 
     def get_target(self) -> str | None:
         return self._send("GET").get("url")

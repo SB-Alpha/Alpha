@@ -14,8 +14,17 @@ from typing import Any
 from .aws import AwsSession, error_code
 from .schemas import AppAssessment, AppInfo, AssessmentInput
 
-# 평문 환경 변수인데 이름이 이렇게 생겼으면 비밀로 보고 값을 넘기지 않습니다.
-SECRET_NAME_HINTS = ("PASSWORD", "PASSWD", "SECRET", "TOKEN", "PRIVATE_KEY", "API_KEY", "ACCESS_KEY", "CREDENTIAL")
+# 평문 환경 변수인데 이름이 이렇게 생겼으면 비밀로 보고 값을 넘기지 않습니다. `_KEY` 로 끝나는 이름도 비밀로 봅니다.
+SECRET_NAME_HINTS = ("PASSWORD", "PASSWD", "PASSPHRASE", "SECRET", "TOKEN", "PRIVATE", "API_KEY", "ACCESS_KEY",
+                     "CREDENTIAL")
+# 이름이 평범해도 값이 이렇게 생겼으면 비밀입니다. 예: DATABASE_URL=postgres://alpha:<비밀번호>@host/db
+SECRET_VALUE = re.compile(
+    r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@"  # 주소 안의 사용자:비밀번호@
+    r"|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"  # AWS 액세스 키
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\."  # JWT
+    r"|\b(?:sk-ant-|sk_live_|ghp_|github_pat_|xox[abprs]-|AIza)[A-Za-z0-9_-]{10,}"
+)
 
 ECR_IMAGE = re.compile(
     r"^(?P<account>\d{12})\.dkr\.ecr\.(?P<region>[a-z0-9-]+)\.amazonaws\.com/"
@@ -26,7 +35,11 @@ URL_PATH = re.compile(r"https?://[^/\s'\"]+(/[^\s'\"|;&]*)")
 
 def looks_secret(name: str) -> bool:
     upper = name.upper()
-    return any(hint in upper for hint in SECRET_NAME_HINTS)
+    return any(hint in upper for hint in SECRET_NAME_HINTS) or upper == "KEY" or upper.endswith("_KEY")
+
+
+def has_secret_value(value: str) -> bool:
+    return bool(SECRET_VALUE.search(value or ""))
 
 
 def collect(inp: AssessmentInput, session: AwsSession) -> AppAssessment:
@@ -92,6 +105,10 @@ def collect(inp: AssessmentInput, session: AwsSession) -> AppAssessment:
             continue
         if looks_secret(name):
             gaps.append(f"평문 환경 변수 {name} 가 비밀로 보여 값을 넘기지 않음 (Secrets Manager 로 옮겨야 함)")
+            continue
+        if has_secret_value(value):  # 값은 gaps 에도 남기지 않음
+            gaps.append(f"평문 환경 변수 {name} 의 값에 비밀(접속 정보·키)이 들어 있어 값을 넘기지 않음 "
+                        "(Secrets Manager 로 옮겨야 함)")
             continue
         env_vars[name] = value
     secret_refs = {s["name"]: s.get("valueFrom", "") for s in container.get("secrets") or [] if s.get("name")}

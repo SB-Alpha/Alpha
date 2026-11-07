@@ -1,6 +1,8 @@
 // workflows API 클라이언트. 타입은 backend `app/features/workflows/schemas.py` 와 같은 모양입니다.
 // 요청은 Next.js rewrite(`/api/*` → WORKFLOWS_API_URL)를 거쳐 백엔드로 갑니다.
 
+import { adapterFor, type TargetInfraConfig } from "./adapters/types";
+
 export type WorkflowState =
   | "pending"
   | "running"
@@ -19,7 +21,8 @@ export const STAGE_ORDER: StageName[] = ["discovery", "planning", "provisioning"
 export const GATE_BEFORE: Partial<Record<StageName, Gate>> = { provisioning: "plan", cutover: "cutover" };
 
 export interface MigrationRequest {
-  github_repo_url: string;
+  github_repo_url?: string | null;
+  service_name?: string | null;
   aws_region: string;
   aws_role_ref?: string | null;
   aws_credentials_ref?: string | null;
@@ -28,6 +31,17 @@ export interface MigrationRequest {
   db_credentials_ref?: string | null;
   db_admin_ref?: string | null;
   target_region?: string;
+  target_infra?: TargetInfraConfig | null;
+}
+
+/** 화면에 보이는 run 이름. 예전 요청에는 저장소 주소만 있습니다. */
+export function runTitle(request: MigrationRequest): string {
+  const repository = request.github_repo_url?.replace(/^https?:\/\/(www\.)?github\.com\//, "");
+  return request.service_name || repository || request.ecs_service || "이름 없는 서비스";
+}
+
+export function targetSummary(request: MigrationRequest): string {
+  return `${adapterFor(request.target_infra?.provider).cloudName} ${request.target_region ?? "—"}`;
 }
 
 export interface StageStatus {
@@ -52,6 +66,70 @@ export interface RunStatus {
   message: string | null;
   created_at: string;
   updated_at: string;
+  approval_records: ApprovalRecord[];
+  cutover_readiness?: CutoverReadiness | null; // 승인 ② 대기 중일 때만 서버가 채웁니다
+  cleanup_state?: "running" | "done" | "failed" | null; // 중단 뒤 복제 자원 정리 상태
+  cleanup_message?: string | null;
+  cdc_job_id?: string | null; // 단건 응답에만 있습니다. CDC 작업 직접 제어에 씁니다
+}
+
+export type CheckStatus = "pass" | "fail" | "unknown";
+
+export type CutoverDecision = "go" | "needs_confirmation" | "no_go";
+
+export interface ReadinessCheck {
+  id: string;
+  title: string;
+  status: CheckStatus;
+  detail: string;
+}
+
+export interface CutoverReadiness {
+  decision: CutoverDecision;
+  checks: ReadinessCheck[];
+}
+
+export type PreflightStatus = "pass" | "fail" | "unknown" | "info";
+
+export type PreflightVerdict = "go" | "no_go" | "unverified";
+
+export interface PreflightCheck {
+  id: string;
+  label: string;
+  status: PreflightStatus;
+  detail?: string | null;
+  value?: number | string | null;
+}
+
+export interface PreflightReport {
+  run_id: string;
+  gate: Gate;
+  verdict: PreflightVerdict;
+  advisory: boolean;
+  simulated: boolean;
+  checks: PreflightCheck[];
+  measured_at: string;
+}
+
+export interface ApprovalRecord {
+  gate: Gate;
+  approver?: string | null;
+  comment?: string | null;
+  preflight_verdict?: PreflightVerdict | null;
+  preflight_measured_at?: string | null;
+  readiness_decision?: CutoverDecision | null;
+  at: string;
+}
+
+/** 승인 버튼을 누를 때 화면에 표시된 점검 결과입니다. 없으면 null 입니다. */
+export type DisplayedPreflight = { verdict: PreflightVerdict; measured_at: string } | null;
+
+export interface SelfHealingDiagnosis {
+  category: string;
+  root_cause: string;
+  action_plan: string[];
+  suggested_manual_input?: Record<string, unknown> | null;
+  diagnosed_by: "ai" | "rule";
 }
 
 export class ApiError extends Error {
@@ -65,10 +143,12 @@ export class ApiError extends Error {
 
 const BASE = "/api/runs";
 
-async function call<T>(path: string, init?: RequestInit): Promise<T> {
+const call = <T>(path: string, init?: RequestInit) => request<T>(`${BASE}${path}`, init);
+
+export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(`${BASE}${path}`, {
+    res = await fetch(url, {
       ...init,
       headers: { "content-type": "application/json", ...init?.headers },
       cache: "no-store",
@@ -100,11 +180,29 @@ export const workflows = {
   list: () => call<RunStatus[]>(""),
   get: (runId: string) => call<RunStatus>(`/${encodeURIComponent(runId)}`),
   create: (req: MigrationRequest) => post<RunStatus>("", req),
-  approve: (runId: string, gate: Gate, comment?: string) =>
-    post<RunStatus>(`/${encodeURIComponent(runId)}/approve`, { gate, comment: comment || null }),
+  approve: (
+    runId: string,
+    gate: Gate,
+    comment?: string,
+    approver?: string,
+    preflight?: DisplayedPreflight,
+    acknowledgeUnknown = false,
+  ) =>
+    post<RunStatus>(`/${encodeURIComponent(runId)}/approve`, {
+      gate,
+      comment: comment || null,
+      approver: approver?.trim() || null,
+      preflight_verdict: preflight?.verdict ?? null,
+      preflight_measured_at: preflight?.measured_at ?? null,
+      acknowledge_unknown: acknowledgeUnknown,
+    }),
   abort: (runId: string, reason?: string) =>
     post<RunStatus>(`/${encodeURIComponent(runId)}/abort`, { reason: reason || null }),
   resume: (runId: string) => post<RunStatus>(`/${encodeURIComponent(runId)}/resume`),
+  retryCleanup: (runId: string) => post<RunStatus>(`/${encodeURIComponent(runId)}/cleanup`),
   submitManual: (runId: string, stage: StageName, output: Record<string, unknown>, note?: string) =>
     post<RunStatus>(`/${encodeURIComponent(runId)}/stages/${stage}/manual`, { output, note: note || null }),
+  getDiagnosis: (runId: string) => call<SelfHealingDiagnosis>(`/${encodeURIComponent(runId)}/diagnosis`),
+  triggerDiagnosis: (runId: string) => post<SelfHealingDiagnosis>(`/${encodeURIComponent(runId)}/diagnose`),
+  getPreflight: (runId: string) => call<PreflightReport>(`/${encodeURIComponent(runId)}/preflight`),
 };

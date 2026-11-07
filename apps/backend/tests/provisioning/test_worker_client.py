@@ -13,7 +13,9 @@ TOKEN = "secret-token-value"
 class FakeWorkerServer:
     """Worker 의 /control/target 만 흉내 내는 진짜 로컬 HTTP 서버. 받은 요청을 기록한다."""
 
-    def __init__(self, *, reject_with: int | None = None, forget: bool = False) -> None:
+    def __init__(
+        self, *, reject_with: int | None = None, forget: bool = False, status_body: dict | None = None
+    ) -> None:
         self.url_value: str | None = None
         self.requests: list[tuple[str, str, str | None]] = []  # (method, Authorization, body)
         outer = self
@@ -38,6 +40,8 @@ class FakeWorkerServer:
                     return self._reply(403, {"error": "blocked user agent"})
                 if self.headers.get("Authorization") != f"Bearer {TOKEN}":
                     return self._reply(401, {"error": "unauthorized"})
+                if self.path == "/control/status":
+                    return self._reply(200, status_body or {})
                 if reject_with:
                     return self._reply(reject_with, {"error": "mode is TARGET: the target url cannot change"})
                 if method == "POST" and not forget:
@@ -64,6 +68,13 @@ class FakeWorkerServer:
     def __exit__(self, *exc):
         self.server.shutdown()
         self.server.server_close()
+
+
+def test_status_reads_the_control_status():
+    body = {"mode": "TARGET", "request_counts": {"write_total": 2}}
+    with FakeWorkerServer(status_body=body) as worker:
+        assert WorkerClient(worker.base_url, TOKEN).status() == body
+    assert worker.requests[-1][0] == "GET"
 
 
 def test_set_target_posts_the_url_then_reads_it_back():
