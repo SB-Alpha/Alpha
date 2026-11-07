@@ -25,6 +25,8 @@ from psycopg import sql
 from cdc_agent.models import MARKER_TABLE, Job
 
 DIGEST_DEADLINE_CHECK_ROWS = 10_000
+# The deadline is only checked between rows: a comparison behind a DDL gives up here instead of waiting without limit.
+SNAPSHOT_LOCK_TIMEOUT = "5s"
 
 
 @dataclass(frozen=True)
@@ -340,7 +342,19 @@ def compare(source: Endpoint, target: Endpoint, tables: list[str], *, checksum: 
 def fix_snapshot(conn: psycopg.Connection) -> None:
     """Keep what this connection reads at this moment, whatever is written later. No table is read here."""
     conn.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
-    conn.execute("SELECT 1")  # The snapshot is taken at the first statement.
+    # The snapshot is taken at the first statement, so this costs no extra round trip during the hold.
+    conn.execute("SELECT set_config('lock_timeout', %s, true)", (SNAPSHOT_LOCK_TIMEOUT,))
+
+
+def _frozen_digest(conn: psycopg.Connection, table: str, deadline: float | None) -> dict:
+    """Locks taken since a savepoint end when it is rolled back; the snapshot stays.
+
+    So a DDL, and the writes queued behind it, can only wait on the table being read right now.
+    """
+    conn.execute("SAVEPOINT frozen_digest")
+    digest = table_digest(conn, table, deadline)
+    conn.execute("ROLLBACK TO SAVEPOINT frozen_digest")
+    return digest
 
 
 def compare_frozen(src: psycopg.Connection, tgt: psycopg.Connection, tables: list[str],
@@ -352,7 +366,7 @@ def compare_frozen(src: psycopg.Connection, tgt: psycopg.Connection, tables: lis
     result: dict = {"tables": {}, "mismatch": 0}
     with ThreadPoolExecutor(max_workers=2) as pool:
         for table in tables:
-            source, target = pool.submit(table_digest, src, table, deadline), pool.submit(table_digest, tgt, table, deadline)
+            source, target = pool.submit(_frozen_digest, src, table, deadline), pool.submit(_frozen_digest, tgt, table, deadline)
             s, t = source.result(), target.result()
             same = s == t
             result["tables"][table] = {"source": s, "target": t, "match": same}
