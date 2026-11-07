@@ -1101,7 +1101,9 @@ def _ref(run_id: str, tag: str) -> str:
 def _clean(run_id: str, text: str) -> str:
     values = redact.run_values(run_id, SECRET_TAGS)
     try:
-        values += redact.ref_values(_other_refs(run_id))
+        # 클라우드 권한은 run 밖에 저장되지만 VPN과 조회 오류 문구에 섞일 수 있다.
+        clouds = saved_clouds(run_id) or ()
+        values += redact.ref_values([*_other_refs(run_id), *(f"secret://cloud/{cloud}" for cloud in clouds)])
     except Exception:  # noqa: BLE001 - 비밀값 저장소 오류가 정리 중인 오류를 가리면 안 된다
         logger.warning("run %s: could not read its other references", run_id)
     return redact.clean(text, values)
