@@ -407,7 +407,7 @@ def app_input(**overrides) -> AppDeployInput:
 
 
 def deploy(inp, transfer, tf=None, ctx=None):
-    tf = tf or FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text())))
+    tf = tf or FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text(encoding="utf-8"))))
     ctx = ctx or FakeContext()
     result = deploy_app(inp, ctx, terraform=tf, http_get=lambda url: 200, sleep=lambda s: None, clock=fake_clock(), transfer=transfer)
     return result, tf, ctx
@@ -489,7 +489,7 @@ def test_the_service_name_is_required_to_name_the_destination(aws_key):
 
 
 def test_a_registry_url_missing_from_the_terraform_outputs_is_an_error(aws_key):
-    outputs = with_app_url(json.loads(FIXTURE.read_text()))
+    outputs = with_app_url(json.loads(FIXTURE.read_text(encoding="utf-8")))
     outputs.pop("registry_url")
     with pytest.raises(ProvisioningError, match="registry_url"):
         deploy(app_input(), FakeTransfer(), tf=FakeTerraform(outputs=outputs))
@@ -499,7 +499,7 @@ def test_a_failed_copy_stops_before_terraform_plans_or_applies(aws_key):
     def broken(**kwargs):
         raise ProvisioningError("crane copy 실패")
 
-    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text())))
+    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text(encoding="utf-8"))))
     with pytest.raises(ProvisioningError, match="crane copy 실패"):
         deploy(app_input(), broken, tf=tf)
 
