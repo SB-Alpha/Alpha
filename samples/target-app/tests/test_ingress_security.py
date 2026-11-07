@@ -24,10 +24,17 @@ def client():
         yield test_client
 
 
-def test_without_a_secret_every_route_stays_open():
-    with patch.dict(os.environ, {}, clear=True), TestClient(app) as open_client:
+def test_without_a_secret_in_local_mode_routes_stay_open():
+    with patch.dict(os.environ, {"APP_ENV": "local"}, clear=True), TestClient(app) as open_client:
         assert open_client.get("/").status_code == 200
         assert open_client.get("/health/live").status_code == 200
+
+
+def test_without_a_secret_in_non_local_mode_traffic_is_blocked_fail_closed():
+    with patch.dict(os.environ, {"APP_ENV": "gcp"}, clear=True), TestClient(app) as client:
+        res = client.get("/")
+        assert res.status_code == 403
+        assert "WORKER_SECRET is required" in res.json()["detail"]
 
 
 def test_health_stays_open_for_platform_checks(client):

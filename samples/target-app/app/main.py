@@ -72,8 +72,17 @@ async def verify_proxy_secret(request: Request, call_next):
 
     /health/* stays open because Cloud Run probes and the platform call it directly.
     """
+    if request.url.path.startswith("/health/"):
+        return await call_next(request)
     expected = os.getenv("WORKER_SECRET")
-    if not expected or request.url.path.startswith("/health/"):
+    if not expected:
+        # non-local 환경에서 시크릿이 설정되지 않은 채 배포되면 보호가 비활성화되는 fail-open 방지
+        if os.getenv("APP_ENV", SERVED_BY) != "local":
+            return Response(
+                content=json.dumps({"detail": "Server configuration error: WORKER_SECRET is required in non-local environments."}),
+                status_code=403,
+                media_type="application/json",
+            )
         return await call_next(request)
     token = request.headers.get(WORKER_SECRET_HEADER, "")
     if not hmac.compare_digest(token.encode(), expected.encode()):
