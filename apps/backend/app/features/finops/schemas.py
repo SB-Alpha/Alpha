@@ -161,6 +161,8 @@ class Traffic(BaseModel):
     rps: float = Field(default=0, ge=0, le=100_000, allow_inf_nan=False)  # 요청이 있는 시간의 초당 평균 요청 수
     # 요청 하나를 처리하는 평균 시간. RPS 교차점(필요한 Cloud Run 인스턴스 수)에만 씁니다. 모르면 None
     avg_latency_ms: float | None = Field(default=None, gt=0, le=60_000, allow_inf_nan=False)
+    replication_lag_bytes: int | None = Field(default=None, ge=0)
+    max_safe_lag_bytes: int = Field(default=1024, ge=0)
 
 
 class CostRequest(BaseModel):

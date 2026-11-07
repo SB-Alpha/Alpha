@@ -1,9 +1,18 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { DbBasisRows } from "@/components/finops/DbBasisRows";
-import { PriceApiEstimate } from "@/components/finops/PriceApiEstimate";
+import { PriceApiEstimate, deriveLiveView, type RealRunTelemetry } from "@/components/finops/PriceApiEstimate";
 import { SensitivityPanel } from "@/components/finops/SensitivityPanel";
+import {
+   METRIC_KEYS,
+  elapsedSeconds,
+  formatDuration,
+  isFinished,
+  numberMetric,
+  overallProgress,
+  servingSide,
+} from "@/lib/dashboard";
 import {
   CARBON_DATA_YEAR,
   DB_CLASSES,
@@ -31,7 +40,8 @@ import {
   type ProviderFinOpsProfile,
   type TargetProvider,
 } from "@/lib/finops";
-import { estimateRequest, useFinopsEstimate } from "@/lib/finopsApi";
+import { estimateRequest, useFinopsEstimate, type FinopsEstimate } from "@/lib/finopsApi";
+import { STAGE_LABEL } from "@/lib/labels";
 import { isRecord } from "@/lib/plan";
 import type { RunStatus } from "@/lib/workflows";
 
@@ -176,7 +186,6 @@ type CopyState = "idle" | "copied" | "failed";
 function CopyReportButton({ input }: { input: CostReportInput }) {
   const [copyState, setCopyState] = useState<CopyState>("idle");
 
-  // clipboard 가 없는 환경의 TypeError 와 권한 거부를 함께 처리합니다.
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(buildCostReportText(input));
@@ -205,43 +214,102 @@ function CopyReportButton({ input }: { input: CostReportInput }) {
   );
 }
 
-function ProviderButton({ label, isActive, onClick }: { label: string; isActive: boolean; onClick: () => void }) {
+const PROVIDER_SHORT_LABEL: Record<TargetProvider, string> = {
+  gcp: "GCP",
+  azure: "Azure",
+  aws: "AWS",
+};
+
+const PROVIDERS: readonly TargetProvider[] = ["gcp", "azure", "aws"];
+
+/**
+ * 상단 단일 클라우드 선택 및 순위 탭 (중복 없이 이곳 1곳에만 표시)
+ * 백엔드 가격 API 금액이 있으면 저렴한 순으로 순위와 금액을 버튼 안에 함께 표시합니다.
+ */
+function UnifiedCloudSelector({
+  targetProvider,
+  onSelect,
+  estimateData,
+}: {
+  targetProvider: TargetProvider;
+  onSelect: (p: TargetProvider) => void;
+  estimateData: FinopsEstimate | null;
+}) {
+  const totals: Record<TargetProvider, number | null> = { gcp: null, azure: null, aws: null };
+  if (estimateData) {
+    totals.aws = estimateData.report.savings[0]?.current_monthly_usd ?? null;
+    for (const s of estimateData.report.savings) {
+      if ((s.cloud === "gcp" || s.cloud === "azure") && s.complete) {
+        totals[s.cloud] = s.candidate_monthly_usd;
+      }
+    }
+  }
+
+  const valid = PROVIDERS.filter((p) => totals[p] !== null).sort(
+    (a, b) => (totals[a] as number) - (totals[b] as number),
+  );
+  const ranks: Partial<Record<TargetProvider, number>> = {};
+  valid.forEach((p, idx) => {
+    ranks[p] = idx + 1;
+  });
+
+  // 순위가 정해졌으면 1위·2위·3위 순서대로 탭을 정렬합니다.
+  const orderedProviders = [...PROVIDERS].sort((a, b) => (ranks[a] ?? 99) - (ranks[b] ?? 99));
+
   return (
-    <button
-      type="button"
-      aria-pressed={isActive}
-      onClick={onClick}
-      className={`rounded px-2.5 py-1 font-semibold transition-colors ${
-        isActive ? "border border-ink bg-white text-ink shadow-[1px_1px_0_0_var(--color-ink)]" : "text-ink/60 hover:text-ink"
-      }`}
-    >
-      {label}
-    </button>
+    <div className="inline-flex flex-wrap rounded-lg border border-ink/20 bg-paper p-0.5 text-xs font-mono">
+      {orderedProviders.map((p) => {
+        const isActive = targetProvider === p;
+        const rank = ranks[p];
+        const total = totals[p];
+        return (
+          <button
+            key={p}
+            type="button"
+            aria-pressed={isActive}
+            onClick={() => onSelect(p)}
+            className={`inline-flex items-center gap-1 rounded px-2.5 py-1 transition-colors ${
+              isActive
+                ? "border border-ink bg-white font-bold text-ink shadow-[1px_1px_0_0_var(--color-ink)]"
+                : "font-medium text-ink/65 hover:text-ink"
+            }`}
+          >
+            {rank !== undefined && <span className="text-[10px] text-ink/55">{rank}위</span>}
+            <span>{PROVIDER_SHORT_LABEL[p]}</span>
+            {total !== null && <span className="tabular-nums">{formatUsd(total)}</span>}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
-function CardHeader({ report, setters }: { report: CostReportInput; setters: InputSetters }) {
-  const { targetProvider } = report.params;
+function CardHeader({
+  report,
+  setters,
+  estimateData,
+}: {
+  report: CostReportInput;
+  setters: InputSetters;
+  estimateData: FinopsEstimate | null;
+}) {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-3 border-b border-ink/15 pb-4">
-      <div>
-        <span className="inline-flex items-center rounded border border-ink/40 bg-paper px-2 py-0.5 font-mono text-[11px] font-semibold text-ink">
-          추정: 공시가 기준, 실측 아님
-        </span>
-        <h2 id="finops-heading" className="mt-1 text-lg font-semibold sm:text-xl">
+    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-ink/15 pb-3">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <h2 id="finops-heading" className="text-base font-semibold sm:text-lg">
           멀티클라우드 월 비용 추정
         </h2>
-        <p className="mt-0.5 text-xs text-ink/65">
-          서울 리전 공시가와 아래 입력값으로 계산합니다. 실제 청구액이 아닙니다. 공시가 확인일 {PRICE_AS_OF}
-        </p>
+        <span className="rounded border border-ink/30 bg-paper px-1.5 py-0.5 font-mono text-[10px] font-medium text-ink/75">
+          공시가 기준 · 확인일 {PRICE_AS_OF}
+        </span>
       </div>
 
       <div className="flex flex-wrap items-center justify-end gap-2">
-        <div className="inline-flex rounded-lg border border-ink/20 bg-paper p-0.5 text-xs font-mono">
-          <ProviderButton label="GCP (Seoul)" isActive={targetProvider === "gcp"} onClick={() => setters.setTargetProvider("gcp")} />
-          <ProviderButton label="Azure (Korea)" isActive={targetProvider === "azure"} onClick={() => setters.setTargetProvider("azure")} />
-          <ProviderButton label="AWS (Seoul)" isActive={targetProvider === "aws"} onClick={() => setters.setTargetProvider("aws")} />
-        </div>
+        <UnifiedCloudSelector
+          targetProvider={report.params.targetProvider}
+          onSelect={setters.setTargetProvider}
+          estimateData={estimateData}
+        />
         <CopyReportButton input={report} />
       </div>
     </div>
@@ -299,9 +367,9 @@ interface RangeFieldProps {
 function RangeField({ label, valueText, value, range, onChange }: RangeFieldProps) {
   return (
     <label className="block">
-      <span className="flex justify-between text-xs font-mono">
-        <span className="text-ink/60">{label}</span>
-        <span className="font-semibold">{valueText}</span>
+      <span className="flex justify-between text-[11px] font-mono">
+        <span className="text-ink/65">{label}</span>
+        <span className="font-semibold text-ink">{valueText}</span>
       </span>
       <input
         type="range"
@@ -310,7 +378,7 @@ function RangeField({ label, valueText, value, range, onChange }: RangeFieldProp
         step={range.step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="mt-1.5 w-full accent-ink"
+        className="mt-1 h-1.5 w-full cursor-pointer accent-ink"
       />
     </label>
   );
@@ -319,11 +387,11 @@ function RangeField({ label, valueText, value, range, onChange }: RangeFieldProp
 function DbClassField({ params, setDbClass }: { params: FinOpsInputParams; setDbClass: InputSetters["setDbClass"] }) {
   return (
     <label className="block">
-      <span className="text-xs font-mono text-ink/60">원본 DB 등급 (가정)</span>
+      <span className="text-[11px] font-mono text-ink/65">원본 DB 등급 (가정)</span>
       <select
         value={params.dbClass}
         onChange={(e) => setDbClass(e.target.value as DbClass)}
-        className="mt-1 w-full rounded border border-ink/30 bg-white px-2 py-1 font-mono text-xs"
+        className="mt-1 w-full rounded border border-ink/30 bg-white px-2 py-0.5 font-mono text-xs"
       >
         {(Object.keys(DB_CLASSES) as DbClass[]).map((name) => (
           <option key={name} value={name}>
@@ -331,32 +399,20 @@ function DbClassField({ params, setDbClass }: { params: FinOpsInputParams; setDb
           </option>
         ))}
       </select>
-      {params.planDbTier === "db-g1-small" && (
-        <span className="mt-1 block text-[11px] text-ink/60">
-          계획의 db_tier 가 db-g1-small 이면 원본은 1GiB 등급일 가능성이 큽니다. 아래 등급별 값을 함께 보세요.
-        </span>
-      )}
     </label>
   );
 }
 
+/**
+ * 하단 슬라이더 바: 상단 핵심 요약·그래프 바로 아래에 배치하여 조작 결과를 위쪽에서 즉시 확인합니다.
+ */
 function AssumptionControls({ report, setters }: { report: CostReportInput; setters: InputSetters }) {
   const { params, origins } = report;
   return (
-    <div className="mt-5 rounded-lg border border-ink/15 bg-paper p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs font-semibold text-ink">가정 입력 (실측 아님)</p>
-        <div className="text-right font-mono text-[11px] text-ink/50">
-          <p>원본 앱: 가정 (원본 크기 미제공, 목적지 계획 크기 재사용)</p>
-          <p>
-            목적지 앱 {params.cpuCount} vCPU / {params.memoryMb} MiB ({origins.targetApp})
-          </p>
-        </div>
-      </div>
-
-      <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <RangeField label="활성 시간 평균 트래픽" valueText={`${params.rps} RPS`} value={params.rps} range={SLIDER_RANGES.rps} onChange={setters.setRps} />
-        <RangeField label="유휴 시간 비율 (야간/주말)" valueText={`${params.idlePercent}%`} value={params.idlePercent} range={SLIDER_RANGES.idlePercent} onChange={setters.setIdlePercent} />
+    <div className="mt-3 rounded-lg border border-ink/15 bg-paper/70 px-3.5 py-2.5">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <RangeField label="활성 평균 트래픽" valueText={`${params.rps} RPS`} value={params.rps} range={SLIDER_RANGES.rps} onChange={setters.setRps} />
+        <RangeField label="유휴 시간 비율" valueText={`${params.idlePercent}%`} value={params.idlePercent} range={SLIDER_RANGES.idlePercent} onChange={setters.setIdlePercent} />
         <RangeField label="요청당 처리 시간" valueText={`${params.avgRequestMs} ms`} value={params.avgRequestMs} range={SLIDER_RANGES.avgRequestMs} onChange={setters.setAvgRequestMs} />
         <RangeField label={`DB 디스크 (${origins.disk})`} valueText={`${params.dbSizeGb} GB`} value={params.dbSizeGb} range={DISK_RANGE} onChange={setters.setDbSizeOverride} />
         <DbClassField params={params} setDbClass={setters.setDbClass} />
@@ -409,38 +465,78 @@ function FinOpsCardBody({ run }: Props) {
   const bases = useMemo(() => computeBothBases(params), [params]);
   const metrics = bases.sameMemory;
   const report: CostReportInput = { params, origins };
-  // 같은 입력으로 백엔드 가격 API 견적을 받습니다. 슬라이더를 움직이면 300ms 뒤 한 번만 부릅니다.
-  const estimate = useFinopsEstimate(estimateRequest(params, run.request.aws_region));
+
+  // 실제 run 이 실행 중일 때만 경과 시간을 1초마다 갱신합니다.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const running = !isFinished(run.state);
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [running]);
+
+  const realLag = numberMetric(run, METRIC_KEYS.replicationLagBytes);
+  const estimate = useFinopsEstimate(estimateRequest(params, run.request.aws_region, realLag));
+  const liveEstimateData = useMemo(
+    () => (estimate.data ? deriveLiveView(estimate.data, params, realLag) : null),
+    [estimate.data, params, realLag],
+  );
+
+  const realTelemetry: RealRunTelemetry = {
+    progress: overallProgress(run),
+    elapsedText: formatDuration(elapsedSeconds(run, nowMs)),
+    stageLabel: run.current_stage ? STAGE_LABEL[run.current_stage] : isFinished(run.state) ? "종료" : "—",
+    replicationLagBytes: realLag,
+    servingSide: servingSide(run),
+  };
 
   return (
     <section
       aria-labelledby="finops-heading"
-      className="rounded-xl border border-ink bg-white p-5 shadow-[3px_3px_0_0_var(--color-ink)]"
+      className="rounded-xl border border-ink bg-white p-4 shadow-[3px_3px_0_0_var(--color-ink)]"
     >
-      <CardHeader report={report} setters={setters} />
-      <PriceApiEstimate state={estimate} />
+      {/* 1. 상단 헤더 & 단일 클라우드 선택/순위 탭 (중복 없음) */}
+      <CardHeader report={report} setters={setters} estimateData={liveEstimateData} />
 
-      <h3 className="mt-6 border-t border-ink/15 pt-4 text-sm font-semibold">
-        참고 계산 (화면 고정 단가, 네트워크·등급 비교 포함)
-      </h3>
-      <p className="mt-0.5 text-[11px] text-ink/60">
-        위 가격 API 견적이 기준입니다. 아래는 가격 API 가 아직 다루지 않는 네트워크 송신과 DB 등급 두 기준(같은 메모리·실제 배포) 비교를 위한 참고값입니다.
-      </p>
-      <HeroStats metrics={metrics} params={params} />
-      <DbBasisRows bases={bases} planDbTier={params.planDbTier} />
-      {params.targetProvider === "aws" && (
-        <p className="mt-2 text-xs text-ink/70">AWS 목적지는 ECS Fargate + RDS 공시가 기준으로 비교합니다.</p>
-      )}
+      {/* 2. 상단 핵심 요약 + 실시간 비용 교차 그래프 (항상 한눈에 보임) */}
+      <PriceApiEstimate
+        state={estimate}
+        selectedProvider={params.targetProvider}
+        onSelectProvider={setters.setTargetProvider}
+        params={params}
+        onChangeRps={setters.setRps}
+        onChangeIdlePercent={setters.setIdlePercent}
+        realTelemetry={realTelemetry}
+      />
 
-      <div className="mt-5 grid gap-4 md:grid-cols-2">
-        <CostPanel title={`[현재] AWS ${metrics.source.regionName}`} profile={metrics.source} />
-        <CostPanel title={`[이전] ${metrics.target.providerName} ${metrics.target.regionName}`} profile={metrics.target} />
-      </div>
-
+      {/* 3. 하단 조작 슬라이더 (핵심 영역 아래에 배치) */}
       <AssumptionControls report={report} setters={setters} />
-      <SensitivityPanel params={params} />
-      <p className="mt-3 text-xs font-medium text-ink/70">{RIGHTSIZING_NOT_PROVIDED}</p>
-      <EvidenceDetails />
+
+      {/* 4. 참고 계산 및 민감도·탄소 집약도 (평소에는 접혀 있음) */}
+      <details className="mt-3 rounded-lg border border-ink/15 bg-paper/30 p-3 text-xs">
+        <summary className="cursor-pointer font-semibold text-ink/80 hover:text-ink">
+          참고 계산 · DB 등급별 비교 · 민감도 테이블 · 그린옵스 펼치기
+        </summary>
+        <div className="mt-3">
+          <p className="text-[11px] text-ink/60">
+            위 가격 API 견적이 기준입니다. 아래는 화면 고정 단가 기준 DB 등급 비교 및 민감도 참고값입니다.
+          </p>
+          <HeroStats metrics={metrics} params={params} />
+          <DbBasisRows bases={bases} planDbTier={params.planDbTier} />
+          {params.targetProvider === "aws" && (
+            <p className="mt-2 text-xs text-ink/70">AWS 목적지는 ECS Fargate + RDS 공시가 기준으로 비교합니다.</p>
+          )}
+
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <CostPanel title={`[현재] AWS ${metrics.source.regionName}`} profile={metrics.source} />
+            <CostPanel title={`[이전] ${metrics.target.providerName} ${metrics.target.regionName}`} profile={metrics.target} />
+          </div>
+
+          <SensitivityPanel params={params} />
+          <p className="mt-3 text-xs font-medium text-ink/70">{RIGHTSIZING_NOT_PROVIDED}</p>
+          <EvidenceDetails />
+        </div>
+      </details>
     </section>
   );
 }

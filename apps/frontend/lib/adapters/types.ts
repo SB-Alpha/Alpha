@@ -66,7 +66,7 @@ export const AwsTargetAdapter: TargetInfraAdapter = {
   projectIdPlaceholder: "12자리 숫자 (예: 123456789012)",
   projectIdHint:
     "비워둘 시 백엔드 환경변수를 사용하며, 값과 환경변수가 모두 없으면 시작 전 오류('AWS 계정 ID가 없습니다')로 중단됩니다.",
-  isAvailable: false,
+  isAvailable: true,
   toConfig: toConfigFor("aws"),
 };
 
