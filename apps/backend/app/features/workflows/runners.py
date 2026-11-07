@@ -524,6 +524,7 @@ def run_db_migration(
     error_holder: list[Exception] = []
     latest_metrics: dict[str, Any] = {}
     latest_phase = ["init"]
+    run_aborted = threading.Event()
 
     class _ReportingProxy:
         def report(
@@ -541,11 +542,17 @@ def run_db_migration(
                     latest_phase[0] = phase
                     if phase in APP_DEPLOY_PHASES:
                         ready_event.set()
-            if ctx is not None:
+            if ctx is not None and not run_aborted.is_set():
                 # db_migration/service.py 가 종료 시점에 ctx.report("failed", ...) 또는 ctx.report("stopped", ...) 를 호출할 수 있습니다.
                 # workflows 규격상 완료/실패는 runner 반환 및 예외로 판정하므로, reportable 상태일 때만 forward 합니다.
                 if state in ("running", "waiting_approval", "paused"):
-                    ctx.report(state, progress, forwarded, message)
+                    try:
+                        ctx.report(state, progress, forwarded, message)
+                    except RunAborted:
+                        # 예외를 올리면 guide_workflow 가 복제와 VPN 을 지워 clean_up_cdc 의 전환 보호를 우회합니다.
+                        # 정리는 clean_up_cdc 만 합니다. service.stop 이 작업을 멈추면 이 추적이 그것을 보고 VPN 을 지우므로 계속 돕니다.
+                        run_aborted.set()
+                        ready_event.set()  # 기다리던 runner 가 바로 중단을 알아챕니다.
 
     # runner 가 streaming 으로 먼저 반환한 뒤의 종료는 runner 가 처리할 수 없어 지표로 남깁니다.
     handoff_lock = threading.Lock()

@@ -234,6 +234,111 @@ def test_db_migration_runner_raises_on_background_error(engine, monkeypatch):
         run_db_migration(run, ctx=None, poll_interval_s=0.01)  # type: ignore[arg-type]
 
 
+def test_aborted_run_leaves_cleanup_to_clean_up_cdc(engine, monkeypatch):
+    """추적 스레드가 중단을 보고 복제를 지우면 clean_up_cdc 의 전환 보호를 우회합니다."""
+    from app.features.db_migration.guide_workflow import Steps, run_migration
+    from app.features.workflows.context import RunAborted
+
+    run_aborted = threading.Event()
+    report_rejected = threading.Event()
+    still_tracking = threading.Event()
+    vpn_removed = threading.Event()
+    aborts = []
+    reads_after_rejection = []
+
+    class Agent:
+        job = None
+
+        def get_job(self, job_id):
+            if self.job is None:
+                raise AgentError(404, "not found")
+            if report_rejected.is_set():
+                reads_after_rejection.append(job_id)
+                if len(reads_after_rejection) > 1:
+                    still_tracking.set()
+            return self.job
+
+        def create_job(self, request):
+            self.job = {"state": "running", "phase": "cutover_ready", "progress": 70, "message": "",
+                        "metrics": {"phase": "cutover_ready"}, "outputs": {}, "evidence": {}}
+            return self.job
+
+        def abort(self, job_id):
+            aborts.append(job_id)
+            self.job = {**self.job, "state": "aborted"}
+            return self.job
+
+    class Ctx:
+        def report(self, state, progress, metrics=None, message=None):
+            if run_aborted.is_set():
+                report_rejected.set()
+                raise RunAborted("mig")
+
+    agent = Agent()
+    steps = Steps(ensure_vpn=lambda *a: None, probe=lambda *a: None, deliver_secrets=lambda *a: None,
+                  destroy_vpn=lambda job_id: vpn_removed.set())
+
+    def tracking(inp, proxy):
+        return run_migration(inp["run_id"], inp["source"], inp["target"], agent=agent, steps=steps, ctx=proxy,
+                             poll_s=0.001, log_interval_s=0.001)
+
+    monkeypatch.setattr("app.features.db_migration.service.run", tracking, raising=False)
+    run = engine.create_run(REQUEST).model_copy(update={"outputs": {
+        "planning": {"source": {"db": {"host": "source.example", "port": 5432, "database": "postgres"},
+                                "app": {"db_user": "alpha"}, "tables": ["public.users"]}},
+        "provisioning": {"target": {"db": {"private_ip": "10.0.0.5", "port": 5432, "database": "app"}}},
+    }})
+
+    assert run_db_migration(run, ctx=Ctx(), poll_interval_s=0.001)["state"] == "streaming"  # type: ignore[arg-type]
+
+    run_aborted.set()
+
+    assert still_tracking.wait(5)
+    assert aborts == []
+    assert not vpn_removed.is_set()
+
+    # clean_up_cdc 가 통과해 service.stop 이 작업을 멈추면, 추적이 aborted 를 보고 VPN 을 지웁니다.
+    agent.abort("job")
+    assert vpn_removed.wait(5)
+    assert aborts == ["job"]
+
+
+def test_abort_before_streaming_ends_the_runner_while_the_tracker_keeps_going(engine, monkeypatch):
+    from app.features.workflows.context import RunAborted
+
+    release = threading.Event()
+    kept_going = threading.Event()
+
+    def tracking(inp, proxy):
+        proxy.report("running", 0, None, "VPN 준비")
+        proxy.report("running", 1, None, "DB 접속 확인")
+        kept_going.set()
+        release.wait(timeout=5)
+        return {"state": "stopped", "job_id": inp["run_id"]}
+
+    class AbortedCtx:
+        calls = 0
+
+        def report(self, *args, **kwargs):
+            self.calls += 1
+            raise RunAborted("mig")
+
+    monkeypatch.setattr("app.features.db_migration.service.run", tracking, raising=False)
+    run = engine.create_run(REQUEST).model_copy(update={"outputs": {
+        "planning": {"source": {"tables": ["public.users"]}},
+        "provisioning": {"target": {"project_id": "p-1"}},
+    }})
+    ctx = AbortedCtx()
+
+    try:
+        with pytest.raises(RunAborted):
+            run_db_migration(run, ctx=ctx, poll_interval_s=0.001, timeout_s=5)  # type: ignore[arg-type]
+        assert kept_going.wait(5)
+        # 추적 쪽 첫 보고와 runner 의 마지막 보고뿐입니다. 중단을 안 뒤에는 저장소에 다시 묻지 않습니다.
+        assert ctx.calls == 2
+    finally:
+        release.set()
+
 
 def test_db_migration_runner_missing_outputs_raises(engine):
     run = engine.create_run(REQUEST)
