@@ -4,6 +4,7 @@ This is the service the platform migrates (AWS ECS Fargate + RDS -> GCP).
 No login, cache, queue, or file upload by design.
 """
 
+import hmac
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ from pydantic import BaseModel, Field
 from app import db
 
 SERVED_BY = os.getenv("APP_ENV", "local")
-WORKER_SECRET = os.getenv("WORKER_SECRET")
+WORKER_SECRET_HEADER = "x-alpha-worker-secret"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 COLUMNS = "id, title, description, status, created_at, updated_at"
 
@@ -64,6 +65,26 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="target-app", version="0.1.0", lifespan=lifespan)
 
 
+# Declared before request_log so that request_log wraps it and blocked requests are logged too.
+@app.middleware("http")
+async def verify_proxy_secret(request: Request, call_next):
+    """Accept only requests that came through the Cloudflare Worker when WORKER_SECRET is set (#34).
+
+    /health/* stays open because Cloud Run probes and the platform call it directly.
+    """
+    expected = os.getenv("WORKER_SECRET")
+    if not expected or request.url.path.startswith("/health/"):
+        return await call_next(request)
+    token = request.headers.get(WORKER_SECRET_HEADER, "")
+    if not hmac.compare_digest(token.encode(), expected.encode()):
+        return Response(
+            content=json.dumps({"detail": "Direct access forbidden. Requests must pass through Cloudflare Worker."}),
+            status_code=403,
+            media_type="application/json",
+        )
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def request_log(request: Request, call_next):
     """One JSON line per request: who served it, what, result, latency."""
@@ -86,21 +107,6 @@ async def request_log(request: Request, call_next):
     response.headers["X-Request-Id"] = request_id
     response.headers["X-Served-By"] = SERVED_BY
     return response
-
-
-@app.middleware("http")
-async def verify_proxy_secret(request: Request, call_next):
-    """Enforce Cloudflare Worker proxy ingress when WORKER_SECRET is configured (Issue #34)."""
-    expected = os.getenv("WORKER_SECRET") or WORKER_SECRET
-    if expected and not request.url.path.startswith("/health/"):
-        token = request.headers.get("x-alpha-worker-secret") or request.headers.get("X-Alpha-Worker-Secret")
-        if token != expected:
-            return Response(
-                content=json.dumps({"detail": "Direct access forbidden. Requests must pass through Cloudflare Worker."}),
-                status_code=403,
-                media_type="application/json",
-            )
-    return await call_next(request)
 
 
 @app.get("/health/live", tags=["health"])

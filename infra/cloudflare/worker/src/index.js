@@ -121,7 +121,10 @@ export default {
       destination.search = url.search;
       const upstream = new Request(destination, request);
       upstream.headers.set("X-Forwarded-Host", url.host);
-      if (env.WORKER_SECRET) {
+      // 프록시 확인 비밀은 목적지에만 보낸다. 원본(AWS)으로 가면 원본 쪽 로그에 남을 수 있다.
+      // 클라이언트가 같은 헤더를 보내도 그대로 넘기지 않는다.
+      upstream.headers.delete("X-Alpha-Worker-Secret");
+      if (origin === "TARGET" && env.WORKER_SECRET) {
         upstream.headers.set("X-Alpha-Worker-Secret", env.WORKER_SECRET);
       }
 
