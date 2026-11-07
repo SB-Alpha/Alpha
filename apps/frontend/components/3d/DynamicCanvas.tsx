@@ -22,21 +22,26 @@ const CanvasView = dynamic(() => import("./CanvasView"), {
   ),
 });
 
-import { securityApi } from "@/lib/securityApi";
+import { ApiError } from "@/lib/workflows";
+import {
+  SOURCE_STATUS_LABEL,
+  securityApi,
+  type BlastRadiusResponse,
+  type SecurityFeed,
+} from "@/lib/securityApi";
 
-// 영향 범위 조회는 보안 모듈의 고정 노드 id 로 부릅니다. 이 run 의 원본에서 나온 값이 아니므로 화면에 id 를 그대로 밝힙니다.
-// 토폴로지에서 노드를 고르는 연동은 PR-6(보안)에서 합니다.
-const BLAST_RADIUS_NODE_ID = "aws-ecs-workitems";
+const errorText = (e: unknown) => (e instanceof ApiError || e instanceof Error ? e.message : String(e));
 
 export function DynamicCanvas({ run, onNavigateSection }: Props) {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [selectedNode, setSelectedNode] = useState<"source" | "cdc" | "target" | null>(null);
-  const [isCompromised, setIsCompromised] = useState(false);
-  const [isQuarantined, setIsQuarantined] = useState(false);
+  // 보안 경보는 클라우드 보안 서비스에서 읽은 실제 경보만 씁니다. 패널을 열 때 읽습니다.
+  const [showSecurity, setShowSecurity] = useState(false);
+  const [feed, setFeed] = useState<SecurityFeed | null>(null);
+  const [isLoadingFeed, setIsLoadingFeed] = useState(false);
+  const [blast, setBlast] = useState<BlastRadiusResponse | null>(null);
+  const [quarantinedNode, setQuarantinedNode] = useState<string | null>(null);
   const [isRerouting, setIsRerouting] = useState(false);
-  const [isCheckingBlastRadius, setIsCheckingBlastRadius] = useState(false);
-  // 보안 API 가 돌려준 값만 씁니다. 응답 전이나 값이 없으면 null 입니다.
-  const [riskScore, setRiskScore] = useState<number | null>(null);
   const [showFullTopology, setShowFullTopology] = useState(false);
   const [rerouteNotice, setRerouteNotice] = useState<string | null>(null);
   const controlsRef = useRef<OrbitControlsHandle | null>(null);
@@ -56,105 +61,72 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
     controlsRef.current?.reset();
   };
 
-  // 영향 범위는 보안 API(/security/blast-radius) 응답이 숫자 위험도를 돌려줄 때만 3D 로 표시합니다.
-  // 로컬에서 침해 상태를 켜는 데모 토글은 없앴습니다. 보안 연동 정리는 PR-6 에서 합니다.
-  const handleToggleBlastRadius = () => {
-    if (isCheckingBlastRadius) return;
-    if (isCompromised) {
-      setIsCompromised(false);
-      setIsQuarantined(false);
-      setRiskScore(null);
-      setRerouteNotice(null);
-      return;
-    }
-    setIsCheckingBlastRadius(true);
-    securityApi.computeBlastRadius(BLAST_RADIUS_NODE_ID)
+  // 3D 표시는 원본 쪽 노드가 침해됐을 때만 원본 노드 위에 그립니다 (다른 노드는 보안 패널에만 표시).
+  const isCompromised = Boolean(blast?.compromised_node_id?.startsWith("source_"));
+  const isQuarantined = quarantinedNode !== null;
+  const riskScore = isCompromised ? (blast?.max_risk_score ?? null) : null;
+
+  const loadFeed = () => {
+    setIsLoadingFeed(true);
+    securityApi
+      .getFeed(run.run_id)
+      .then(setFeed)
+      .catch((e: unknown) => setRerouteNotice(`⚠️ 보안 경보 조회 실패: ${errorText(e)}`))
+      .finally(() => setIsLoadingFeed(false));
+  };
+
+  const handleToggleSecurity = () => {
+    const next = !showSecurity;
+    setShowSecurity(next);
+    if (next && feed === null) loadFeed();
+  };
+
+  const handleBlastRadius = (alertId: string) => {
+    securityApi
+      .computeBlastRadius(run.run_id, alertId)
       .then((res) => {
-        const score = typeof res?.max_risk_score === "number" && Number.isFinite(res.max_risk_score)
-          ? res.max_risk_score
-          : null;
-        setRiskScore(score);
-        setIsCompromised(score !== null);
-        if (score === null) setRerouteNotice("영향 범위 조회: 위험도 미제공");
+        setBlast(res);
+        setRerouteNotice(res.compromised_node_id === null ? res.reason : res.recommended_action);
       })
-      .catch((cause) => {
-        setRiskScore(null);
-        setIsCompromised(false);
-        setRerouteNotice(`⚠️ 영향 범위 조회 실패: ${cause instanceof Error ? cause.message : "unknown"}`);
-      })
-      .finally(() => setIsCheckingBlastRadius(false));
+      .catch((e: unknown) => setRerouteNotice(`⚠️ 영향 범위 조회 실패: ${errorText(e)}`));
   };
 
   const handleReroute = async () => {
     if (isRerouting) return;
-
+    const compromised = blast?.compromised_node_id ?? null;
+    const target = blast?.safe_reroute_targets[0] ?? null;
+    if (compromised === null || target === null) {
+      setRerouteNotice("이 경보에는 이 run 의 정상 대체 경로가 없어 우회를 요청하지 않았습니다.");
+      return;
+    }
     // 전환(Cutover) 진행 중에는 임의 우회 방지
     if (run.state === "running" && run.current_stage === "cutover") {
       alert("전환(Cutover) 작업이 진행 중일 때는 수동 보안 우회를 실행할 수 없습니다.");
       return;
     }
-
-    const confirmed = window.confirm(
-      "영향 범위 조회 대상 노드를 격리(Quarantine)하고 트래픽 우회를 요청하시겠습니까?\n\n※ 데이터 정합성 보호를 위해 원본 쓰기는 503 차단되며 읽기 트래픽만 우회됩니다."
-    );
-    if (!confirmed) return;
-
+    if (!window.confirm(`[${compromised}] 를 격리하고 [${target}] 로 우회하도록 Worker 에 요청할까요?`)) return;
     setIsRerouting(true);
     try {
-      const res = await fetch("/api/security/reroute", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          compromised_node_id: "aws-ecs-workitems",
-          target_reroute_id: "gcp-cloud-run",
-          quarantine: true,
-          run_id: run.run_id,
-        }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        setIsQuarantined(true);
-        const prefix = data.cloudflare_synced ? "Cloudflare 에지: " : "데모 시뮬레이션: ";
-        setRerouteNotice(`${prefix}${data.message}`);
-      } else {
-        const errData = await res.json().catch(() => null);
-        const errDetail = errData?.detail || `HTTP ${res.status}`;
-        setIsQuarantined(false);
-        setRerouteNotice(`⚠️ 우회 실패: ${errDetail}`);
-      }
-    } catch (cause) {
-      setIsQuarantined(false);
-      setRerouteNotice(`⚠️ 우회 실패: 네트워크 오류 (${cause instanceof Error ? cause.message : "unknown"})`);
+      const res = await securityApi.executeReroute(run.run_id, compromised, target);
+      setQuarantinedNode(compromised);
+      setRerouteNotice(res.message);
+    } catch (e) {
+      setRerouteNotice(`⚠️ 우회 실패: ${errorText(e)}`);
     } finally {
       setIsRerouting(false);
     }
   };
 
   const handleReleaseQuarantine = async () => {
-    if (isRerouting) return;
-    const confirmed = window.confirm("보안 격리를 해제하고 정상 원본 트래픽(AWS)으로 롤백 복원하시겠습니까?");
-    if (!confirmed) return;
-
+    if (isRerouting || quarantinedNode === null) return;
+    if (!window.confirm(`[${quarantinedNode}] 격리를 해제할까요?`)) return;
     setIsRerouting(true);
     try {
-      const res = await fetch("/api/security/release", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ node_id: "aws-ecs-workitems" }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        setIsQuarantined(false);
-        const prefix = data.cloudflare_synced ? "Cloudflare 에지: " : "데모 시뮬레이션: ";
-        setRerouteNotice(`${prefix}${data.message}`);
-      } else {
-        const errData = await res.json().catch(() => null);
-        setRerouteNotice(`⚠️ 해제 실패: ${errData?.detail || `HTTP ${res.status}`}`);
-      }
-    } catch (cause) {
-      setRerouteNotice(`⚠️ 해제 실패: 네트워크 오류 (${cause instanceof Error ? cause.message : "unknown"})`);
+      const res = await securityApi.releaseQuarantine(quarantinedNode);
+      setQuarantinedNode(null);
+      setRerouteNotice(res.message);
+    } catch (e) {
+      setRerouteNotice(`⚠️ 해제 실패: ${errorText(e)}`);
     } finally {
       setIsRerouting(false);
     }
@@ -217,16 +189,15 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
                 ))}
                 <button
                   type="button"
-                  onClick={handleToggleBlastRadius}
-                  disabled={isCheckingBlastRadius}
-                  className={`rounded border px-2 py-0.5 font-mono text-[11px] transition-all active:scale-[0.96] disabled:opacity-50 ${
-                    isCompromised
+                  onClick={handleToggleSecurity}
+                  className={`rounded border px-2 py-0.5 font-mono text-[11px] transition-all active:scale-[0.96] ${
+                    showSecurity
                       ? "border-red-600 bg-red-600 text-white shadow-xs"
                       : "border-ink/20 bg-paper text-ink/75 hover:border-red-500 hover:text-red-600"
                   }`}
-                  title={`보안 API(/security/blast-radius)에 고정 노드 ${BLAST_RADIUS_NODE_ID} 의 영향 범위를 조회하고, 숫자 위험도가 오면 3D 로 표시합니다. 이 run 의 원본과 별개인 값입니다`}
+                  title="GuardDuty·Security Command Center·Defender for Cloud 의 실제 경보를 이 run 기준으로 봅니다"
                 >
-                  {isCheckingBlastRadius ? "조회 중…" : isCompromised ? "🛡️ 영향 범위 표시 끄기" : "🛡️ 영향 범위 조회"}
+                  {showSecurity ? "🛡️ 보안 경보 닫기" : "🛡️ 보안 경보"}
                 </button>
                 {isQuarantined && (
                   <button
@@ -234,7 +205,7 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
                     onClick={handleReleaseQuarantine}
                     disabled={isRerouting}
                     className="rounded border border-amber-600 bg-amber-500 px-2 py-0.5 font-mono text-[11px] font-semibold text-white shadow-xs transition-all hover:bg-amber-600 active:scale-[0.96] disabled:opacity-50"
-                    title="격리 상태를 해제하고 원본 트래픽(AWS)으로 롤백 복원"
+                    title="격리를 해제하고 Worker 에 반영합니다"
                   >
                     {isRerouting ? "해제 중..." : "↩️ 격리 해제 (Rollback)"}
                   </button>
@@ -271,6 +242,70 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
           </button>
         </div>
       </div>
+
+      {showSecurity && (
+        <div className="space-y-2 border-b border-ink/15 bg-paper/50 px-4 py-2 text-xs">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {isLoadingFeed && <span className="text-ink/50">보안 경보 조회 중…</span>}
+            {feed?.sources.map((src) => (
+              <span
+                key={`${src.provider}-${src.scope ?? ""}`}
+                title={src.message ?? undefined}
+                className={`rounded border px-1.5 py-0.5 font-mono text-[11px] ${
+                  src.status === "ok" ? "border-emerald-300 bg-emerald-50 text-emerald-900" : "border-amber-300 bg-amber-50 text-amber-900"
+                }`}
+              >
+                {src.service}
+                {src.scope ? ` (${src.scope})` : ""} · {SOURCE_STATUS_LABEL[src.status]}
+                {src.status === "ok" ? ` ${src.count ?? 0}건 확인` : ""}
+              </span>
+            ))}
+            {feed && (
+              <button type="button" onClick={loadFeed} className="text-[11px] text-ink/60 underline hover:text-ink">
+                다시 조회
+              </button>
+            )}
+          </div>
+          {feed && feed.alerts.length === 0 && (
+            <p className="text-ink/60">
+              {feed.sources.some((s) => s.status === "ok")
+                ? "확인한 클라우드에서 활성 경보가 없습니다. 확인하지 못한 클라우드는 위 표시를 보세요 (0건과 다릅니다)."
+                : "경보를 확인한 클라우드가 없습니다 (0건이 아님). 위 표시의 이유를 해결하면 다시 조회하세요."}
+            </p>
+          )}
+          {feed && feed.alerts.length > 0 && (
+            <ul className="max-h-40 space-y-1 overflow-y-auto">
+              {feed.alerts.map((alert) => (
+                <li key={alert.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-ink/10 bg-white px-2 py-1">
+                  <span className="font-mono text-[11px]">
+                    <strong className={alert.severity === "CRITICAL" || alert.severity === "HIGH" ? "text-red-700" : "text-ink"}>
+                      {alert.severity}
+                    </strong>{" "}
+                    {alert.provider.toUpperCase()} · {alert.threat_category} · {alert.resource_id}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleBlastRadius(alert.id)}
+                    className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+                      blast?.root_alert.id === alert.id ? "border-red-600 bg-red-600 text-white" : "border-ink/20 hover:border-red-500"
+                    }`}
+                  >
+                    영향 범위
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {blast && blast.compromised_node_id !== null && (
+            <p className="font-mono text-[11px] text-ink/75">
+              영향 노드:{" "}
+              {blast.impacted_nodes
+                .map((n) => `${n.name}(${n.hop_distance}홉 ${(n.risk_score * 100).toFixed(0)}%)`)
+                .join(" → ")}
+            </p>
+          )}
+        </div>
+      )}
 
       {rerouteNotice && (
         <div className="flex items-center justify-between border-b border-amber-300 bg-amber-50 px-4 py-1.5 text-xs font-mono text-amber-900">

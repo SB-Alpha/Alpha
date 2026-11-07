@@ -1,353 +1,215 @@
+"""보안 경보와 영향 범위(blast radius).
+
+경보는 sources.py 가 클라우드 보안 서비스에서 읽은 것만 씁니다. 영향 범위는 run 의 실제 토폴로지
+(workflows/topology.py 가 run 출력에서 만든 노드·간선) 위에서 계산합니다. security 가 workflows 를 직접
+import 하지 않도록 토폴로지를 돌려주는 함수를 main.py 가 넣어 줍니다 (set_topology_provider).
+경보 자원과 맞는 run 노드가 없으면 영향 범위를 지어내지 않고 빈 결과와 이유를 돌려줍니다.
+"""
+
+from __future__ import annotations
+
 import math
 import time
-from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from collections.abc import Callable
+from typing import Any
+
+from fastapi import HTTPException
+
+from . import sources
 from .schemas import (
     AlertSeverity,
     BlastRadiusNode,
     BlastRadiusResponse,
+    ResourceType,
     RerouteRequest,
     RerouteResponse,
     SecurityAlert,
+    SecurityFeed,
 )
 
-SEVERITY_WEIGHTS: Dict[AlertSeverity, float] = {
-    "CRITICAL": 1.0,
-    "HIGH": 0.8,
-    "MEDIUM": 0.5,
-    "LOW": 0.2,
-}
+SEVERITY_WEIGHTS: dict[AlertSeverity, float] = {"CRITICAL": 1.0, "HIGH": 0.8, "MEDIUM": 0.5, "LOW": 0.2}
 
-# 기본 토폴로지 의존성 그래프 (노드 간 연결 관계)
-DEFAULT_TOPOLOGY_EDGES = {
-    "aws-ecs-workitems": [
-        ("aws-rds-postgres", "database_link"),
-        ("aws-iam-task-execution", "iam_trust"),
-        ("onprem-vpn-gateway", "vpn_peering"),
-    ],
-    "aws-rds-postgres": [
-        ("aws-ebs-volume", "storage_mount"),
-        ("aws-kms-key", "crypto_key"),
-    ],
-    "onprem-vpn-gateway": [
-        ("onprem-cdc-node", "network_tunnel"),
-    ],
-    "gcp-cloud-run": [
-        ("gcp-cloud-sql", "database_link"),
-    ],
+_KIND_TO_RESOURCE: dict[str, ResourceType] = {
+    "app": "container",
+    "database": "database",
+    "cdc_agent": "container",
+    "vpn": "network",
+    "edge": "network",
 }
+# 이름이 너무 짧으면 다른 자원 id 안에 우연히 들어 있을 수 있어 맞추지 않습니다
+MIN_MATCH_LENGTH = 4
 
-DEFAULT_NODE_METADATA = {
-    "aws-ecs-workitems": {
-        "name": "AWS ECS Fargate (work-items-app)",
-        "provider": "aws",
-        "resource_type": "container",
-    },
-    "aws-rds-postgres": {
-        "name": "AWS RDS PostgreSQL (db-alpha-prod)",
-        "provider": "aws",
-        "resource_type": "database",
-    },
-    "aws-iam-task-execution": {
-        "name": "AWS IAM Role (ecsTaskExecutionRole)",
-        "provider": "aws",
-        "resource_type": "iam_role",
-    },
-    "aws-ebs-volume": {
-        "name": "AWS EBS gp3 Volume (vol-03f918e7)",
-        "provider": "aws",
-        "resource_type": "vm",
-    },
-    "aws-kms-key": {
-        "name": "AWS KMS CMK (alias/alpha-rds-key)",
-        "provider": "aws",
-        "resource_type": "iam_role",
-    },
-    "onprem-vpn-gateway": {
-        "name": "On-Premises IPsec DRG Tunnel",
-        "provider": "onprem",
-        "resource_type": "network",
-    },
-    "onprem-cdc-node": {
-        "name": "On-Prem Debezium CDC Connector",
-        "provider": "onprem",
-        "resource_type": "container",
-    },
-    "gcp-cloud-run": {
-        "name": "GCP Cloud Run (target-app-service)",
-        "provider": "gcp",
-        "resource_type": "container",
-    },
-    "gcp-cloud-sql": {
-        "name": "GCP Cloud SQL PostgreSQL (alpha-replica)",
-        "provider": "gcp",
-        "resource_type": "database",
-    },
-}
+TopologyProvider = Callable[[str], dict[str, Any] | None]
+
+
+def match_node(alert: SecurityAlert, nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """경보 자원 id 안에 run 노드의 실제 자원 이름이 들어 있으면 그 노드입니다. 같은 클라우드 노드만 봅니다."""
+    resource_id = alert.resource_id.lower()
+    best = None
+    for node in nodes:
+        name = node.get("resource")
+        if not isinstance(name, str) or len(name) < MIN_MATCH_LENGTH:
+            continue
+        if node.get("cloud") not in (None, alert.provider):
+            continue
+        if name.lower() in resource_id and (best is None or len(name) > len(best["resource"])):
+            best = node
+    return best
 
 
 class SecurityGovernanceService:
-    def __init__(self) -> None:
-        self._alerts: List[SecurityAlert] = [
-            SecurityAlert(
-                id="sec-alert-gd-001",
-                provider="aws",
-                severity="CRITICAL",
-                resource_type="container",
-                resource_id="arn:aws:ecs:ap-northeast-2:123456789012:task/work-items-app/aws-ecs-workitems",
-                threat_category="UnauthorizedAccess:EC2/MaliciousIPCaller.Custom",
-                description="GuardDuty detected outbound communication to a known Tor exit node with abnormal egress traffic spikes (CVE-2026-4192 RCE suspect, 데모 시뮬레이션 데이터).",
-                detected_at=datetime.now(timezone.utc),
-            ),
-            SecurityAlert(
-                id="sec-alert-scc-002",
-                provider="gcp",
-                severity="LOW",
-                resource_type="database",
-                resource_id="//cloudresourcemanager.googleapis.com/projects/softbank-alpha/cloudsql/instances/alpha-replica",
-                threat_category="PUBLIC_SQL_INSTANCE_DISABLED",
-                description="SCC audit verified Cloud SQL instance enforces Private Services Access (VPC peering only, 0 public IP, 데모 시뮬레이션 데이터).",
-                detected_at=datetime.now(timezone.utc),
-            ),
-        ]
+    def __init__(self, fetch: Callable[[list[str]], tuple[list[SecurityAlert], list[Any]]] = sources.fetch_all) -> None:
+        self._fetch = fetch
+        self._topology: TopologyProvider | None = None
         self._quarantined_nodes: set[str] = set()
+        self._reroute_target: str | None = None
 
-    def get_alerts(self) -> List[SecurityAlert]:
-        return self._alerts
+    def set_topology_provider(self, provider: TopologyProvider) -> None:
+        self._topology = provider
 
-    def calculate_blast_radius(
-        self,
-        compromised_node_id: str = "aws-ecs-workitems",
-        depth_hops: int = 2,
-        alpha_decay: float = 0.45,
-    ) -> BlastRadiusResponse:
-        # 루트 알림 매칭: node_id가 resource_id에 포함된 알림 검색
-        matched_alert = next(
-            (a for a in self._alerts if compromised_node_id and compromised_node_id in a.resource_id),
-            None,
-        )
+    def _run_topology(self, run_id: str | None) -> dict[str, Any] | None:
+        if run_id is None or self._topology is None:
+            return None
+        return self._topology(run_id)
 
-        if matched_alert:
-            root_alert = matched_alert
-            base_weight = SEVERITY_WEIGHTS.get(root_alert.severity, 0.5)
-        else:
-            # 알림이 없는 임의 노드일 경우 기본 시뮬레이션 알림 생성
-            root_alert = SecurityAlert(
-                id=f"sec-sim-{compromised_node_id}",
-                provider=DEFAULT_NODE_METADATA.get(compromised_node_id, {}).get("provider", "aws"),
-                severity="LOW",
-                resource_type=DEFAULT_NODE_METADATA.get(compromised_node_id, {}).get("resource_type", "vm"),
-                resource_id=f"simulated://{compromised_node_id}",
-                threat_category="SuspiciousActivity:GenericSimulation",
-                description=f"시뮬레이션: [{compromised_node_id}] 잠재적 위협 탐지 (데모 데이터)",
-                detected_at=datetime.now(timezone.utc),
+    # -- 경보 -------------------------------------------------------------------------------
+
+    def get_feed(self, run_id: str | None = None) -> SecurityFeed:
+        topology = self._run_topology(run_id)
+        regions = sorted({
+            n["region"] for n in (topology or {}).get("nodes", [])
+            if n.get("cloud") == "aws" and isinstance(n.get("region"), str) and n["region"]
+        })
+        alerts, statuses = self._fetch(regions)
+        return SecurityFeed(alerts=alerts, sources=statuses)
+
+    # -- 영향 범위 ---------------------------------------------------------------------------
+
+    def calculate_blast_radius(self, run_id: str, alert_id: str, depth_hops: int = 2,
+                               alpha_decay: float = 0.45) -> BlastRadiusResponse:
+        topology = self._run_topology(run_id)
+        if topology is None:
+            raise HTTPException(404, f"run {run_id} 의 토폴로지를 찾지 못했습니다")
+        feed = self.get_feed(run_id)
+        alert = next((a for a in feed.alerts if a.id == alert_id), None)
+        if alert is None:
+            raise HTTPException(404, "그 경보가 지금 클라우드 경보 목록에 없습니다 (해결됐거나 보관됐을 수 있음)")
+
+        nodes = topology.get("nodes", [])
+        root = match_node(alert, nodes)
+        if root is None:
+            return BlastRadiusResponse(
+                root_alert=alert, compromised_node_id=None, max_risk_score=None, impacted_nodes=[],
+                recommended_action=None, safe_reroute_targets=[],
+                reason="경보 자원과 맞는 이 run 의 자원이 없어 영향 범위를 계산하지 않았습니다",
             )
-            base_weight = SEVERITY_WEIGHTS["LOW"]
 
-        # BFS 로 의존성 그래프 탐색 및 전파 점수 연산: S(v) = weight * exp(-alpha * hop)
-        visited = {compromised_node_id: 0}
-        queue = [(compromised_node_id, 0)]
-        nodes: List[BlastRadiusNode] = []
+        by_id = {n["id"]: n for n in nodes}
+        adjacency: dict[str, list[tuple[str, str]]] = {}
+        for e in topology.get("edges", []):
+            a, b, kind = e.get("from"), e.get("to"), e.get("kind", "link")
+            if a in by_id and b in by_id:
+                adjacency.setdefault(a, []).append((b, kind))
+                adjacency.setdefault(b, []).append((a, kind))
 
-        # 0 hop (루트 침해 노드)
-        meta_root = DEFAULT_NODE_METADATA.get(
-            compromised_node_id,
-            {"name": compromised_node_id, "provider": root_alert.provider, "resource_type": root_alert.resource_type},
-        )
-        nodes.append(
-            BlastRadiusNode(
-                node_id=compromised_node_id,
-                name=meta_root["name"],
-                provider=meta_root["provider"],
-                resource_type=meta_root["resource_type"],
-                risk_score=round(base_weight, 3),
-                hop_distance=0,
-                dependency_type="direct_ingress",
-                is_compromised=True,
-                quarantined=compromised_node_id in self._quarantined_nodes,
-            )
-        )
-
+        weight = SEVERITY_WEIGHTS[alert.severity]
+        impacted = [self._node(root, weight, 0, "compromised", True)]
+        seen = {root["id"]: 0}
+        queue = [root["id"]]
         while queue:
-            curr_node, curr_hop = queue.pop(0)
-            if curr_hop >= depth_hops:
+            current = queue.pop(0)
+            hop = seen[current]
+            if hop >= depth_hops:
                 continue
+            for neighbor, kind in adjacency.get(current, []):
+                if neighbor in seen:
+                    continue
+                seen[neighbor] = hop + 1
+                queue.append(neighbor)
+                score = round(weight * math.exp(-alpha_decay * (hop + 1)), 3)
+                impacted.append(self._node(by_id[neighbor], score, hop + 1, kind, False))
 
-            for neighbor, dep_type in DEFAULT_TOPOLOGY_EDGES.get(curr_node, []):
-                next_hop = curr_hop + 1
-                if neighbor not in visited or visited[neighbor] > next_hop:
-                    visited[neighbor] = next_hop
-                    queue.append((neighbor, next_hop))
-
-                    # 감쇄 공식: S = base_weight * exp(-alpha * hop)
-                    risk_score = round(base_weight * math.exp(-alpha_decay * next_hop), 3)
-                    meta = DEFAULT_NODE_METADATA.get(
-                        neighbor,
-                        {"name": neighbor, "provider": "aws", "resource_type": "vm"},
-                    )
-                    nodes.append(
-                        BlastRadiusNode(
-                            node_id=neighbor,
-                            name=meta["name"],
-                            provider=meta["provider"],
-                            resource_type=meta["resource_type"],
-                            risk_score=risk_score,
-                            hop_distance=next_hop,
-                            dependency_type=dep_type,
-                            is_compromised=False,
-                            quarantined=neighbor in self._quarantined_nodes,
-                        )
-                    )
-
-        safe_targets = ["gcp-cloud-run", "azure-container-app"]
-
+        safe = self._safe_targets(root, by_id)
+        action = (f"[{root['label']}] 를 격리하고 트래픽을 [{by_id[safe[0]]['label']}] 로 돌리는 것을 검토하세요"
+                  if safe else f"[{root['label']}] 를 격리할 수 있는 정상 대체 경로가 이 run 에 없습니다")
         return BlastRadiusResponse(
-            root_alert=root_alert,
-            compromised_node_id=compromised_node_id,
-            max_risk_score=base_weight,
-            impacted_nodes=nodes,
-            recommended_action=(
-                f"침해된 [{compromised_node_id}] 인그레스 차단 및 무중단으로 "
-                f"GCP Cloud Run [{safe_targets[0]}] 으로 트래픽 우회 권장"
-            ),
-            safe_reroute_targets=safe_targets,
+            root_alert=alert, compromised_node_id=root["id"], max_risk_score=weight, impacted_nodes=impacted,
+            recommended_action=action, safe_reroute_targets=safe,
         )
 
-    def execute_reroute(self, request: RerouteRequest) -> RerouteResponse:
-        start_ts = time.perf_counter()
+    def _node(self, node: dict[str, Any], score: float, hop: int, dependency: str, compromised: bool) -> BlastRadiusNode:
+        return BlastRadiusNode(
+            node_id=node["id"], name=node.get("label") or node["id"], provider=node.get("cloud"),
+            resource_type=_KIND_TO_RESOURCE.get(node.get("kind", ""), "other"), resource=node.get("resource"),
+            risk_score=score, hop_distance=hop, dependency_type=dependency, is_compromised=compromised,
+            quarantined=node["id"] in self._quarantined_nodes,
+        )
 
-        from fastapi import HTTPException
+    @staticmethod
+    def _safe_targets(root: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> list[str]:
+        """원본 쪽이 침해됐고 목적지 앱이 배포까지 끝났을 때만 목적지 앱을 대체 경로로 냅니다."""
+        target = by_id.get("target_app")
+        if root["id"].startswith("source_") and target and target.get("state") == "succeeded":
+            return ["target_app"]
+        return []
+
+    # -- 격리·우회 (Cloudflare Worker) --------------------------------------------------------
+
+    @staticmethod
+    def _worker() -> Any:
         from app.features.provisioning.worker_client import WorkerClient
 
-        # 1. 대상 타깃 검증 (Juho 리뷰 반영: 격리 전 target 설정 여부 확인)
-        if not request.target_reroute_id or not request.target_reroute_id.strip():
-            raise HTTPException(status_code=400, detail="reroute_target_required: target_reroute_id must be provided")
-
-        worker = None
         try:
             worker = WorkerClient.from_env()
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Worker configuration error: {exc}") from None
+        except Exception as exc:  # noqa: BLE001 - 설정 오류는 종류만 알립니다
+            raise HTTPException(502, f"Worker 설정 오류 ({type(exc).__name__})") from None
+        if worker is None:
+            # 예전에는 Worker 없이 '격리됨' 을 돌려줬습니다. 실제로 막지 않았으므로 거절합니다.
+            raise HTTPException(503, "WORKER_URL 이 설정되지 않아 격리·우회를 하지 않았습니다")
+        return worker
 
-        if worker is not None:
-            # Worker 가 설정되어 있는 경우: Worker 동기화를 먼저 호출하고 실패 시 502 및 상태 롤백
-            candidate_isolated = set(self._quarantined_nodes)
-            if request.quarantine:
-                candidate_isolated.add(request.compromised_node_id)
-            else:
-                candidate_isolated.discard(request.compromised_node_id)
-
-            try:
-                worker.set_quarantine(
-                    isolated_nodes=list(candidate_isolated),
-                    reroute_target=request.target_reroute_id,
-                )
-            except Exception as exc:
-                # Worker 호출 실패 시: 로컬 격리 상태를 변경하지 않고 502 Bad Gateway 반환
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Worker quarantine sync failed: {exc}",
-                ) from None
-
-            # Worker 동기화 성공 시에만 로컬 격리 목록 반영
-            if request.quarantine:
-                self._quarantined_nodes.add(request.compromised_node_id)
-            else:
-                self._quarantined_nodes.discard(request.compromised_node_id)
-
-            elapsed_ms = round((time.perf_counter() - start_ts) * 1000, 2)
-            return RerouteResponse(
-                status="rerouted",
-                quarantined_node_id=request.compromised_node_id,
-                active_target_id=request.target_reroute_id,
-                reroute_latency_ms=elapsed_ms,
-                message=(
-                    f"보안 위험 노드 [{request.compromised_node_id}] 가 격리되었습니다. "
-                    f"트래픽이 [{request.target_reroute_id}] 으로 우회되었습니다 "
-                    f"(Cloudflare Worker 에지 동기화 완료, 처리 시간: {elapsed_ms}ms)."
-                ),
-                cloudflare_synced=True,
-            )
-
-        # Worker 미설정 (시뮬레이션/데모 모드):
-        # cloudflare_synced=False 로 두고 메시지에서 "우회되었습니다"는 제외
+    def execute_reroute(self, request: RerouteRequest) -> RerouteResponse:
+        if not request.target_reroute_id.strip():
+            raise HTTPException(400, "target_reroute_id 가 필요합니다")
+        start = time.perf_counter()
+        worker = self._worker()
+        isolated = set(self._quarantined_nodes)
         if request.quarantine:
-            self._quarantined_nodes.add(request.compromised_node_id)
+            isolated.add(request.compromised_node_id)
         else:
-            self._quarantined_nodes.discard(request.compromised_node_id)
-
-        elapsed_ms = round((time.perf_counter() - start_ts) * 1000, 2)
+            isolated.discard(request.compromised_node_id)
+        try:
+            worker.set_quarantine(isolated_nodes=sorted(isolated), reroute_target=request.target_reroute_id)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"Worker 격리 동기화 실패 ({type(exc).__name__})") from None
+        self._quarantined_nodes = isolated
+        self._reroute_target = request.target_reroute_id
+        elapsed = round((time.perf_counter() - start) * 1000, 2)
         return RerouteResponse(
-            status="quarantined",
-            quarantined_node_id=request.compromised_node_id,
-            active_target_id=request.target_reroute_id,
-            reroute_latency_ms=elapsed_ms,
-            message=(
-                f"보안 위험 노드 [{request.compromised_node_id}] 격리 시뮬레이션 완료 "
-                f"(Worker 미설정, 데모 모드, 처리 시간: {elapsed_ms}ms)."
-            ),
-            cloudflare_synced=False,
+            status="rerouted", quarantined_node_id=request.compromised_node_id,
+            active_target_id=request.target_reroute_id, reroute_latency_ms=elapsed, cloudflare_synced=True,
+            message=(f"[{request.compromised_node_id}] 를 격리하고 [{request.target_reroute_id}] 로 우회하도록 "
+                     f"Worker 에 반영했습니다 ({elapsed}ms)."),
         )
 
     def release_quarantine(self, node_id: str | None = None) -> RerouteResponse:
-        start_ts = time.perf_counter()
-
-        from fastapi import HTTPException
-        from app.features.provisioning.worker_client import WorkerClient
-
-        target_name = node_id or "전체 노드"
-
-        worker = None
-        try:
-            worker = WorkerClient.from_env()
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Worker configuration error: {exc}") from None
-
-        if worker is not None:
-            candidate_isolated = set(self._quarantined_nodes)
-            if node_id:
-                candidate_isolated.discard(node_id)
-            else:
-                candidate_isolated.clear()
-
-            try:
-                worker.set_quarantine(
-                    isolated_nodes=list(candidate_isolated),
-                    reroute_target=None if not candidate_isolated else "gcp-cloud-run",
-                )
-            except Exception as exc:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Worker quarantine release failed: {exc}",
-                ) from None
-
-            if node_id:
-                self._quarantined_nodes.discard(node_id)
-            else:
-                self._quarantined_nodes.clear()
-
-            elapsed_ms = round((time.perf_counter() - start_ts) * 1000, 2)
-            return RerouteResponse(
-                status="released",
-                quarantined_node_id=target_name,
-                active_target_id="aws-ecs-workitems",
-                reroute_latency_ms=elapsed_ms,
-                message=f"[{target_name}] 격리 해제 완료 (Cloudflare Worker 에지 동기화 완료, 처리 시간: {elapsed_ms}ms).",
-                cloudflare_synced=True,
-            )
-
-        # Worker 미설정 (시뮬레이션 모드)
+        start = time.perf_counter()
+        worker = self._worker()
+        isolated = set(self._quarantined_nodes)
         if node_id:
-            self._quarantined_nodes.discard(node_id)
+            isolated.discard(node_id)
         else:
-            self._quarantined_nodes.clear()
-
-        elapsed_ms = round((time.perf_counter() - start_ts) * 1000, 2)
+            isolated.clear()
+        target = self._reroute_target if isolated else None
+        try:
+            worker.set_quarantine(isolated_nodes=sorted(isolated), reroute_target=target)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"Worker 격리 해제 실패 ({type(exc).__name__})") from None
+        self._quarantined_nodes = isolated
+        self._reroute_target = target
+        elapsed = round((time.perf_counter() - start) * 1000, 2)
+        name = node_id or "전체 노드"
         return RerouteResponse(
-            status="released",
-            quarantined_node_id=target_name,
-            active_target_id="aws-ecs-workitems",
-            reroute_latency_ms=elapsed_ms,
-            message=f"[{target_name}] 격리 해제 시뮬레이션 완료 (Worker 미설정, 처리 시간: {elapsed_ms}ms).",
-            cloudflare_synced=False,
+            status="released", quarantined_node_id=name, active_target_id=target, reroute_latency_ms=elapsed,
+            cloudflare_synced=True, message=f"[{name}] 격리 해제를 Worker 에 반영했습니다 ({elapsed}ms).",
         )
