@@ -33,6 +33,10 @@ class AppInfo(BaseModel):
     health_check_path: str | None = None
     env_vars: dict[str, str] = Field(default_factory=dict)  # 비밀이 아닌 환경 변수 이름 → 값
     secret_refs: dict[str, str] = Field(default_factory=dict)  # 환경 변수 이름 → AWS 비밀 참조(ARN). 값 금지
+    # Cloud Run 으로 옮길 수 없는 ECS 설정 (예: privileged, UDP 포트, 호스트 경로 마운트). None = 태스크 정의를 보지 않음(직접 입력)
+    cloud_run_blockers: list[str] | None = None
+    # 옮기되 사람이 확인해야 하는 ECS 설정 (예: 시작 명령 재정의, 함께 도는 다른 컨테이너). 값은 넣지 않고 이름만
+    cloud_run_notes: list[str] = Field(default_factory=list)
 
 
 class TableInfo(BaseModel):
@@ -99,6 +103,7 @@ class PlanCheck(BaseModel):
         "primary_keys_present",
         "table_names_supported",
         "replication_slot_available",
+        "cloud_run_compatible",
         "image_available",
     ]
     title: str
