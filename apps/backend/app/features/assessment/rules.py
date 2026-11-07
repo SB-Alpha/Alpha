@@ -32,15 +32,35 @@ DEFAULT_CPU = 1  # vCPU
 DEFAULT_MEMORY = 512  # MiB
 
 
-# RDS 인스턴스 클래스 → 메모리(GiB). MVP 대상 크기만 둡니다.
-RDS_MEMORY_GIB = {
-    "db.t3.micro": 1, "db.t4g.micro": 1,
-    "db.t3.small": 2, "db.t4g.small": 2,
+# RDS 인스턴스 클래스 → (메모리 GiB, vCPU). 클래스 이름은 "db.<계열>.<크기>" 이다.
+# 2026-11-08 에 ap-northeast-2 에서 PostgreSQL 16 으로 주문 가능한 클래스 142개를 EC2 API(describe-instance-types)로 조회한 값이다.
+# RDS 클래스는 같은 이름의 EC2 인스턴스와 메모리·vCPU 가 같다. 이 표에 없는 클래스는 메모리를 모르는 값(None)으로 두고,
+# 목적지(provisioning)는 DB 등급을 따로 정하지 않고 기본값을 쓴다. 새 클래스를 넣을 때도 같은 API 로 확인한다.
+_RDS_CLASS_SIZES: dict[str, dict[str, tuple[int | float, int]]] = {
+    "t3": {"micro": (1, 2), "small": (2, 2), "medium": (4, 2), "large": (8, 2), "xlarge": (16, 4), "2xlarge": (32, 8)},
+    "t4g": {"micro": (1, 2), "small": (2, 2), "medium": (4, 2), "large": (8, 2), "xlarge": (16, 4), "2xlarge": (32, 8)},
+    "m5": {"large": (8, 2), "xlarge": (16, 4), "2xlarge": (32, 8), "4xlarge": (64, 16), "8xlarge": (128, 32), "12xlarge": (192, 48), "16xlarge": (256, 64), "24xlarge": (384, 96)},
+    "m5d": {"large": (8, 2), "xlarge": (16, 4), "2xlarge": (32, 8), "4xlarge": (64, 16), "8xlarge": (128, 32), "12xlarge": (192, 48), "16xlarge": (256, 64), "24xlarge": (384, 96)},
+    "m6g": {"large": (8, 2), "xlarge": (16, 4), "2xlarge": (32, 8), "4xlarge": (64, 16), "8xlarge": (128, 32), "12xlarge": (192, 48), "16xlarge": (256, 64)},
+    "m6gd": {"large": (8, 2), "xlarge": (16, 4), "2xlarge": (32, 8), "4xlarge": (64, 16), "8xlarge": (128, 32), "12xlarge": (192, 48), "16xlarge": (256, 64)},
+    "m6i": {"large": (8, 2), "xlarge": (16, 4), "2xlarge": (32, 8), "4xlarge": (64, 16), "8xlarge": (128, 32), "12xlarge": (192, 48), "16xlarge": (256, 64), "24xlarge": (384, 96), "32xlarge": (512, 128)},
+    "m7g": {"large": (8, 2), "xlarge": (16, 4), "2xlarge": (32, 8), "4xlarge": (64, 16), "8xlarge": (128, 32), "12xlarge": (192, 48), "16xlarge": (256, 64)},
+    "m7i": {"large": (8, 2), "xlarge": (16, 4), "2xlarge": (32, 8), "4xlarge": (64, 16), "8xlarge": (128, 32), "12xlarge": (192, 48), "16xlarge": (256, 64), "24xlarge": (384, 96), "48xlarge": (768, 192)},
+    "m8g": {"large": (8, 2), "xlarge": (16, 4), "2xlarge": (32, 8), "4xlarge": (64, 16), "8xlarge": (128, 32), "12xlarge": (192, 48), "16xlarge": (256, 64), "24xlarge": (384, 96), "48xlarge": (768, 192)},
+    "r5": {"large": (16, 2), "xlarge": (32, 4), "2xlarge": (64, 8), "4xlarge": (128, 16), "8xlarge": (256, 32), "12xlarge": (384, 48), "16xlarge": (512, 64), "24xlarge": (768, 96)},
+    "r5d": {"large": (16, 2), "xlarge": (32, 4), "2xlarge": (64, 8), "4xlarge": (128, 16), "8xlarge": (256, 32), "12xlarge": (384, 48), "16xlarge": (512, 64), "24xlarge": (768, 96)},
+    "r6g": {"large": (16, 2), "xlarge": (32, 4), "2xlarge": (64, 8), "4xlarge": (128, 16), "8xlarge": (256, 32), "12xlarge": (384, 48), "16xlarge": (512, 64)},
+    "r6i": {"large": (16, 2), "xlarge": (32, 4), "2xlarge": (64, 8), "4xlarge": (128, 16), "8xlarge": (256, 32), "12xlarge": (384, 48), "16xlarge": (512, 64), "24xlarge": (768, 96), "32xlarge": (1024, 128)},
+    "r7g": {"large": (16, 2), "xlarge": (32, 4), "2xlarge": (64, 8), "4xlarge": (128, 16), "8xlarge": (256, 32), "12xlarge": (384, 48), "16xlarge": (512, 64)},
+    "r7i": {"large": (16, 2), "xlarge": (32, 4), "2xlarge": (64, 8), "4xlarge": (128, 16), "8xlarge": (256, 32), "12xlarge": (384, 48), "16xlarge": (512, 64), "24xlarge": (768, 96), "48xlarge": (1536, 192)},
+    "r8g": {"large": (16, 2), "xlarge": (32, 4), "2xlarge": (64, 8), "4xlarge": (128, 16), "8xlarge": (256, 32), "12xlarge": (384, 48), "16xlarge": (512, 64), "24xlarge": (768, 96), "48xlarge": (1536, 192)},
+    "r8gd": {"large": (16, 2), "xlarge": (32, 4), "2xlarge": (64, 8), "4xlarge": (128, 16), "8xlarge": (256, 32), "12xlarge": (384, 48), "16xlarge": (512, 64), "24xlarge": (768, 96), "48xlarge": (1536, 192)},
 }
-# RDS 인스턴스 클래스 → vCPU. 위 표와 같은 범위만 둡니다.
+RDS_MEMORY_GIB = {
+    f"db.{family}.{size}": memory for family, sizes in _RDS_CLASS_SIZES.items() for size, (memory, _) in sizes.items()
+}
 RDS_VCPU = {
-    "db.t3.micro": 2, "db.t4g.micro": 2,
-    "db.t3.small": 2, "db.t4g.small": 2,
+    f"db.{family}.{size}": vcpu for family, sizes in _RDS_CLASS_SIZES.items() for size, (_, vcpu) in sizes.items()
 }
 CLOUD_SQL_MIN_DISK_GB = 10
 # Cloud SQL 공유 코어 등급의 메모리 상한(GB). 이보다 큰 원본은 자동 매핑하지 않고 provisioning 기본값을 씁니다.

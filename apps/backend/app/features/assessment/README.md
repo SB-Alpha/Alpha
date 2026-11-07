@@ -107,7 +107,7 @@ provisioning 도 같은 키 이름표(`source.credentials_ref.cloud`)를 `resolv
 | Fargate 메모리 MiB | `memory` (MiB, 숫자) | 최소 512 |
 | RDS PostgreSQL 10~16 | `db_version` = `"16"` | 16 초과(다운그레이드)·10 미만은 fail |
 | RDS 인스턴스 클래스 | `db_tier` | 원본 메모리 이상인 가장 작은 등급. 지금은 micro(1GiB) → `db-g1-small` 만. 그 외는 넘기지 않음(기본값) |
-| RDS 인스턴스 클래스 | `db_memory_gib` · `db_vcpu` | 클라우드 중립 DB 크기 (원본 메모리·vCPU). 목적지마다 자기 등급으로 바꿈. 표에 있는 micro·small 만, 그 외는 넘기지 않음. GCP Terraform 에는 안 넘어감 |
+| RDS 인스턴스 클래스 | `db_memory_gib` · `db_vcpu` | 클라우드 중립 DB 크기 (원본 메모리·vCPU). 목적지마다 자기 등급으로 바꿈 (Azure·AWS는 provisioning 의 설정 카드가 원본 메모리 이상인 가장 작은 등급으로 변환). `rules.py` 의 `_RDS_CLASS_SIZES` 표(t3·t4g·m5·m6g·m6i·m7g·m7i·r5·r6g·r6i 등 142개 클래스, EC2 API 로 확인)에 있는 클래스만, 그 외는 넘기지 않음. GCP Terraform 에는 안 넘어감 |
 | RDS 디스크 GB | `db_disk_size_gb` | 원본과 같게, 최소 10 |
 | 환경 변수 | `env_vars` | PG*·APP_ENV·PORT 는 provisioning 이 채우므로 제외 |
 | 비밀 참조 | `secret_refs` | 이름 → `{service_name}-{변수명 소문자}`. 값 이전은 별도 작업 |

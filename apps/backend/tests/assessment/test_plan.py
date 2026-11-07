@@ -102,7 +102,8 @@ def test_target_infra_converts_to_tfvars():
 
 
 def test_unknown_db_size_is_left_to_provisioning_default():
-    plan = run(_ready_input(instance_class="db.r5.large", allocated_storage_gb=None, username=None))
+    # 표에 없는 클래스(실제로 있을 수 없는 이름)는 크기를 지어내지 않는다
+    plan = run(_ready_input(instance_class="db.zz9.large", allocated_storage_gb=None, username=None))
     tfvars = plan.target_infra.to_tfvars()
     assert "db_tier" not in tfvars and "db_disk_size_gb" not in tfvars and "db_user" not in tfvars
     assert "db_memory_gib" not in tfvars and "db_vcpu" not in tfvars  # 모르는 크기는 지어내지 않음
@@ -246,3 +247,14 @@ def test_unknown_replication_slots_are_a_risk_not_a_check():
     plan = run(_ready_input())
     assert all(c.id != "replication_slot_available" for c in plan.checks)
     assert any(r.title == "복제 슬롯 여유 미확인" for r in plan.risks)
+
+
+def test_a_larger_class_gets_its_size_from_the_table():
+    # 예전에는 micro·small 만 알아서 medium 이상은 크기를 모르는 값으로 남았다 (목적지 DB 등급 변환이 동작하지 않음)
+    infra = run(_ready_input(instance_class="db.m5.large", allocated_storage_gb=100)).target_infra
+    assert infra.db_memory_gib == 8 and infra.db_vcpu == 2
+
+
+def test_the_size_of_a_memory_optimized_class_is_known_too():
+    infra = run(_ready_input(instance_class="db.r6g.2xlarge", allocated_storage_gb=100)).target_infra
+    assert infra.db_memory_gib == 64 and infra.db_vcpu == 8
