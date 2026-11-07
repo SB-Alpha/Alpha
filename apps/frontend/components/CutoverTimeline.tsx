@@ -1,3 +1,4 @@
+import { CutoverSimulationWidget } from "./3d/CutoverSimulationWidget";
 import {
   METRIC_KEYS,
   cutoverApprovals,
@@ -114,8 +115,14 @@ export function CutoverTimeline({ run }: Props) {
   const approvals = cutoverApprovals(run);
   if (steps === null && approvals.length === 0) return null;
 
+  const isWaitingCutover = run.state === "waiting_approval" && run.waiting_gate === "cutover";
+
   return (
-    <section aria-labelledby="cutover-timeline-heading" className="rounded-xl border border-ink/15 bg-white p-5">
+    <section
+      id="cutover-timeline-section"
+      aria-labelledby="cutover-timeline-heading"
+      className="rounded-xl border border-ink/15 bg-white p-5"
+    >
       <h2 id="cutover-timeline-heading" className="text-lg font-semibold">
         전환 기록
       </h2>
@@ -141,6 +148,14 @@ export function CutoverTimeline({ run }: Props) {
           <StepList steps={steps} />
         </div>
       </div>
+
+      {!isWaitingCutover && (
+        <CutoverSimulationWidget
+          run={run}
+          defaultOpen={true}
+          title="전환 순서 리허설 애니메이션 & 파이프라인 주행 데모 (실측 아님)"
+        />
+      )}
     </section>
   );
 }

@@ -26,20 +26,27 @@ from app.core.config import data_dir
 from app.core.secrets import put_secret, resolve
 
 from .schemas import DbMigrationInput
+from .settings import required, tunables
 
 GCP, AWS, OCI = "gcp", "aws-vpn", "oci-vpn"
-COMMAND_TIMEOUT_S = 1800
-TUNNEL_WAIT_S = 600
-TUNNEL_POLL_S = 30
-
+# Must match the defaults of the Terraform modules, which take no input for them.
 AWS_ASN, GCP_ASN = "64512", "65010"
 # Any valid address works until the real one is known; each connection needs its own gateway.
 PLACEHOLDER_IPS = ["1.1.1.1", "1.1.1.2"]
+# VPNs saved before the context kept db_port were built with this port.
+OLD_CONTEXT_DB_PORT = 5432
 # OCI refuses 169.254.10.0-169.254.19.255. AWS takes .1 and OCI takes .2; GCP takes .1 and OCI takes .2.
 BGP_NETS = {"aws-0": "169.254.21", "aws-1": "169.254.22", "gcp-0": "169.254.31", "gcp-1": "169.254.32"}
 TUNNEL_KEYS = tuple(BGP_NETS)
-# Cleared so a local cloud login is not picked up.
-SCRUBBED_ENV = ("AWS_", "GOOGLE_", "GCLOUD_", "CLOUDSDK_")
+# All Terraform gets from this process's environment. App secrets and local cloud logins stay out.
+# OCI_ and the OCI profile are its own login: the OCI side has no key saved per run.
+TERRAFORM_ENV = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "TEMP", "TMP", "TZ",
+    "SYSTEMROOT", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA", "USERPROFILE",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "TF_CLI_CONFIG_FILE",
+})
+TERRAFORM_ENV_PREFIXES = ("LC_", "OCI_")
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
@@ -57,18 +64,23 @@ class OciSettings:
     drg_id: str
     state_bucket: str
     state_namespace: str
+    vcn_cidr: str
+    node_subnet_cidr: str
 
     @classmethod
     def from_env(cls) -> "OciSettings":
         default_dir = Path(__file__).resolve().parents[5] / "infra" / "db_migration" / "terraform"
         return cls(
             terraform_dir=Path(os.getenv("CDC_TERRAFORM_DIR", default_dir)),
-            region=os.getenv("CDC_OCI_REGION", "ap-singapore-1"),
+            region=required("CDC_OCI_REGION"),
+            # The name the OCI tools themselves use when none is given.
             profile=os.getenv("CDC_OCI_PROFILE", "DEFAULT"),
-            compartment_id=os.environ["CDC_OCI_COMPARTMENT_ID"],
-            drg_id=os.environ["CDC_OCI_DRG_ID"],
-            state_bucket=os.environ["CDC_TFSTATE_BUCKET"],
-            state_namespace=os.environ["CDC_TFSTATE_NAMESPACE"],
+            compartment_id=required("CDC_OCI_COMPARTMENT_ID"),
+            drg_id=required("CDC_OCI_DRG_ID"),
+            state_bucket=required("CDC_TFSTATE_BUCKET"),
+            state_namespace=required("CDC_TFSTATE_NAMESPACE"),
+            vcn_cidr=required("CDC_OCI_VCN_CIDR"),
+            node_subnet_cidr=required("CDC_NODE_SUBNET_CIDR"),
         )
 
 
@@ -98,7 +110,7 @@ class Terraform:
         self._ready: set[str] = set()
 
     def _env(self, root: str) -> dict[str, str]:
-        env = {k: v for k, v in os.environ.items() if not k.startswith(SCRUBBED_ENV)}
+        env = {k: v for k, v in os.environ.items() if k in TERRAFORM_ENV or k.startswith(TERRAFORM_ENV_PREFIXES)}
         env.update(self.cloud_env[root])
         env.update(TF_IN_AUTOMATION="1", TF_INPUT="0", TF_DATA_DIR=str(self.work_dir / root / ".terraform"),
                    TF_PLUGIN_CACHE_DIR=str(self.plugin_cache))
@@ -106,7 +118,7 @@ class Terraform:
 
     def _run(self, root: str, *args: str) -> str:
         command = ["terraform", f"-chdir={self.settings.terraform_dir / root}", *args]
-        done = self.runner(command, env=self._env(root), capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S)
+        done = self.runner(command, env=self._env(root), capture_output=True, text=True, timeout=tunables().terraform_timeout_s)
         if done.returncode != 0:
             raise TerraformError(f"terraform {args[0]} failed in {root}: {done.stderr.strip()[-800:]}")
         return done.stdout
@@ -173,6 +185,7 @@ class VpnContext:
                 "cidr": mig.source.network.cidr,
                 "route_table_ids": mig.source.network.route_table_ids,
                 "db_security_group_id": mig.source.network.db_security_group_id,
+                "db_port": mig.source.db.port,
                 "cloud_ref": mig.source.credentials_ref.cloud,
             },
             target={
@@ -190,7 +203,8 @@ class VpnContext:
 
     @classmethod
     def load(cls, run_id: str) -> "VpnContext":
-        return cls(**json.loads(resolve(f"secret://{run_id}/vpn-context")["json"]))
+        data = json.loads(resolve(f"secret://{run_id}/vpn-context")["json"])
+        return cls(**{**data, "source": {"db_port": OLD_CONTEXT_DB_PORT, **data["source"]}})
 
 
 def ensure_psk(run_id: str) -> dict[str, str]:
@@ -221,7 +235,7 @@ def _gcp_vars(ctx: VpnContext, psk: dict, oci_ips: dict) -> dict:
     }
 
 
-def _aws_vars(ctx: VpnContext, psk: dict, oci_ips: dict) -> dict:
+def _aws_vars(ctx: VpnContext, settings: OciSettings, psk: dict, oci_ips: dict) -> dict:
     s = ctx.source
     return {
         "region": s["region"],
@@ -229,6 +243,9 @@ def _aws_vars(ctx: VpnContext, psk: dict, oci_ips: dict) -> dict:
         "vpc_id": s["vpc_id"],
         "route_table_ids": s["route_table_ids"],
         "db_security_group_id": s["db_security_group_id"],
+        "db_port": s["db_port"],
+        # Only the CDC nodes reach the DB, not the rest of the VCN.
+        "oci_cidr": settings.node_subnet_cidr,
         "tunnels": [
             {"oci_ip": oci_ips.get(k, PLACEHOLDER_IPS[i]), "inside_cidr": f"{BGP_NETS[k]}.0/30"}
             for i, k in enumerate(("aws-0", "aws-1"))
@@ -309,14 +326,14 @@ def ensure_vpn(mig: DbMigrationInput, job_id: str, *, terraform: Terraform | Non
     oci_ips = tf.output(OCI, "oracle_tunnel_ips") or {}
     tf.apply(GCP, _gcp_vars(ctx, psk, oci_ips))
     gcp_ips = tf.output(GCP, "ha_vpn_interface_ips")
-    tf.apply(AWS, _aws_vars(ctx, psk, oci_ips))
+    tf.apply(AWS, _aws_vars(ctx, settings, psk, oci_ips))
     aws_ips = _aws_ips(tf)
 
     oci_vars = _oci_vars(ctx, settings, psk, aws_ips, gcp_ips)
     tf.apply(OCI, oci_vars)
     oci_ips = tf.output(OCI, "oracle_tunnel_ips")
 
-    tf.apply(AWS, _aws_vars(ctx, psk, oci_ips))
+    tf.apply(AWS, _aws_vars(ctx, settings, psk, oci_ips))
     if _aws_ips(tf) != aws_ips:
         # The OCI side was built for the old addresses and its CPE cannot be edited in place.
         raise RuntimeError("AWS tunnel IPs changed when the customer gateways were replaced")
@@ -326,15 +343,16 @@ def ensure_vpn(mig: DbMigrationInput, job_id: str, *, terraform: Terraform | Non
 
 
 def _wait_tunnels(tf: Terraform, oci_vars: dict, sleep: Callable[[float], None]) -> dict:
-    deadline = time.monotonic() + TUNNEL_WAIT_S
+    settings = tunables()
+    deadline = time.monotonic() + settings.tunnel_wait_s
     while True:
         tf.refresh(OCI, oci_vars)
         status = tf.output(OCI, "tunnel_status") or {}
         if _tunnels_up(status):
             return status
         if time.monotonic() > deadline:
-            raise RuntimeError(f"VPN tunnels not up after {TUNNEL_WAIT_S}s: {status}")
-        sleep(TUNNEL_POLL_S)
+            raise RuntimeError(f"VPN tunnels not up after {settings.tunnel_wait_s}s: {status}")
+        sleep(settings.tunnel_poll_s)
 
 
 def destroy_vpn(run_id: str, *, terraform: Terraform | None = None) -> bool:
@@ -355,7 +373,7 @@ def destroy_vpn(run_id: str, *, terraform: Terraform | None = None) -> bool:
     # Keep going after a failure: leftovers cost money.
     errors = []
     for root, tfvars in ((GCP, _gcp_vars(ctx, psk, oci_ips)),
-                         (AWS, _aws_vars(ctx, psk, oci_ips)),
+                         (AWS, _aws_vars(ctx, settings, psk, oci_ips)),
                          (OCI, _oci_vars(ctx, settings, psk, aws_ips, gcp_ips))):
         try:
             tf.destroy(root, tfvars)

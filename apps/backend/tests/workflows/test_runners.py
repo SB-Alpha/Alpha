@@ -828,7 +828,12 @@ def test_plan_approver_is_not_used_for_cutover(engine, approver_agent):
 # -- 전환 시간·순서 검증·단계 증적 ---------------------------------------------------
 
 STEP_KEYS = {"cutover_steps", "cutover_sequence", "cutover_sequence_missing"}
-SEQUENCE = ("hold", "marker_on_target", "validated", "switched_to_target", "released")
+SEQUENCE = ("hold", "marker_on_target", "snapshot_fixed", "switched_to_target", "released")
+# 에이전트(jobs.py)가 실제로 남기는 순서입니다.
+AGENT_STEPS = (
+    "hold", "inflight_zero", "source_writes_blocked", "marker_on_target", "sink_paused",
+    "sequences_synced", "snapshot_fixed", "switched_to_target", "released",
+)
 STABILIZING = {"state": "running", "phase": "stabilizing", "progress": 90, "message": "완료"}
 
 
@@ -848,15 +853,19 @@ def _drive_cutover(engine, monkeypatch, *jobs):
     """에이전트가 jobs 를 차례로 돌려줄 때 run_cutover 를 돌립니다. (보고 목록, 반환값 또는 예외)"""
     monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
     remaining = list(jobs)
+    posted = []
 
     class FakeAgent:
         def __init__(self, settings):
             pass
 
         def cutover(self, job_id, approved_by):
+            posted.append(job_id)
             return {"accepted": True}
 
         def get_job(self, job_id):
+            if not posted:
+                return {"state": "waiting_approval", "phase": "cutover_ready"}
             return remaining.pop(0) if len(remaining) > 1 else remaining[0]
 
     monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", FakeAgent)
@@ -957,7 +966,19 @@ def test_out_of_order_step_reports_only_the_displaced_name(engine, monkeypatch):
     reports, _ = _drive_cutover(engine, monkeypatch, {**STABILIZING, "evidence": evidence})
     m = reports[-1].metrics
     assert m["cutover_sequence"] == "INCOMPLETE"
-    assert m["cutover_sequence_missing"] == ["validated"]
+    assert m["cutover_sequence_missing"] == ["snapshot_fixed"]
+
+
+@pytest.mark.parametrize(
+    "names",
+    [AGENT_STEPS, ("hold", "marker_on_target", "validated", "switched_to_target", "released")],
+    ids=["agent", "older-agent"],
+)
+def test_snapshot_fixed_or_validated_completes_the_sequence(engine, monkeypatch, names):
+    reports, _ = _drive_cutover(engine, monkeypatch, {**STABILIZING, "evidence": _steps(*names)})
+
+    assert reports[-1].metrics["cutover_sequence"] == "VERIFIED"
+    assert "경고" not in reports[-1].message
 
 
 @pytest.mark.parametrize(
@@ -1629,3 +1650,242 @@ def test_cdc_end_report_hides_connection_details():
         assert "alpha_admin" not in text
         assert "password authentication failed" in text
 
+
+
+# -- 전환 시점 데이터 비교 ------------------------------------------------------------
+
+
+def _verifying(verification, **job):
+    return {
+        **STABILIZING,
+        "metrics": {"traffic_mode": "TARGET", "cutover_ms": 415.0, "verification": verification},
+        "evidence": {**_steps(*AGENT_STEPS), "verification": {"state": verification}},
+        **job,
+    }
+
+
+def test_cutover_is_recorded_before_the_comparison_and_the_stage_waits_for_it(engine, monkeypatch):
+    matched = _verifying("match", message="전환 완료 (415.0ms), 데이터 일치, 안정화 관찰 중")
+    matched["metrics"]["mismatch"] = 0
+    reports, result = _drive_cutover(engine, monkeypatch, _verifying("running"), _verifying("running"), matched)
+
+    switched = next(r for r in reports if r.metrics.get("cutover_outcome") == "switched")
+    assert switched.metrics["verification"] == "running"
+    assert switched.metrics["cutover_seconds"] == 0.415
+    assert switched.metrics["cutover_sequence"] == "VERIFIED"
+    assert switched.progress == 90
+
+    last = reports[-1]
+    assert (last.progress, last.metrics["verification"], last.metrics["mismatch"]) == (100, "match", 0)
+    assert "데이터 일치" in last.message
+    assert result["metrics"]["verification"] == "match"
+
+
+def test_mismatch_fails_the_stage_and_keeps_the_measured_cutover(engine, monkeypatch):
+    mismatched = _verifying("mismatch", state="failed", message="전환 시점 데이터 불일치 2개 테이블, 수동 확인 필요")
+    mismatched["metrics"]["mismatch"] = 2
+    reports, result = _drive_cutover(engine, monkeypatch, _verifying("running"), mismatched)
+
+    assert isinstance(result, RuntimeError)
+    assert "불일치 2개 테이블" in str(result)
+    last = reports[-1]
+    assert last.metrics["cutover_outcome"] == "post_switch_failed"
+    assert (last.metrics["verification"], last.metrics["mismatch"]) == ("mismatch", 2)
+    assert last.metrics["cutover_seconds"] == 0.415
+
+
+def test_mismatch_already_there_at_the_first_read_still_fails(engine, monkeypatch):
+    reports, result = _drive_cutover(engine, monkeypatch, _verifying("mismatch", state="failed", message="불일치"))
+
+    assert isinstance(result, RuntimeError)
+    assert reports[-1].metrics["cutover_outcome"] == "post_switch_failed"
+
+
+def test_unverifiable_warns_but_does_not_fail_the_stage(engine, monkeypatch):
+    unverifiable = _verifying("unverifiable", message="전환 완료, 전환 시점 데이터 비교를 끝내지 못함. 데이터를 직접 확인하세요")
+    reports, result = _drive_cutover(engine, monkeypatch, _verifying("running"), unverifiable)
+
+    assert result["metrics"]["verification"] == "unverifiable"
+    assert reports[-1].metrics["verification"] == "unverifiable"
+    assert reports[-1].metrics.get("cutover_outcome") != "post_switch_failed"
+    assert "직접 확인" in reports[-1].message
+
+
+def test_job_failing_during_the_comparison_does_not_wait_for_a_result(engine, monkeypatch):
+    broken = _verifying("running", state="failed", message="목적지로 전환 후 오류, 수동 확인 필요")
+    reports, result = _drive_cutover(engine, monkeypatch, _verifying("running"), broken)
+
+    assert isinstance(result, RuntimeError)
+    assert reports[-1].metrics["cutover_outcome"] == "post_switch_failed"
+
+
+def test_comparison_result_that_never_comes_warns_after_the_wait(engine, monkeypatch):
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+    jobs = [{"state": "waiting_approval", "phase": "cutover_ready"}]
+
+    class FakeAgent:
+        def __init__(self, settings):
+            pass
+
+        def cutover(self, job_id, approved_by):
+            jobs[0] = _verifying("running")
+
+        def get_job(self, job_id):
+            return jobs[0]
+
+    monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", FakeAgent)
+    ctx = RecordingCtx()
+    result = run_cutover(engine.create_run(REQUEST), ctx=ctx, poll_interval_s=0.001, verification_wait_s=0.01)  # type: ignore[arg-type]
+
+    assert result["phase"] == "stabilizing"
+    last = ctx.reports[-1]
+    assert last.metrics["verification"] == "unknown"
+    assert "경고" in last.message
+
+
+def test_agent_read_errors_during_the_comparison_are_retried(engine, monkeypatch):
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+    reads = iter([
+        {"state": "waiting_approval", "phase": "cutover_ready"},
+        _verifying("running"),
+        OSError("tunnel down"),
+        _verifying("match"),
+    ])
+
+    class FakeAgent:
+        def __init__(self, settings):
+            pass
+
+        def cutover(self, job_id, approved_by):
+            return {"accepted": True}
+
+        def get_job(self, job_id):
+            item = next(reads)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", FakeAgent)
+    result = run_cutover(engine.create_run(REQUEST), ctx=RecordingCtx(), poll_interval_s=0.001)  # type: ignore[arg-type]
+
+    assert result["metrics"]["verification"] == "match"
+
+
+def test_sequence_warning_survives_the_comparison_reports(engine, monkeypatch):
+    incomplete = _steps("hold", "released")
+    reports, _ = _drive_cutover(
+        engine,
+        monkeypatch,
+        _verifying("running", evidence=incomplete),
+        _verifying("match", evidence=incomplete),
+    )
+
+    assert "전환 순서 증적 불완전" in reports[-1].message
+
+
+def test_measurement_ends_before_the_comparison(engine, monkeypatch):
+    order = []
+    monkeypatch.setattr(
+        "app.features.workflows.runners._request_cutover",
+        lambda *a: order.append("cutover") or _verifying("match"),
+    )
+    monkeypatch.setattr("app.features.workflows.runners._cutover_worker", lambda: _FakeWorkerStatus({}))
+    monkeypatch.setattr("app.features.workflows.runners._finish_measurement", lambda *a: order.append("measured"))
+    monkeypatch.setattr(
+        "app.features.workflows.runners._await_verification",
+        lambda run, ctx, job, *a: order.append("compared") or job,
+    )
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+
+    run_cutover(engine.create_run(REQUEST), ctx=RecordingCtx(), probe_settle_s=0)  # type: ignore[arg-type]
+
+    assert order == ["cutover", "measured", "compared"]
+
+
+# -- 거절과 롤백 구분 -----------------------------------------------------------------
+
+
+def _refusing_agent(monkeypatch, *jobs, detail="Worker mode is TARGET, expected SOURCE"):
+    """전환을 409 로 거절합니다. get_job 은 jobs 를 차례로, 마지막 것은 계속 돌려줍니다."""
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+    remaining = list(jobs)
+
+    class RefusingAgent:
+        def __init__(self, settings):
+            pass
+
+        def cutover(self, job_id, approved_by):
+            raise AgentError(409, detail)
+
+        def get_job(self, job_id):
+            return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", RefusingAgent)
+
+
+READY_JOB = {"state": "waiting_approval", "phase": "cutover_ready", "progress": 70, "message": "승인 대기"}
+ROLLED_BACK_EVIDENCE = {"cutover": {"steps": [{"step": "hold", "at": "t1"}, {"step": "failed", "error": "marker"}]}}
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [None, ROLLED_BACK_EVIDENCE],
+    ids=["first-attempt", "retry-after-a-rollback"],
+)
+def test_worker_refusal_is_not_reported_as_a_rollback(engine, monkeypatch, evidence):
+    _refusing_agent(monkeypatch, {**READY_JOB, "evidence": evidence})
+    ctx = RecordingCtx()
+
+    with pytest.raises(RuntimeError) as caught:
+        run_cutover(engine.create_run(REQUEST), ctx=ctx, poll_interval_s=0.001)  # type: ignore[arg-type]
+
+    assert "거부" in str(caught.value)
+    assert "Worker mode is TARGET" in str(caught.value)
+    assert "롤백" not in str(caught.value)
+    assert ctx.reports[-1].metrics["cutover_outcome"] == "not_started"
+
+
+def test_refusal_reason_is_scrubbed(engine, monkeypatch):
+    _refusing_agent(monkeypatch, READY_JOB, detail=f"Worker is not usable: {AGENT_ERROR}")
+
+    with pytest.raises(RuntimeError) as caught:
+        run_cutover(engine.create_run(REQUEST), ctx=RecordingCtx(), poll_interval_s=0.001)  # type: ignore[arg-type]
+
+    _assert_no_connection_details(str(caught.value))
+    assert "Worker is not usable" in str(caught.value)
+
+
+def test_refused_because_another_attempt_rolled_back_is_still_a_rollback(engine, monkeypatch):
+    # 다른 호출이 먼저 시작해 409 를 받았고, 그 시도가 롤백한 경우입니다. 증적이 요청 전과 다릅니다.
+    _refusing_agent(monkeypatch, READY_JOB, {**READY_JOB, "evidence": ROLLED_BACK_EVIDENCE}, detail="job is running/cutover")
+    monkeypatch.setattr("app.features.workflows.runners._worker_confirms_source", lambda: True)
+
+    with pytest.raises(RuntimeError, match="롤백"):
+        run_cutover(engine.create_run(REQUEST), ctx=RecordingCtx(), poll_interval_s=0.001)  # type: ignore[arg-type]
+
+
+# -- 전환 후 CDC 추적 종료 --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("phase", ["stabilizing", "closed"])
+def test_cdc_tracking_ending_after_the_switch_is_not_an_error(tmp_path, monkeypatch, phase):
+    next_stage_started = threading.Event()
+    ended = threading.Event()
+
+    def cdc(inp, proxy):
+        proxy.report("running", 50, {"phase": "streaming"}, "복제 중")
+        assert next_stage_started.wait(WAIT_S)
+        ended.set()
+        return {"state": phase}
+
+    def app_deploy(run, ctx):
+        next_stage_started.set()
+        return {"healthy": True}
+
+    engine = _engine_through_cdc(tmp_path, monkeypatch, cdc, app_deploy)
+    run_id = _advance_past_plan_approval(engine)
+    engine.advance(run_id)
+
+    assert ended.wait(WAIT_S)
+    time.sleep(0.05)  # 추적 스레드가 끝난 뒤에 남길 기록을 기다립니다.
+    assert "cdc_error" not in engine.get(run_id).stage(StageName.DB_MIGRATION).metrics

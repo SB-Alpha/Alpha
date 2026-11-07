@@ -39,7 +39,7 @@ _MAX_DETAIL_FIELD = 40
 _LABELS = {
     "job_ready": "CDC 작업 준비",
     "db_connectivity": "DB 연결",
-    "data_match": "데이터 일치",
+    "data_match": "행 수 일치",
     "replication_lag": "복제 지연",
     "target_ready": "목적지 앱 준비",
     "worker_target": "Worker 전환 대상",
@@ -129,7 +129,7 @@ def _check_data_match(metrics: Mapping[str, Any]) -> PreflightCheck:
     if mismatch is None:
         return _result("data_match", "unknown", _NOT_MEASURED_DETAIL)
     if mismatch > 0:
-        return _result("data_match", "fail", "원본과 목적지가 다른 테이블이 있습니다", mismatch)
+        return _result("data_match", "fail", "원본과 목적지의 행 수가 다른 테이블이 있습니다", mismatch)
     return _result("data_match", "pass", value=0)
 
 

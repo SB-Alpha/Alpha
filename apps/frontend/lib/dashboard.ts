@@ -13,7 +13,8 @@ export const METRIC_KEYS = {
   replicationLagBytes: "replication_lag_bytes",
   copyPercent: "copy_percent",
   tables: "tables", // { 테이블명: { source_rows, target_rows, percent, match } }
-  mismatchTables: "mismatch", // 불일치 테이블 수
+  mismatchTables: "mismatch", // 불일치 테이블 수. 전환 전에는 행 수만, 전환 시점 비교 뒤에는 내용까지 비교한 값입니다
+  verification: "verification", // 전환 시점 데이터 비교: "running" | "match" | "mismatch" | "unverifiable" | "unknown"
   failedRequests: "failed_requests",
   probeRequests: "probe_requests", // 프로버가 보낸 요청 수
   probeMaxMs: "probe_max_ms", // 가장 오래 기다린 요청
@@ -94,6 +95,12 @@ export function securityTone(value: string | null): SecurityTone {
   return SECURITY_BAD.includes(value) ? "bad" : "neutral";
 }
 
+/** 실패·불일치 건수의 색. 정확히 0 만 good 이고, 보고가 없으면 neutral 입니다. */
+export function countTone(value: number | null): SecurityTone {
+  if (value === 0) return "good";
+  return value !== null && value > 0 ? "bad" : "neutral";
+}
+
 /** 시뮬레이션 모드에서 나온 값이 섞여 있으면 true 입니다. */
 export function isSimulated(run: RunStatus): boolean {
   return findMetric(run, METRIC_KEYS.simulated) === true;
@@ -131,6 +138,9 @@ export interface CutoverStep {
 
 export type CutoverSecondsSource = "worker" | "agent";
 
+const VERIFICATIONS = ["running", "match", "mismatch", "unverifiable", "unknown"] as const;
+export type Verification = (typeof VERIFICATIONS)[number];
+
 export interface CutoverSequence {
   status: "VERIFIED" | "INCOMPLETE";
   missing: string[];
@@ -161,6 +171,34 @@ export function cutoverSteps(run: RunStatus): CutoverStep[] | null {
 export function cutoverSecondsSource(run: RunStatus): CutoverSecondsSource | null {
   const source = stringMetric(run, METRIC_KEYS.cutoverSecondsSource);
   return source === "worker" || source === "agent" ? source : null;
+}
+
+export interface CutoverOverlayFacts {
+  simulated: boolean;
+  cutoverSeconds: number | null;
+  cutoverSecondsSource: CutoverSecondsSource | null;
+  failedRequests: number | null;
+  writeFailedRequests: number | null;
+  steps: { step: string; elapsedMs: number | null }[] | null;
+}
+
+/** 전환 오버레이에 쓰는 이 run 의 보고값. elapsedMs 는 전환 스레드 시작부터 누적이며, 단계별 소요가 아닙니다. */
+export function cutoverOverlayFacts(run: RunStatus): CutoverOverlayFacts {
+  const steps = cutoverSteps(run);
+  return {
+    simulated: isSimulated(run),
+    cutoverSeconds: numberMetric(run, METRIC_KEYS.cutoverSeconds),
+    cutoverSecondsSource: cutoverSecondsSource(run),
+    failedRequests: numberMetric(run, METRIC_KEYS.failedRequests),
+    writeFailedRequests: numberMetric(run, METRIC_KEYS.writeFailedRequests),
+    steps: steps && steps.map((s) => ({ step: s.step, elapsedMs: s.elapsed_ms ?? null })),
+  };
+}
+
+/** 전환 시점 데이터 비교 상태. 전환 전이거나 보고가 없으면 null 입니다. */
+export function verificationState(run: RunStatus): Verification | null {
+  const value = stringMetric(run, METRIC_KEYS.verification);
+  return VERIFICATIONS.find((v) => v === value) ?? null;
 }
 
 /** 전환 순서 검증 결과. 보고가 없거나 값이 다르면 null 입니다 (INCOMPLETE 로 추정하지 않음). */

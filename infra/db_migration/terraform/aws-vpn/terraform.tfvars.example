@@ -1,5 +1,8 @@
 # 복사해서 terraform.tfvars로 쓴다. terraform.tfvars는 커밋하지 않는다.
+region               = "<원본 AWS 리전>"
 vpc_id               = "vpc-<원본 VPC>"
+oci_cidr             = "<CDC 노드 서브넷, terraform/oci의 subnet_cidr>"
+db_port              = 5432
 route_table_ids      = ["rtb-<RDS 서브넷 라우팅 테이블>"]
 db_security_group_id = "sg-<RDS 보안 그룹>"
 

@@ -11,7 +11,7 @@ from cryptography.fernet import Fernet
 
 from app.core.secrets import delete_secret, has_secret, put_secret, resolve
 from app.features import db_migration
-from app.features.db_migration import service, vpn
+from app.features.db_migration import db_workflow, service, vpn
 from app.features.db_migration.client import AgentSettings, CdcAgentClient
 from app.features.db_migration.input_secrets import INPUT_SECRETS
 
@@ -19,6 +19,11 @@ from .test_db_migration_vpn import INPUT, JOB_ID, RUN_ID
 
 ADMIN_PASSWORD = "admin-password-marker"
 SINK_PASSWORD = "sink-password-marker"
+OCI_ENV = {
+    "CDC_OCI_REGION": "oci-1", "CDC_OCI_COMPARTMENT_ID": "c", "CDC_OCI_DRG_ID": "d",
+    "CDC_TFSTATE_BUCKET": "b", "CDC_TFSTATE_NAMESPACE": "n",
+    "CDC_OCI_VCN_CIDR": "10.250.0.0/16", "CDC_NODE_SUBNET_CIDR": "10.250.1.0/24",
+}
 
 
 class FakeAgent:
@@ -29,6 +34,7 @@ class FakeAgent:
         self.request = None
         self.abort_status = None
         self.reachable = True
+        self.health = {"kafka": True, "connect": True, "plugins_missing": []}
 
     def client(self) -> CdcAgentClient:
         return CdcAgentClient(AgentSettings(url="https://cdc.example"), transport=httpx.MockTransport(self.handle))
@@ -36,6 +42,8 @@ class FakeAgent:
     def handle(self, request: httpx.Request) -> httpx.Response:
         method, path = request.method, request.url.path
         self.calls.append(f"{method} {path}")
+        if method == "GET" and path == "/status":
+            return httpx.Response(200, json=self.health)
         if method == "POST" and path == "/probe":
             body = json.loads(request.content)
             return httpx.Response(200, json=[{**e, "ok": self.reachable, "error": None} for e in body])
@@ -71,10 +79,12 @@ class Recorder:
 
 @pytest.fixture(autouse=True)
 def env(monkeypatch, tmp_path):
-    monkeypatch.setattr(service, "_stop_requested", set())
+    monkeypatch.setattr(db_workflow, "_stop_requested", set())
     monkeypatch.setenv("ALPHA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("ALPHA_SECRETS_KEY", Fernet.generate_key().decode())
-    monkeypatch.setattr(service.time, "sleep", lambda s: None)
+    for name, value in OCI_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(db_workflow.time, "sleep", lambda s: None)
     put_secret(f"{RUN_ID}/source-cloud", {"aws_access_key_id": "k", "aws_secret_access_key": "s"})
     put_secret(f"{RUN_ID}/target-cloud", {"credentials_json": "{}"})
     put_secret(f"{RUN_ID}/source-db-admin", {"user": "alpha", "password": ADMIN_PASSWORD})
@@ -181,8 +191,8 @@ def test_complete_keeps_the_inputs_when_a_live_run_could_not_remove_the_vpn(monk
 
 
 def test_complete_keeps_the_inputs_when_the_run_does_not_end_in_time(monkeypatch, vpn_calls):
-    monkeypatch.setattr(service, "COMPLETE_WAIT_S", -1)
-    monkeypatch.setattr(service, "_active", {RUN_ID})
+    monkeypatch.setenv("CDC_COMPLETE_WAIT_S", "-1")
+    monkeypatch.setattr(db_workflow, "_active", {RUN_ID})
 
     with pytest.raises(RuntimeError, match="call complete again"):
         service.complete(RUN_ID, agent=FakeAgent().client())
@@ -273,7 +283,7 @@ def test_unknown_secret_reference_fails_before_the_vpn(vpn_calls):
 
 
 def test_unreachable_database_fails_and_keeps_the_vpn(vpn_calls, monkeypatch):
-    monkeypatch.setattr(service, "PROBE_WAIT_S", -1)
+    monkeypatch.setenv("CDC_PROBE_WAIT_S", "-1")
     agent = FakeAgent()
     agent.reachable = False
     result = service.run(INPUT, agent=agent.client())
@@ -306,7 +316,7 @@ def test_failed_job_is_reported_and_keeps_the_vpn(vpn_calls):
 
 
 def test_stop_after_a_failed_run_removes_the_vpn_itself(vpn_calls, monkeypatch):
-    monkeypatch.setattr(service, "PROBE_WAIT_S", -1)
+    monkeypatch.setenv("CDC_PROBE_WAIT_S", "-1")
     agent = FakeAgent()
     agent.reachable = False
     service.run(INPUT, agent=agent.client())
@@ -432,6 +442,17 @@ def test_missing_admin_reference_is_refused_by_field_name(vpn_calls):
     assert vpn_calls == []
 
 
+def test_an_admin_that_is_not_the_app_account_is_refused_before_anything_is_built(vpn_calls):
+    put_secret(f"{RUN_ID}/source-db-admin", {"user": "separate_admin", "password": ADMIN_PASSWORD})
+    agent = FakeAgent()
+
+    result = service.run(INPUT, agent=agent.client())
+
+    assert result.state == "failed" and "not supported yet" in result.message
+    assert "separate_admin" not in result.message
+    assert vpn_calls == [] and agent.calls == []
+
+
 def test_target_admin_password_stays_out_of_the_logs(vpn_calls, caplog):
     with caplog.at_level(logging.INFO, logger="app.features.db_migration"):
         run_until_stopped(FakeAgent())
@@ -461,7 +482,7 @@ def test_stop_while_the_vpn_is_being_built_ends_the_run(monkeypatch):
     assert calls == ["ensure_vpn", "destroy_vpn"]
     assert "POST /jobs" not in agent.calls
     assert holder["result"].state == "stopped"
-    assert not service._stop_requested
+    assert not db_workflow._stop_requested
 
 
 def test_a_failed_stop_does_not_make_the_run_remove_the_vpn(monkeypatch, vpn_calls):
@@ -471,10 +492,66 @@ def test_a_failed_stop_does_not_make_the_run_remove_the_vpn(monkeypatch, vpn_cal
     agent.abort_status = 502
     with pytest.raises(Exception):
         service.stop(RUN_ID, agent=agent.client())
-    assert not service._stop_requested
+    assert not db_workflow._stop_requested
     assert vpn_calls == ["ensure_vpn"]
 
     agent.abort_status = None
     service.stop(RUN_ID, agent=agent.client())
     thread.join(5)
     assert vpn_calls == ["ensure_vpn", "destroy_vpn"]
+
+
+# ---- before the VPN: it takes 15-20 minutes to build
+
+
+@pytest.fixture
+def vpn_not_reached(monkeypatch):
+    """Fails the run at once if a check let it through, instead of following a job that never ends."""
+
+    def ensure(mig, job_id):
+        raise AssertionError("the VPN must not be built")
+
+    monkeypatch.setattr(vpn, "ensure_vpn", ensure)
+
+
+def test_broken_cluster_stops_the_run_before_the_vpn(vpn_not_reached):
+    agent = FakeAgent()
+    agent.health = {"kafka": True, "connect": False, "plugins_missing": ["debezium"]}
+
+    result = service.run(INPUT, agent=agent.client())
+
+    assert result.state == "failed"
+    assert "connect" in result.message and "debezium" in result.message
+
+
+def test_overlapping_ranges_stop_the_run_before_the_vpn(vpn_not_reached, monkeypatch):
+    source_cidr = copy.deepcopy(INPUT)["source"]["network"]["cidr"]
+    monkeypatch.setenv("CDC_OCI_VCN_CIDR", source_cidr)
+    monkeypatch.setenv("CDC_NODE_SUBNET_CIDR", source_cidr)
+
+    result = service.run(INPUT, agent=FakeAgent().client())
+
+    assert result.state == "failed" and "overlap" in result.message
+
+
+def test_missing_oci_setting_is_named_before_the_vpn(vpn_not_reached, monkeypatch):
+    monkeypatch.delenv("CDC_OCI_VCN_CIDR")
+
+    result = service.run(INPUT, agent=FakeAgent().client())
+
+    assert result.state == "failed" and "CDC_OCI_VCN_CIDR" in result.message
+
+
+def test_checks_for_the_vpn_are_skipped_when_no_vpn_is_built(vpn_calls, monkeypatch):
+    monkeypatch.delenv("CDC_OCI_VCN_CIDR")
+    agent = FakeAgent()
+    agent.health = {"kafka": False, "connect": False}
+    inp = {**copy.deepcopy(INPUT), "options": {"skip_vpn": True}}
+
+    thread, _ = start(agent, inp)
+    wait_created(agent, thread)
+    agent.job = {**agent.job, "state": "aborted"}
+    thread.join()
+
+    assert "GET /status" not in agent.calls
+    assert agent.request is not None

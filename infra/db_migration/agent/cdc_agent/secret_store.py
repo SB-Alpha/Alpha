@@ -2,7 +2,10 @@
 
 A request reaches one agent, but Connect tasks read the properties file on whichever
 node they run. So the agent writes the values encrypted to a compacted topic, and
-every agent keeps its own file (mode 600) in step with that topic.
+every agent keeps its own files (mode 600) in step with that topic.
+
+Each job has two files. Connect's folder holds only the two accounts its connectors use;
+the admin, DDL and app accounts are in a folder that only the agent mounts.
 """
 
 import logging
@@ -24,6 +27,8 @@ REQUIRED_KEYS = frozenset(
     for account in ("source", "source.app", "source.admin", "target", "target.ddl", "target.admin")
     for field in ("user", "password")
 )
+# Referenced by connectors/*.json.
+CONNECT_KEYS = frozenset({"source.user", "source.password", "target.user", "target.password"})
 
 
 class SecretsDisabled(RuntimeError):
@@ -71,7 +76,7 @@ class SecretStore:
     def delete(self, job_id: str) -> None:
         if self._fernet is not None:
             self._send(job_id, None)
-        self._path(job_id).unlink(missing_ok=True)
+        self._remove(job_id)
 
     def sync(self) -> None:
         if self._fernet is None:
@@ -80,18 +85,32 @@ class SecretStore:
             if not JOB_ID_PATTERN.match(job_id):
                 log.error("ignored a secrets record with a bad key")
             elif token is None:
-                self._path(job_id).unlink(missing_ok=True)
+                self._remove(job_id)
             else:
                 try:
                     self._write(job_id, self._fernet.decrypt(token))
                 except InvalidToken:
                     log.error("secrets for %s do not decrypt with this node's SECRETS_KEY", job_id)
 
-    def _path(self, job_id: str):
-        return self._settings.secrets_dir / f"{job_id}.properties"
+    def _paths(self, job_id: str):
+        name = f"{job_id}.properties"
+        return self._settings.secrets_dir / name, self._settings.agent_secrets_dir / name
+
+    def _remove(self, job_id: str) -> None:
+        for path in self._paths(job_id):
+            path.unlink(missing_ok=True)
 
     def _write(self, job_id: str, content: bytes) -> None:
-        path = self._path(job_id)
+        lines = content.decode().splitlines()
+        connect = [line for line in lines if line.split("=", 1)[0] in CONNECT_KEYS]
+        agent = [line for line in lines if line.split("=", 1)[0] not in CONNECT_KEYS]
+        connect_path, agent_path = self._paths(job_id)
+        self._write_file(agent_path, ("\n".join(agent) + "\n").encode())
+        # Replaces a file from before the split, so Connect's copy loses the other accounts.
+        self._write_file(connect_path, ("\n".join(connect) + "\n").encode())
+
+    @staticmethod
+    def _write_file(path, content: bytes) -> None:
         if path.exists() and path.read_bytes() == content:
             return
         # mkstemp creates the file with mode 600; replace is atomic for a reader like Connect.

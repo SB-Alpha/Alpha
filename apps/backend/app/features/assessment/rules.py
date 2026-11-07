@@ -23,6 +23,9 @@ MIN_SOURCE_PG_MAJOR = 16
 CDC_TABLE_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$")
 
 # 원본이 값을 안 줬을 때 쓰는 기본값. 쓰이면 risks 에 남깁니다.
+# Cloud Run 인스턴스 한 개의 최대 크기. 원본 Fargate 태스크가 이보다 크면 같은 크기로 옮길 수 없음
+CLOUD_RUN_MAX_VCPU = 8
+CLOUD_RUN_MAX_MEMORY_MIB = 32768
 DEFAULT_PORT = 8080
 DEFAULT_HEALTH_PATH = "/health/ready"
 DEFAULT_CPU = 1  # vCPU
@@ -161,6 +164,20 @@ def run_checks(inv: InventoryForPlanning) -> list[PlanCheck]:
         checks.append(PlanCheck(
             id="replication_slot_available", title="복제 슬롯 여유", result="pass" if free >= 1 else "fail",
             detail=detail,
+        ))
+
+    # 3-3. Cloud Run 으로 옮길 수 있는 설정인지. 태스크 정의를 본 경우에만 판정합니다 (직접 입력은 None)
+    blockers = list(app.cloud_run_blockers or [])
+    cpu = _cloud_run_cpu(app.cpu_units)
+    if cpu is not None and cpu > CLOUD_RUN_MAX_VCPU:
+        blockers.append(f"CPU {cpu} vCPU (Cloud Run 최대 {CLOUD_RUN_MAX_VCPU} vCPU)")
+    if app.memory_mib is not None and app.memory_mib > CLOUD_RUN_MAX_MEMORY_MIB:
+        blockers.append(f"메모리 {app.memory_mib} MiB (Cloud Run 최대 {CLOUD_RUN_MAX_MEMORY_MIB} MiB)")
+    if app.cloud_run_blockers is not None or blockers:
+        checks.append(PlanCheck(
+            id="cloud_run_compatible", title="Cloud Run 호환", result="fail" if blockers else "pass",
+            detail=("Cloud Run 으로 옮길 수 없는 설정: " + "; ".join(blockers)) if blockers
+            else "옮길 수 없는 ECS 설정이 없음",
         ))
 
     # 4. 이미지 확보 가능 (주소가 있는지까지만. 실제 pull 은 provisioning 이 확인)
@@ -303,6 +320,9 @@ def collect_risks(inv: InventoryForPlanning, checks: list[PlanCheck]) -> list[Ri
 
     for gap in inv.gaps:
         risks.append(Risk(level="medium", title="원본 수집 누락", detail=gap))
+
+    for note in inv.app.cloud_run_notes:
+        risks.append(Risk(level="medium", title="Cloud Run 에서 확인할 ECS 설정", detail=note))
 
     moved = sorted(k for k in inv.app.secret_refs if k not in PROVISIONING_INJECTED_ENV)
     if moved:

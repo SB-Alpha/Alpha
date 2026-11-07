@@ -57,6 +57,8 @@ class TargetSpec(BaseModel):
     database: str
     sslmode: str = "require"
     app_role: str | None = Field(default=None, description="Role the target app uses; gets DML on created tables")
+    keep_ddl_user: bool = Field(default=False, description="The caller's own account; keeps its login after the job")
+    keep_sink_user: bool = Field(default=False, description="The caller's own account; keeps its login after the job")
 
 
 class JobOptions(BaseModel):

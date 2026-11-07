@@ -3,10 +3,13 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
+import { DynamicCanvas } from "@/components/3d/DynamicCanvas";
 import { CdcJobControls } from "@/components/CdcJobControls";
 import { RecoveryBanner } from "@/components/CutoverSafety";
 import { CutoverTimeline } from "@/components/CutoverTimeline";
 import { DashboardPanel } from "@/components/DashboardPanel";
+import { FinOpsGreenOpsCard } from "@/components/FinOpsGreenOpsCard";
+import { MigrationSummaryReport } from "@/components/MigrationSummaryReport";
 import { PlanApproval } from "@/components/PlanApproval";
 import { RunActions } from "@/components/RunActions";
 import { SelfHealingCard } from "@/components/SelfHealingCard";
@@ -48,23 +51,42 @@ export function RunView() {
     };
   }, [refresh]);
 
-  const act = async (command: () => Promise<RunStatus>) => {
+  const act = async (command: () => Promise<RunStatus>): Promise<boolean> => {
     setIsBusy(true);
     try {
       setRun(await command());
       setError(null);
+      return true;
     } catch (e) {
       setError(errorText(e));
+      return false;
     } finally {
       setIsBusy(false);
     }
   };
 
+  const handleNavigateSection = useCallback((sectionId: string) => {
+    const el = document.getElementById(sectionId);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, []);
+
   return (
     <div className="space-y-6">
-      <Link href="/" className="text-sm text-ink/60 hover:text-ink">
-        ← 새 이전 요청
-      </Link>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Link href="/" className="text-sm text-ink/60 hover:text-ink">
+          ← 새 이전 요청
+        </Link>
+        {run && (
+          <Link
+            href={`/runs/${encodeURIComponent(run.run_id)}/report`}
+            className="text-xs font-medium text-ink/70 underline underline-offset-4 hover:text-ink"
+          >
+            시각적 요약 리포트 (/runs/{run.run_id}/report) →
+          </Link>
+        )}
+      </div>
 
       {error && (
         <p role="alert" className="rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-800">
@@ -94,9 +116,17 @@ export function RunView() {
 
           <RecoveryBanner run={run} />
 
+          {/* Step 1: 상단 컴팩트 3D 토폴로지 & 베지에 곡선 CDC 아치 */}
+          <DynamicCanvas run={run} onNavigateSection={handleNavigateSection} />
+
           <DashboardPanel run={run} />
 
-          <StageStepper run={run} />
+          {/* 공시가 기준 월 비용 추정 (실측 아님) */}
+          <FinOpsGreenOpsCard run={run} />
+
+          <div id="stage-stepper-section">
+            <StageStepper run={run} />
+          </div>
 
           <PlanApproval
             run={run}
@@ -104,6 +134,7 @@ export function RunView() {
             onApprove={(comment) => act(() => workflows.approve(run.run_id, "plan", comment))}
           />
 
+          {/* Step 3 포함: 전환 기록 및 물리 전환 시뮬레이션 / 데모 주행 */}
           <CutoverTimeline run={run} />
 
           <SelfHealingCard
@@ -114,6 +145,7 @@ export function RunView() {
             }
           />
 
+          {/* Step 3 포함: 승인 ② 대기 시 CutoverApprovalPanel 내부에 물리 전환 시뮬레이션 렌더링 */}
           <RunActions
             run={run}
             isBusy={isBusy}
@@ -127,6 +159,9 @@ export function RunView() {
             onRetryCleanup={() => act(() => workflows.retryCleanup(run.run_id))}
             onAbort={(reason) => act(() => workflows.abort(run.run_id, reason))}
           />
+
+          {/* Step 2: 마이그레이션 완료 후 ScrollControls 플라이스루 시각적 요약 리포트 */}
+          {run.state === "succeeded" && <MigrationSummaryReport run={run} />}
 
           <CdcJobControls run={run} onChanged={() => void refresh()} />
         </>

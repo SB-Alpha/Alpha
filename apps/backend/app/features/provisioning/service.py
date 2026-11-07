@@ -16,6 +16,7 @@ from .image_transfer import TransferResult, load_aws_credentials, parse_ecr_host
 from .providers import DEFAULT_PROVIDER, GCP, get_provider, terraform_dir
 from .schemas import AppDeployInput, AppDeployOutput, ProvisioningInput, ProvisioningOutput
 from .target import TargetBuildError, build_target, find_problems
+from .target_secrets import PutSecret, store_target_secrets
 from .terraform import ProvisioningError, TerraformCli, summarize_plan
 from .worker_client import WorkerClient
 
@@ -124,8 +125,15 @@ def _converge(
     return project_id, counts, applied, outputs
 
 
-def run(inp: ProvisioningInput, ctx: Reporter, *, terraform: TerraformCli | None = None) -> ProvisioningOutput:
+def run(
+    inp: ProvisioningInput,
+    ctx: Reporter,
+    *,
+    terraform: TerraformCli | None = None,
+    put_secret: PutSecret | None = None,
+) -> ProvisioningOutput:
     # provisioning 단계: 목적지 인프라를 만들고 target 을 돌려준다.
+    # 목적지 비밀(관리자 계정, VPN 자격 증명)은 비밀 저장소에 넣고 결과에는 이름표만 남긴다.
     tf = terraform or default_terraform(inp.provider)
     project_id, counts, applied, outputs = _converge(inp, ctx, tf, deploy_app=False)
 
@@ -137,6 +145,16 @@ def run(inp: ProvisioningInput, ctx: Reporter, *, terraform: TerraformCli | None
 
     # CDC 가 목적지에 닿지 못할 수 있는 설정(SSL 모드, 버전, 대역 겹침)이 있으면 경고로 알림, 막지는 않음.
     problems = find_problems(target)
+
+    # db_migration 이 target.credentials_ref 의 이름표를 resolve() 로 꺼낼 수 있게 값을 저장한다.
+    # 계획만 세우는 dry_run 은 저장하지 않는다. 바뀔 것이 없어도(이미 있는 인프라) 이 run 의 이름표로는 저장한다.
+    if inp.dry_run:
+        ctx.report("running", 92, message="dry_run 이라 목적지 비밀을 저장하지 않습니다")
+    else:
+        stored, not_stored = store_target_secrets(outputs, run_id=inp.run_id, put=put_secret)
+        problems += not_stored
+        ctx.report("running", 92, message="목적지 비밀 저장: " + ", ".join(stored))
+
     if problems:
         ctx.report("running", 95, message="주의: " + "; ".join(problems))
     return ProvisioningOutput(target=target, problems=problems, changes=counts, applied=applied)

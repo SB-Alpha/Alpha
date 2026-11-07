@@ -7,15 +7,16 @@
 set -euo pipefail
 
 key="${SSH_KEY:-$HOME/.ssh/alpha-cdc}"
-ports=(2201 2202 2203)
+# bastion.sh가 여는 포트. 다르게 열었으면 CDC_SSH_PORTS로 바꾼다.
+read -r -a ports <<< "${CDC_SSH_PORTS:-2201 2202 2203}"
 here="$(cd "$(dirname "$0")" && pwd)"
 
-put_secret() { # <파일명> <로컬 파일>
+put_secret() { # <노드 폴더> <파일명> <로컬 파일>
   for p in "${ports[@]}"; do
     ssh -i "$key" -p "$p" ubuntu@localhost \
-      "sudo install -o 1001 -g 1001 -m 600 /dev/stdin /etc/alpha-cdc/secrets/$1" < "$2"
+      "sudo install -o 1001 -g 1001 -m 600 /dev/stdin $1/$2" < "$3"
   done
-  echo "$1 → ${#ports[@]} nodes"
+  echo "$2 → ${#ports[@]} nodes ($1)"
 }
 
 case "${1:-}" in
@@ -26,10 +27,17 @@ case "${1:-}" in
              target.admin.user target.admin.password; do
       grep -q "^$k=." "$3" || { echo "$3 에 $k 가 없다" >&2; exit 2; }
     done
-    put_secret "$2.properties" "$3"
+    # Connect에는 커넥터가 쓰는 두 계정만 준다. secret_store.py의 CONNECT_KEYS와 같다.
+    connect_keys='^(source|target)\.(user|password)='
+    tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
+    grep -E "$connect_keys" "$3" > "$tmp"
+    put_secret /etc/alpha-cdc/secrets "$2.properties" "$tmp"
+    grep -vE "$connect_keys" "$3" > "$tmp"
+    put_secret /etc/alpha-cdc/agent-secrets "$2.properties" "$tmp"
     ;;
   worker-token)
-    put_secret worker.token "$2"
+    put_secret /etc/alpha-cdc/agent-secrets worker.token "$2"
     ;;
   tunnel-token)
     for p in "${ports[@]}"; do

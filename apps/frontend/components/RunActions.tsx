@@ -15,7 +15,7 @@ type Props = {
     approver: string,
     preflight: DisplayedPreflight,
     acknowledgeUnknown: boolean,
-  ) => void;
+  ) => Promise<boolean | void> | boolean | void;
   onManual: (output: Record<string, unknown>, note: string) => void;
   onResume: () => void;
   onRetryCleanup: () => void;
@@ -51,6 +51,7 @@ export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, 
       {isWaitingCutover && (
         <CutoverApprovalPanel
           key={run.run_id}
+          run={run}
           runId={run.run_id}
           readiness={run.cutover_readiness ?? null}
           isBusy={isBusy}

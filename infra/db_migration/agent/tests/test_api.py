@@ -119,3 +119,26 @@ def test_probe_reports_each_endpoint(client):
 
     assert [r["ok"] for r in result] == [True, False]
     assert result[1]["error"]
+
+
+def test_cutover_is_refused_when_the_worker_is_not_ready(client, monkeypatch):
+    add(client, state="waiting_approval", phase="cutover_ready")
+    started = []
+
+    def not_ready():
+        raise main.WorkerNotReady("Worker mode is HOLD, expected SOURCE")
+
+    monkeypatch.setattr(main.runner, "check_worker", not_ready)
+    monkeypatch.setattr(main.runner, "start_cutover", lambda job, by: started.append(by))
+
+    resp = client.post("/jobs/job01/cutover", json={"approved_by": "pm"})
+
+    assert resp.status_code == 409 and "HOLD" in resp.json()["detail"]
+    assert started == [] and client.jobs["job01"].phase == "cutover_ready"
+
+
+def test_status_says_whether_the_worker_is_configured(client, monkeypatch):
+    monkeypatch.setattr(main.runner.connect, "workers_ok", lambda: False)
+    main.store.all = lambda: {}
+
+    assert "worker_configured" in client.get("/status").json()

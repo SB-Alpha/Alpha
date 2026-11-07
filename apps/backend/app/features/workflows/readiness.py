@@ -72,7 +72,8 @@ def _copy_check(run: RunStatus) -> ReadinessCheck:
 
 
 def _mismatch_check(run: RunStatus) -> ReadinessCheck:
-    base = {"id": "mismatch", "title": "불일치 테이블"}
+    # 전환 전 지표는 행 수만 비교합니다. 내용 비교는 전환 시점의 verification 입니다.
+    base = {"id": "mismatch", "title": "행 수 불일치 테이블"}
     value = _as_number(_find_metric(run, "mismatch"))
     if value is None:
         return ReadinessCheck(**base, status="unknown", detail=_NOT_PROVIDED)

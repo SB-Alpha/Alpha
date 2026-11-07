@@ -4,16 +4,29 @@ import { useEffect, useState } from "react";
 import { preflightVerdict } from "@/lib/dashboard";
 import { GATE_LABEL } from "@/lib/labels";
 import { BUTTON_PRIMARY, BUTTON_SECONDARY, INPUT } from "@/lib/ui";
-import { workflows, type CutoverReadiness, type DisplayedPreflight, type PreflightReport } from "@/lib/workflows";
+import {
+  workflows,
+  type CutoverReadiness,
+  type DisplayedPreflight,
+  type PreflightReport,
+  type RunStatus,
+} from "@/lib/workflows";
+import { CutoverSimulationWidget } from "./3d/CutoverSimulationWidget";
 import { ReadinessTable } from "./CutoverSafety";
 import { PreflightChecklist } from "./PreflightChecklist";
 
 type Props = {
+  run: RunStatus;
   runId: string;
   readiness: CutoverReadiness | null;
   isBusy: boolean;
   isTrafficUncertain: boolean;
-  onApprove: (comment: string, approver: string, preflight: DisplayedPreflight, acknowledgeUnknown: boolean) => void;
+  onApprove: (
+    comment: string,
+    approver: string,
+    preflight: DisplayedPreflight,
+    acknowledgeUnknown: boolean,
+  ) => Promise<boolean | void> | boolean | void;
 };
 
 /** 어느 요청의 응답인지 key 로 남깁니다. key 가 다르면 지난 점검이므로 보여주지 않습니다. */
@@ -39,12 +52,13 @@ function preflightWarning(isLoading: boolean, report: PreflightReport | null): W
   return null;
 }
 
-export function CutoverApprovalPanel({ runId, readiness, isBusy, isTrafficUncertain, onApprove }: Props) {
+export function CutoverApprovalPanel({ run, runId, readiness, isBusy, isTrafficUncertain, onApprove }: Props) {
   const [approver, setApprover] = useState("");
   const [comment, setComment] = useState("");
   const [isUnknownConfirmed, setIsUnknownConfirmed] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [result, setResult] = useState<PreflightResult | null>(null);
+  const [sequenceTrigger, setSequenceTrigger] = useState(0);
 
   const requestKey = `${runId}:${attempt}`;
   const current = result?.key === requestKey ? result : null;
@@ -81,8 +95,21 @@ export function CutoverApprovalPanel({ runId, readiness, isBusy, isTrafficUncert
   const isUnknownAcknowledged = decision === "needs_confirmation" && isUnknownConfirmed;
   const canApprove = hasApprover && (decision === "go" || isUnknownAcknowledged);
 
+  const handleApproveClick = async () => {
+    try {
+      const ok = await onApprove(comment, approver, displayed, isUnknownAcknowledged);
+      // 승인 API가 성공(true)을 반환한 경우에만 전환 시뮬레이션 애니메이션을 트리거합니다.
+      // API 실패나 거부로 false가 반환되거나 오류가 발생하면 트리거하지 않습니다.
+      if (ok === true) {
+        setSequenceTrigger((n) => n + 1);
+      }
+    } catch {
+      // 승인이 거절되거나 실패하면 전환 시뮬레이션 애니메이션을 시작하지 않습니다.
+    }
+  };
+
   return (
-    <div className="rounded-xl border-2 border-amber-400 bg-white p-5">
+    <div id="cutover-approval-section" className="rounded-xl border-2 border-amber-400 bg-white p-5">
       <h3 className="text-lg font-semibold">{GATE_LABEL.cutover}</h3>
       <p className="mt-1 text-sm text-ink/70">
         {isTrafficUncertain
@@ -134,6 +161,16 @@ export function CutoverApprovalPanel({ runId, readiness, isBusy, isTrafficUncert
         <PreflightChecklist report={report} isLoading={isLoading} error={error} />
       </div>
 
+      {/* Step 3: 승인 ② 물리 엔진 기반 트래픽 전환 시뮬레이터 & 데모 주행 모드 */}
+      <div className="mt-4 border-t border-ink/10 pt-4">
+        <CutoverSimulationWidget
+          run={run}
+          sequenceTrigger={sequenceTrigger}
+          defaultOpen={true}
+          title="승인 ② 사전 리허설: 전환 순서 애니메이션 & 파이프라인 주행 데모 (실측 아님)"
+        />
+      </div>
+
       <div className="mt-4 border-t border-ink/10 pt-4">
         {warning && (
           <div role="status" className={`mb-3 rounded-md px-3 py-2 text-sm ${warning.tone}`}>
@@ -174,7 +211,7 @@ export function CutoverApprovalPanel({ runId, readiness, isBusy, isTrafficUncert
         <button
           type="button"
           disabled={isBusy || !canApprove}
-          onClick={() => onApprove(comment, approver, displayed, isUnknownAcknowledged)}
+          onClick={handleApproveClick}
           className={`${BUTTON_PRIMARY} mt-3 w-full sm:w-auto`}
         >
           {warning ? "경고 확인 후 전환 승인" : "전환 승인"}

@@ -22,6 +22,13 @@ class Settings:
     reconcile_interval_s: float
     secrets_key: str | None = field(default=None, repr=False)
     secrets_topic: str = "_alpha_cdc_secrets"
+    # Connect reads only secrets_dir. Accounts it does not use stay here, mounted on the agent only.
+    agent_secrets_dir: Path = Path("/etc/alpha-cdc/agent-secrets")
+    worker_timeout_s: float = 5
+    # Limit of the data comparison after the switch. Over it the result is unverifiable.
+    verify_timeout_s: float = 3600
+    # While waiting for approval, GET /jobs/{id} counts rows on both databases at most this often.
+    metrics_interval_s: float = 30
 
 
 @lru_cache
@@ -42,6 +49,10 @@ def get_settings() -> Settings:
         reconcile_interval_s=float(os.getenv("RECONCILE_INTERVAL_S", "3")),
         secrets_key=os.getenv("SECRETS_KEY") or None,
         secrets_topic=os.getenv("SECRETS_TOPIC", "_alpha_cdc_secrets"),
+        agent_secrets_dir=Path(os.getenv("AGENT_SECRETS_DIR", "/etc/alpha-cdc/agent-secrets")),
+        worker_timeout_s=float(os.getenv("WORKER_TIMEOUT_S", "5")),
+        verify_timeout_s=float(os.getenv("VERIFY_TIMEOUT_S", "3600")),
+        metrics_interval_s=float(os.getenv("METRICS_INTERVAL_S", "30")),
     )
 
 

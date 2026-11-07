@@ -16,9 +16,10 @@ REQUEST = {
     "source": {"host": "src", "database": "postgres", "tables": ["public.work_items"], "app_role": "alpha"},
     "target": {"host": "tgt", "database": "app", "app_role": "app_user"},
 }
-PROPS = "\n".join(f"{a}.{f}={a}-{f}"
-                  for a in ("source", "source.app", "source.admin", "target", "target.ddl", "target.admin")
-                  for f in ("user", "password"))
+CONNECT_PROPS = "\n".join(f"{a}.{f}={a}-{f}" for a in ("source", "target") for f in ("user", "password"))
+AGENT_PROPS = "\n".join(f"{a}.{f}={a}-{f}"
+                        for a in ("source.app", "source.admin", "target.ddl", "target.admin")
+                        for f in ("user", "password"))
 
 
 class FakeStore:
@@ -27,6 +28,9 @@ class FakeStore:
 
     def get(self, job_id):
         return self.jobs[job_id].model_copy(deep=True)
+
+    def all(self):
+        return self.jobs
 
     def put(self, job):
         self.jobs[job.job_id] = job
@@ -59,9 +63,11 @@ def setup(monkeypatch, tmp_path: Path):
         calls: list = []
         job = Job(job_id="job01", request=JobRequest(**REQUEST), state=state, phase=phase)
         settings = Settings("n1", "http://connect", "kafka", "_jobs", 1, tmp_path, tmp_path,
-                            "http://worker", None, 2, 10, 3)
+                            "http://worker", None, 2, 10, 3, agent_secrets_dir=tmp_path / "agent")
+        settings.agent_secrets_dir.mkdir(exist_ok=True)
         if secrets_file:
-            (tmp_path / "job01.properties").write_text(PROPS)
+            (tmp_path / "job01.properties").write_text(CONNECT_PROPS)
+            (settings.agent_secrets_dir / "job01.properties").write_text(AGENT_PROPS)
         runner = jobs.Runner(settings, FakeStore(job), FakeSecrets(calls))
         runner.connect = FakeConnect(calls)
 
@@ -71,6 +77,8 @@ def setup(monkeypatch, tmp_path: Path):
             yield locked
 
         monkeypatch.setattr(jobs.db, "job_lock", lock)
+        monkeypatch.setattr(jobs.db, "retire_target_accounts", lambda ep, users: calls.append(
+            ("retire", ep.user, users)) or users)
         monkeypatch.setattr(jobs.db, "drop_slot", lambda ep, slot: calls.append(("drop_slot", ep.user)) or True)
         monkeypatch.setattr(jobs.db, "cleanup_source", lambda ep, job, repl: calls.append(
             ("cleanup_source", ep.user, repl)) or {"role_dropped": True})
@@ -161,7 +169,8 @@ def test_abort_cleans_everything_in_order(setup):
     job = runner.abort("job01")
 
     assert [c[0] for c in calls] == [
-        "secrets_sync", "lock", "connect_delete", "connect_delete", "drop_slot", "cleanup_source", "secrets_delete",
+        "secrets_sync", "lock", "connect_delete", "connect_delete", "drop_slot", "cleanup_source", "retire",
+        "secrets_delete",
     ]
     assert ("cleanup_source", "source.admin-user", "source-user") in calls
     assert job.state == "aborted"
@@ -270,6 +279,71 @@ def test_a_failed_connector_task_still_fails_the_job(watched):
     assert job.message == f"streaming: {job.source_connector}: boom"
 
 
+@pytest.fixture
+def waiting(setup, monkeypatch):
+    """A job waiting for approval, with a controllable clock. Records each row count."""
+    runner, _ = setup(phase="cutover_ready")
+    job = runner.store.get("job01")
+    job.state = "waiting_approval"
+    job.metrics = {"mismatch": 0, "evidence_of": "reconcile"}
+    clock = {"now": 1000.0, "calls": [], "fail": None}
+
+    def compare(*args, checksum=True):
+        clock["calls"].append(checksum)
+        if clock["fail"]:
+            raise clock["fail"]
+        return compared(10 + len(clock["calls"]), 10)
+
+    monkeypatch.setattr(jobs.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(jobs.db, "compare", compare)
+    monkeypatch.setattr(jobs.db, "slot_lag_bytes", lambda *a: 0)
+    return runner, job, clock
+
+
+def test_polling_does_not_measure_again_within_the_interval(waiting):
+    runner, job, clock = waiting
+
+    first = runner.refresh_metrics(job.model_copy(deep=True))
+    clock["now"] += runner.settings.metrics_interval_s - 1
+    second = runner.refresh_metrics(job.model_copy(deep=True))
+
+    assert clock["calls"] == [False]  # one count, no checksum
+    assert second.metrics["rows_checked"] == first.metrics["rows_checked"] == 11
+
+    clock["now"] += 1
+    third = runner.refresh_metrics(job.model_copy(deep=True))
+    assert clock["calls"] == [False, False]
+    assert third.metrics["rows_checked"] == 12
+
+
+def test_a_failed_measurement_keeps_the_last_numbers_until_the_next_try(waiting):
+    runner, job, clock = waiting
+    runner.refresh_metrics(job.model_copy(deep=True))
+
+    clock["fail"] = psycopg.OperationalError("connection lost")
+    clock["now"] += runner.settings.metrics_interval_s
+    failed = runner.refresh_metrics(job.model_copy(deep=True))
+    assert "connection lost" in failed.metrics["measure_error"]
+    assert failed.metrics["rows_checked"] == 11
+    assert len(clock["calls"]) == 2
+
+    runner.refresh_metrics(job.model_copy(deep=True))
+    assert len(clock["calls"]) == 2
+
+    clock["fail"] = None
+    clock["now"] += runner.settings.metrics_interval_s
+    assert "measure_error" not in runner.refresh_metrics(job.model_copy(deep=True)).metrics
+
+
+@pytest.mark.parametrize("phase", ["snapshot", "streaming", "cutover", "stabilizing"])
+def test_only_waiting_for_approval_measures_on_a_read(waiting, phase):
+    runner, job, clock = waiting
+    job.phase = phase
+
+    assert runner.refresh_metrics(job).metrics == {"mismatch": 0, "evidence_of": "reconcile"}
+    assert clock["calls"] == []
+
+
 def test_snapshot_lasts_until_the_rows_of_the_start_have_arrived(watched):
     checks = iter([compared(1000, 0), compared(1200, 999), compared(1300, 1000)])
     runner, _ = watched(lambda: next(checks))
@@ -357,3 +431,103 @@ def test_retry_restarts_failed_connectors_only_once_they_exist(setup):
     job.phase = "target_prepare"
     runner.restart_failed_connectors(job)
     assert restarted == []
+
+
+def test_close_takes_login_from_the_target_accounts_before_the_secrets_go(setup):
+    runner, calls = setup(phase="stabilizing")
+    job = runner.store.get("job01")
+    runner.close(job)
+    names = [c[0] for c in calls]
+
+    assert ("retire", "target.admin-user", ["target-user", "target.ddl-user"]) in calls
+    assert names.index("retire") < names.index("secrets_delete")
+    assert job.evidence["cleanup"]["target_accounts"] == {"retired": ["target-user", "target.ddl-user"]}
+
+
+def test_abort_takes_login_from_the_target_accounts_too(setup):
+    runner, calls = setup()
+    runner.abort("job01")
+    assert any(c[0] == "retire" for c in calls)
+
+
+def test_app_account_keeps_its_login(setup):
+    runner, calls = setup(phase="stabilizing")
+    job = runner.store.get("job01")
+    job.request.target.app_role = "target-user"
+    runner.close(job)
+
+    assert ("retire", "target.admin-user", ["target.ddl-user"]) in calls
+
+
+def test_accounts_the_caller_gave_keep_their_login(setup):
+    runner, calls = setup(phase="stabilizing")
+    job = runner.store.get("job01")
+    job.request.target.keep_sink_user = True
+    runner.close(job)
+
+    assert ("retire", "target.admin-user", ["target.ddl-user"]) in calls
+
+
+def test_accounts_stay_while_another_job_uses_the_same_target(setup):
+    runner, calls = setup(phase="stabilizing")
+    job = runner.store.get("job01")
+    other = job.model_copy(deep=True, update={"job_id": "job02", "state": "running"})
+    runner.store.put(other)
+    runner.close(job)
+
+    assert not any(c[0] == "retire" for c in calls)
+    assert job.evidence["cleanup"]["target_accounts"] == {
+        "kept": ["target-user", "target.ddl-user"], "used_by": ["job02"]}
+
+    runner.store.put(other.model_copy(update={"state": "succeeded"}))
+    second = runner.store.get("job01")
+    runner.close(second)
+    assert any(c[0] == "retire" for c in calls)
+
+
+def test_close_waits_for_the_comparison_while_its_agent_holds_the_lock(setup):
+    runner, calls = setup(phase="stabilizing", locked=False)
+    job = runner.store.get("job01")
+    job.evidence["verification"] = {"state": "running"}
+
+    with pytest.raises(jobs.CloseRefused, match="still running"):
+        runner.close(job)
+    assert not any(c[0] == "drop_slot" for c in calls)
+
+
+def test_close_goes_on_when_the_agent_comparing_has_stopped(setup):
+    runner, calls = setup(phase="stabilizing")
+    job = runner.store.get("job01")
+    job.evidence["verification"] = {"state": "running"}
+    runner.store.put(job.model_copy(deep=True))
+
+    runner.close(job)
+
+    assert job.state == "succeeded" and job.evidence["verification"]["state"] == "unverifiable"
+    assert any(c[0] == "drop_slot" for c in calls)
+
+
+def test_close_is_refused_after_a_mismatch(setup):
+    runner, calls = setup(phase="stabilizing", state="failed")
+    job = runner.store.get("job01")
+    job.message = "mismatch"
+
+    with pytest.raises(jobs.CloseRefused, match="mismatch"):
+        runner.close(job)
+    assert not any(c[0] == "drop_slot" for c in calls)
+
+
+def test_failure_to_retire_is_reported_and_does_not_undo_the_cleanup(setup, monkeypatch):
+    runner, calls = setup(phase="stabilizing")
+
+    def broken(ep, users):
+        raise RuntimeError("no route, target.admin-password")
+
+    monkeypatch.setattr(jobs.db, "retire_target_accounts", broken)
+    job = runner.store.get("job01")
+    runner.close(job)
+    accounts = job.evidence["cleanup"]["target_accounts"]
+
+    assert job.state == "succeeded" and accounts["accounts"] == ["target-user", "target.ddl-user"]
+    assert "no route" in accounts["error"] and "target.admin-password" not in accounts["error"]
+    assert ("secrets_delete", "job01") in calls

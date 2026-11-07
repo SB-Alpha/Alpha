@@ -9,10 +9,12 @@ Accounts (from /etc/alpha-cdc/secrets/<job_id>.properties):
   target.admin.user / target.admin.password  admin account, creates the two target accounts
 """
 
+import hashlib
 import os
 import subprocess
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator
@@ -21,6 +23,10 @@ import psycopg
 from psycopg import sql
 
 from cdc_agent.models import MARKER_TABLE, Job
+
+DIGEST_DEADLINE_CHECK_ROWS = 10_000
+# The deadline is only checked between rows: a comparison behind a DDL gives up here instead of waiting without limit.
+SNAPSHOT_LOCK_TIMEOUT = "5s"
 
 
 @dataclass(frozen=True)
@@ -164,6 +170,17 @@ def cleanup_source(admin: Endpoint, job: Job, repl_user: str) -> dict:
     return {"publication_dropped": job.publication_name, "role_dropped": existed}
 
 
+def retire_target_accounts(admin: Endpoint, users: list[str]) -> list[str]:
+    """No login once replication has ended. A new run turns it back on (set_login). Safe to run again."""
+    retired = []
+    with connect(admin) as conn:
+        for user in users:
+            if role_exists(conn, user):
+                conn.execute(sql.SQL("ALTER ROLE {} NOLOGIN").format(sql.Identifier(user)))
+                retired.append(user)
+    return retired
+
+
 def precheck_source(ep: Endpoint, job: Job) -> list[dict]:
     checks: list[dict] = []
     with connect(ep) as conn:
@@ -221,6 +238,8 @@ def copy_schema(source: Endpoint, target_ddl: Endpoint, target_sink_user: str, j
         if load.returncode != 0:
             raise RuntimeError(f"schema load failed: {load.stderr.strip()[:300]}")
         created = missing
+    with connect(source) as conn:
+        sequences = sequences_of(conn, job.request.source.tables)
     with connect(target_ddl) as conn:
         for schema in sorted({split(t)[0] for t in job.all_tables}):
             conn.execute(sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
@@ -236,35 +255,119 @@ def copy_schema(source: Endpoint, target_ddl: Endpoint, target_sink_user: str, j
             for table in job.request.source.tables:
                 conn.execute(sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON {} TO {}").format(
                     ident(table), sql.Identifier(app_role)))
+            # A serial column's default calls nextval as the app account.
+            for sequence in sequences:
+                conn.execute(sql.SQL("GRANT USAGE, SELECT ON SEQUENCE {} TO {}").format(
+                    sql.SQL(sequence), sql.Identifier(app_role)))
     return created
 
 
-def table_digest(conn: psycopg.Connection, table: str) -> dict:
+def sequences_of(conn: psycopg.Connection, tables: list[str]) -> list[str]:
+    """Quoted schema.name of the sequences these tables own or use in a column default."""
+    rows = conn.execute(
+        """
+        WITH wanted AS (SELECT to_regclass(name)::oid AS oid FROM unnest(%s::text[]) AS name)
+        SELECT format('%%I.%%I', n.nspname, s.relname)
+        FROM pg_class s
+        JOIN pg_namespace n ON n.oid = s.relnamespace
+        WHERE s.relkind = 'S' AND s.oid IN (
+            SELECT d.objid FROM pg_depend d
+            WHERE d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass
+              AND d.deptype IN ('a', 'i') AND d.refobjid IN (SELECT oid FROM wanted)
+            UNION
+            SELECT d.refobjid FROM pg_depend d
+            JOIN pg_attrdef a ON d.classid = 'pg_attrdef'::regclass AND d.objid = a.oid
+            WHERE d.refclassid = 'pg_class'::regclass AND a.adrelid IN (SELECT oid FROM wanted)
+        )
+        ORDER BY 1
+        """,
+        (tables,),
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+def sync_sequences(source: psycopg.Connection, target: psycopg.Connection, sequences: list[str]) -> dict[str, int]:
+    """Replication writes ids as they are and never moves the target's sequences. Safe to run again."""
+    values = {}
+    for sequence in sequences:
+        last_value, is_called = source.execute(
+            sql.SQL("SELECT last_value, is_called FROM {}").format(sql.SQL(sequence))).fetchone()
+        target.execute("SELECT setval(%s::regclass, %s, %s)", (sequence, last_value, is_called))
+        values[sequence] = last_value
+    return values
+
+
+def table_digest(conn: psycopg.Connection, table: str, deadline: float | None = None) -> dict:
+    """Hashed here row by row: a hash built in one SQL value stops at PostgreSQL's 1GB limit on large tables."""
     pk = primary_key(conn, table)
     order = sql.SQL(", ").join(sql.Identifier(c) for c in pk)
-    row = conn.execute(
-        sql.SQL("SELECT count(*), md5(coalesce(string_agg(md5(t::text), '' ORDER BY {}), '')) FROM {} t")
-        .format(order, ident(table))
-    ).fetchone()
-    return {"rows": row[0], "checksum": row[1]}
+    query = sql.SQL("SELECT md5(t::text) FROM {} t ORDER BY {}").format(ident(table), order)
+    digest = hashlib.sha256()
+    rows = 0
+    with conn.cursor() as cur:
+        for (row_hash,) in cur.stream(query):
+            digest.update(row_hash.encode())
+            rows += 1
+            if deadline is not None and rows % DIGEST_DEADLINE_CHECK_ROWS == 0 and time.monotonic() > deadline:
+                raise TimeoutError(f"comparing {table} ran past its time limit")
+    return {"rows": rows, "checksum": digest.hexdigest()}
 
 
 def table_rows(conn: psycopg.Connection, table: str) -> int:
     return conn.execute(sql.SQL("SELECT count(*) FROM {}").format(ident(table))).fetchone()[0]
 
 
-def compare(source: Endpoint, target: Endpoint, tables: list[str]) -> dict:
-    """Row count per table on each side, plus a whole-table checksum once the counts agree."""
+def compare(source: Endpoint, target: Endpoint, tables: list[str], *, checksum: bool = True) -> dict:
+    """Row count per table on each side, plus a whole-table checksum once the counts agree.
+
+    Without checksum, equal counts count as a match: enough for a progress display, not for a decision.
+    """
     result: dict = {"tables": {}, "mismatch": 0}
     with connect(source) as src, connect(target) as tgt:
         for table in tables:
             source_rows = table_rows(src, table)
             target_rows = table_rows(tgt, table) if table_exists(tgt, table) else None
-            if source_rows == target_rows:
+            if checksum and source_rows == target_rows:
                 s, t = table_digest(src, table), table_digest(tgt, table)
             else:
                 s = {"rows": source_rows, "checksum": None}
                 t = {"rows": target_rows, "checksum": None}
+            same = s == t
+            result["tables"][table] = {"source": s, "target": t, "match": same}
+            result["mismatch"] += 0 if same else 1
+    result["rows_checked"] = sum(v["source"]["rows"] for v in result["tables"].values())
+    return result
+
+
+def fix_snapshot(conn: psycopg.Connection) -> None:
+    """Keep what this connection reads at this moment, whatever is written later. No table is read here."""
+    conn.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+    # The snapshot is taken at the first statement, so this costs no extra round trip during the hold.
+    conn.execute("SELECT set_config('lock_timeout', %s, true)", (SNAPSHOT_LOCK_TIMEOUT,))
+
+
+def _frozen_digest(conn: psycopg.Connection, table: str, deadline: float | None) -> dict:
+    """Locks taken since a savepoint end when it is rolled back; the snapshot stays.
+
+    So a DDL, and the writes queued behind it, can only wait on the table being read right now.
+    """
+    conn.execute("SAVEPOINT frozen_digest")
+    digest = table_digest(conn, table, deadline)
+    conn.execute("ROLLBACK TO SAVEPOINT frozen_digest")
+    return digest
+
+
+def compare_frozen(src: psycopg.Connection, tgt: psycopg.Connection, tables: list[str],
+                   deadline: float | None = None) -> dict:
+    """compare() for the cutover reference point, on connections holding its snapshot (fix_snapshot).
+
+    Both sides are frozen, so a digest always applies; its row count replaces the separate count.
+    """
+    result: dict = {"tables": {}, "mismatch": 0}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for table in tables:
+            source, target = pool.submit(_frozen_digest, src, table, deadline), pool.submit(_frozen_digest, tgt, table, deadline)
+            s, t = source.result(), target.result()
             same = s == t
             result["tables"][table] = {"source": s, "target": t, "match": same}
             result["mismatch"] += 0 if same else 1
@@ -326,18 +429,18 @@ def drop_slot(source: Endpoint, slot: str) -> bool:
     return row is not None
 
 
-def block_app_writes(app: Endpoint) -> int:
+def block_app_writes(conn: psycopg.Connection) -> int:
     """Make the app role read-only for new sessions and end its open sessions.
 
     A role may change its own session defaults and end its own sessions, so the
-    app account needs no extra privilege. Returns the number of sessions ended.
+    app account needs no extra privilege. Takes an open connection of that account.
+    Returns the number of sessions ended.
     """
-    with connect(app) as conn:
-        conn.execute("ALTER ROLE CURRENT_USER SET default_transaction_read_only = on")
-        rows = conn.execute(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            "WHERE usename = current_user AND pid <> pg_backend_pid() AND datname = current_database()"
-        ).fetchall()
+    conn.execute("ALTER ROLE CURRENT_USER SET default_transaction_read_only = on")
+    rows = conn.execute(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+        "WHERE usename = current_user AND pid <> pg_backend_pid() AND datname = current_database()"
+    ).fetchall()
     return len(rows)
 
 
@@ -353,29 +456,27 @@ def unblock_app_writes(app: Endpoint) -> None:
         )
 
 
-def insert_marker(source: Endpoint, job_id: str) -> str:
+def insert_marker(conn: psycopg.Connection, job_id: str) -> str:
     marker_id = str(uuid.uuid4())
-    with connect(source) as conn:
-        conn.execute(
-            sql.SQL("INSERT INTO {} (id, job_id) VALUES (%s, %s)").format(ident(MARKER_TABLE)),
-            (marker_id, job_id),
-        )
+    conn.execute(
+        sql.SQL("INSERT INTO {} (id, job_id) VALUES (%s, %s)").format(ident(MARKER_TABLE)),
+        (marker_id, job_id),
+    )
     return marker_id
 
 
-def wait_marker(target: Endpoint, marker_id: str, timeout_s: float) -> float:
+def wait_marker(conn: psycopg.Connection, marker_id: str, timeout_s: float) -> float:
     """Wait until the marker row reaches the target. Returns seconds waited."""
     started = time.monotonic()
-    with connect(target) as conn:
-        while True:
-            found = conn.execute(
-                sql.SQL("SELECT 1 FROM {} WHERE id = %s").format(ident(MARKER_TABLE)), (marker_id,)
-            ).fetchone()
-            if found:
-                return time.monotonic() - started
-            if time.monotonic() - started > timeout_s:
-                raise TimeoutError(f"marker {marker_id} did not reach target in {timeout_s:.1f}s")
-            time.sleep(0.05)
+    while True:
+        found = conn.execute(
+            sql.SQL("SELECT 1 FROM {} WHERE id = %s").format(ident(MARKER_TABLE)), (marker_id,)
+        ).fetchone()
+        if found:
+            return time.monotonic() - started
+        if time.monotonic() - started > timeout_s:
+            raise TimeoutError(f"marker {marker_id} did not reach target in {timeout_s:.1f}s")
+        time.sleep(0.05)
 
 
 @contextmanager
