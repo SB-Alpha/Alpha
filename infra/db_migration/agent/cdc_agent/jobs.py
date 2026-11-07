@@ -82,6 +82,9 @@ class Runner:
         self.secrets = secrets
         self.connect = ConnectClient(settings.connect_url)
         self._stop = threading.Event()
+        self._live_metrics: dict[str, dict] = {}
+        self._live_metrics_at: dict[str, float] = {}
+        self._live_metrics_lock = threading.Lock()
 
     def error_text(self, job_id: str, exc: Exception) -> str:
         """Error text that may leave this node: no password of this job, no known secret form."""
@@ -260,17 +263,36 @@ class Runner:
         }
 
     def refresh_metrics(self, job: Job) -> Job:
-        """Live numbers for the dashboard while waiting for approval (not persisted)."""
-        if job.state in TERMINAL_STATES or job.phase not in ("streaming", "cutover_ready"):
+        """Live numbers for the dashboard while waiting for approval (not persisted).
+
+        Callers poll this every few seconds, so it counts rows without a checksum, at most once per
+        metrics_interval_s and never twice at once. Other calls get the last numbers; measured_at shows their age.
+        Before approval the reconcile loop keeps the metrics current, so only cutover_ready measures here.
+        """
+        job_id = job.job_id
+        if job.state in TERMINAL_STATES or job.phase != "cutover_ready":
+            with self._live_metrics_lock:
+                self._live_metrics.pop(job_id, None)
+                self._live_metrics_at.pop(job_id, None)
             return job
+        with self._live_metrics_lock:
+            last = self._live_metrics_at.get(job_id)
+            due = last is None or time.monotonic() - last >= self.settings.metrics_interval_s
+            if due:
+                self._live_metrics_at[job_id] = time.monotonic()
+        if due:
+            fresh = self._measure_live(job)
+            self._live_metrics[job_id] = fresh
+        job.metrics.update(self._live_metrics.get(job_id, {}))
+        return job
+
+    def _measure_live(self, job: Job) -> dict:
         try:
             creds = Credentials(self.settings, job)
-            check = db.compare(creds.source, creds.target, job.request.source.tables)
-            job.metrics.update(self._metrics(job, creds, check))
-            job.metrics.pop("measure_error", None)
+            check = db.compare(creds.source, creds.target, job.request.source.tables, checksum=False)
+            return self._metrics(job, creds, check)
         except Exception as exc:
-            job.metrics["measure_error"] = self.error_text(job.job_id, exc)
-        return job
+            return {**self._live_metrics.get(job.job_id, {}), "measure_error": self.error_text(job.job_id, exc)}
 
     def check_worker(self) -> None:
         """Before anything changes. The Worker API does not show the target address, so that stays a premise."""

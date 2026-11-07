@@ -279,6 +279,71 @@ def test_a_failed_connector_task_still_fails_the_job(watched):
     assert job.message == f"streaming: {job.source_connector}: boom"
 
 
+@pytest.fixture
+def waiting(setup, monkeypatch):
+    """A job waiting for approval, with a controllable clock. Records each row count."""
+    runner, _ = setup(phase="cutover_ready")
+    job = runner.store.get("job01")
+    job.state = "waiting_approval"
+    job.metrics = {"mismatch": 0, "evidence_of": "reconcile"}
+    clock = {"now": 1000.0, "calls": [], "fail": None}
+
+    def compare(*args, checksum=True):
+        clock["calls"].append(checksum)
+        if clock["fail"]:
+            raise clock["fail"]
+        return compared(10 + len(clock["calls"]), 10)
+
+    monkeypatch.setattr(jobs.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(jobs.db, "compare", compare)
+    monkeypatch.setattr(jobs.db, "slot_lag_bytes", lambda *a: 0)
+    return runner, job, clock
+
+
+def test_polling_does_not_measure_again_within_the_interval(waiting):
+    runner, job, clock = waiting
+
+    first = runner.refresh_metrics(job.model_copy(deep=True))
+    clock["now"] += runner.settings.metrics_interval_s - 1
+    second = runner.refresh_metrics(job.model_copy(deep=True))
+
+    assert clock["calls"] == [False]  # one count, no checksum
+    assert second.metrics["rows_checked"] == first.metrics["rows_checked"] == 11
+
+    clock["now"] += 1
+    third = runner.refresh_metrics(job.model_copy(deep=True))
+    assert clock["calls"] == [False, False]
+    assert third.metrics["rows_checked"] == 12
+
+
+def test_a_failed_measurement_keeps_the_last_numbers_until_the_next_try(waiting):
+    runner, job, clock = waiting
+    runner.refresh_metrics(job.model_copy(deep=True))
+
+    clock["fail"] = psycopg.OperationalError("connection lost")
+    clock["now"] += runner.settings.metrics_interval_s
+    failed = runner.refresh_metrics(job.model_copy(deep=True))
+    assert "connection lost" in failed.metrics["measure_error"]
+    assert failed.metrics["rows_checked"] == 11
+    assert len(clock["calls"]) == 2
+
+    runner.refresh_metrics(job.model_copy(deep=True))
+    assert len(clock["calls"]) == 2
+
+    clock["fail"] = None
+    clock["now"] += runner.settings.metrics_interval_s
+    assert "measure_error" not in runner.refresh_metrics(job.model_copy(deep=True)).metrics
+
+
+@pytest.mark.parametrize("phase", ["snapshot", "streaming", "cutover", "stabilizing"])
+def test_only_waiting_for_approval_measures_on_a_read(waiting, phase):
+    runner, job, clock = waiting
+    job.phase = phase
+
+    assert runner.refresh_metrics(job).metrics == {"mismatch": 0, "evidence_of": "reconcile"}
+    assert clock["calls"] == []
+
+
 def test_snapshot_lasts_until_the_rows_of_the_start_have_arrived(watched):
     checks = iter([compared(1000, 0), compared(1200, 999), compared(1300, 1000)])
     runner, _ = watched(lambda: next(checks))

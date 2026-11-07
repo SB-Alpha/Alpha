@@ -119,6 +119,16 @@ def test_metrics_carry_the_copy_progress(monkeypatch, tmp_path: Path):
     assert metrics["measured_at"]
 
 
+def test_compare_without_checksum_only_counts(sides):
+    sides["source"]["t"] = sides["target"]["t"] = 5
+
+    check = db.compare(SOURCE, TARGET, ["t"], checksum=False)
+
+    assert sides["digested"] == []
+    assert check["mismatch"] == 0
+    assert db.copy_progress(check)["copy_percent"] == 100
+
+
 def test_frozen_compare_digests_both_sides(sides):
     sides["source"]["t"] = 10
     sides["target"]["t"] = 10

@@ -315,14 +315,17 @@ def table_rows(conn: psycopg.Connection, table: str) -> int:
     return conn.execute(sql.SQL("SELECT count(*) FROM {}").format(ident(table))).fetchone()[0]
 
 
-def compare(source: Endpoint, target: Endpoint, tables: list[str]) -> dict:
-    """Row count per table on each side, plus a whole-table checksum once the counts agree."""
+def compare(source: Endpoint, target: Endpoint, tables: list[str], *, checksum: bool = True) -> dict:
+    """Row count per table on each side, plus a whole-table checksum once the counts agree.
+
+    Without checksum, equal counts count as a match: enough for a progress display, not for a decision.
+    """
     result: dict = {"tables": {}, "mismatch": 0}
     with connect(source) as src, connect(target) as tgt:
         for table in tables:
             source_rows = table_rows(src, table)
             target_rows = table_rows(tgt, table) if table_exists(tgt, table) else None
-            if source_rows == target_rows:
+            if checksum and source_rows == target_rows:
                 s, t = table_digest(src, table), table_digest(tgt, table)
             else:
                 s = {"rows": source_rows, "checksum": None}
