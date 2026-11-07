@@ -17,6 +17,7 @@
     "table.include.list": "${TABLES}",
     "snapshot.mode": "initial",
     "heartbeat.interval.ms": "10000",
+    "heartbeat.action.query": "SELECT pg_logical_emit_message(false, 'alpha-heartbeat', now()::text)",
     "poll.interval.ms": "100",
     "tombstones.on.delete": "false"
   }
