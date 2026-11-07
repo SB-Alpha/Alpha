@@ -321,7 +321,6 @@ def test_saved_context_has_references_not_values():
 
 def test_app_secrets_do_not_reach_terraform(monkeypatch):
     monkeypatch.setenv("ALPHA_SECRETS_KEY", "app-key-marker")
-    monkeypatch.setenv("ALPHA_API_TOKEN", "app-token-marker")
     monkeypatch.setenv("CDC_AGENT_ACCESS_CLIENT_SECRET", "access-marker")
     monkeypatch.setenv("WHATEVER_ELSE", "other-marker")
     monkeypatch.setenv("OCI_CLI_PROFILE", "kept")
@@ -332,8 +331,7 @@ def test_app_secrets_do_not_reach_terraform(monkeypatch):
     terraform.init(vpn.OCI)
 
     env = clouds.envs[vpn.OCI]
-    for name in ("ALPHA_SECRETS_KEY", "ALPHA_API_TOKEN", "CDC_AGENT_ACCESS_CLIENT_SECRET", "WHATEVER_ELSE", "TF_LOG",
-                 "AWS_PROFILE"):
+    for name in ("ALPHA_SECRETS_KEY", "CDC_AGENT_ACCESS_CLIENT_SECRET", "WHATEVER_ELSE", "TF_LOG", "AWS_PROFILE"):
         assert name not in env
     assert env["OCI_CLI_PROFILE"] == "kept" and "PATH" in env
 

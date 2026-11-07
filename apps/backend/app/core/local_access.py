@@ -1,54 +1,23 @@
 """Access rule for local APIs that handle migrations and secrets.
 
-The backend runs on the user's PC, where any local process or web page could reach its port.
-This is not a user login: the app holds one token per launch, and only it can call these routes.
+The backend runs on the user's PC, where any web page in a browser could send it requests.
+This rule refuses other machines and other sites' pages. It is not a user login, and a program
+running on this PC can still call these routes: such a program already has the user's rights.
 """
 
 import ipaddress
-import logging
 import os
-import secrets
-import threading
-from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-from app.core.config import data_dir
-
-logger = logging.getLogger(__name__)
-
-TOKEN_FILE = "api-token"
 DEFAULT_HOSTS = ("localhost", "127.0.0.1", "::1")
-
-_token: str | None = None
-_lock = threading.Lock()
+DEFAULT_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000", "http://[::1]:3000")
 
 
-def _write_token(path: Path, token: str) -> None:
-    path.unlink(missing_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(token)
-
-
-def ensure_api_token() -> str:
-    global _token
-    configured = os.getenv("ALPHA_API_TOKEN")
-    if configured:
-        return configured
-    with _lock:
-        if _token is None:
-            _token = secrets.token_urlsafe(32)
-            path = data_dir() / TOKEN_FILE
-            _write_token(path, _token)
-            logger.info("local API token written to %s", path)
-        return _token
-
-
-def _allowed_hosts() -> set[str]:
-    configured = os.getenv("ALPHA_ALLOWED_HOSTS")
-    names = configured.split(",") if configured else DEFAULT_HOSTS
-    return {name.strip().lower() for name in names if name.strip()}
+def _configured(name: str, default: tuple[str, ...]) -> set[str]:
+    configured = os.getenv(name)
+    values = configured.split(",") if configured else default
+    return {value.strip().lower() for value in values if value.strip()}
 
 
 def _host_name(header: str) -> str:
@@ -69,8 +38,9 @@ def require_local_access(request: Request) -> None:
     if not request.client or not _is_loopback(request.client.host):
         raise HTTPException(403, "only this PC can call this API")
     # A web page can resolve its own name to 127.0.0.1; the Host header still shows that name.
-    if _host_name(request.headers.get("host", "")) not in _allowed_hosts():
+    if _host_name(request.headers.get("host", "")) not in _configured("ALPHA_ALLOWED_HOSTS", DEFAULT_HOSTS):
         raise HTTPException(403, "this Host is not allowed")
-    scheme, _, given = request.headers.get("authorization", "").partition(" ")
-    if scheme.lower() != "bearer" or not secrets.compare_digest(given.encode(), ensure_api_token().encode()):
-        raise HTTPException(401, "a valid API token is required", headers={"WWW-Authenticate": "Bearer"})
+    # Browsers set Origin on requests that change data, and a page cannot change it. Programs send none.
+    origin = request.headers.get("origin")
+    if origin is not None and origin.strip().lower() not in _configured("ALPHA_ALLOWED_ORIGINS", DEFAULT_ORIGINS):
+        raise HTTPException(403, "this Origin is not allowed")
