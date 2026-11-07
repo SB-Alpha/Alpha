@@ -7,6 +7,7 @@ module "network" {
   source         = "./modules/network"
   name           = var.service_name
   container_port = var.container_port
+  db_extra_cidrs = var.cdc_allowed_cidrs
 }
 
 module "database" {

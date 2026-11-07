@@ -22,4 +22,8 @@
 - **VPN**: `vpn_credentials_json`은 null입니다. AWS 목적지로의 CDC 연결(VPN)은 아직 범위 밖입니다.
 - **이름 길이**: ALB와 대상 그룹 이름은 32자 제한이라 `service_name`이 32자를 넘으면 실패합니다.
 - **비용**: NAT 게이트웨이는 쓰지 않습니다. ALB와 RDS는 켜져 있는 동안 요금이 나옵니다. 시험 뒤에는 `terraform destroy`로 정리하세요(ECR 저장소는 이미지가 있어도 지워집니다).
-- **비밀 값**: `secret_refs`는 이름만 만듭니다. 값 이전은 Terraform 밖의 별도 작업입니다.
+- **비밀 값**: `secret_refs`는 이름만 만듭니다. 값 이전은 Terraform 밖의 별도 작업이고, **`deploy_app = true` 전에 값을 먼저 넣어야 합니다.** 값이 없는 비밀을 참조하면 ECS 작업이 뜨지 못합니다.
+- **상태 확인 경로**: ALB 대상 그룹은 프로세스만 보는 `/health/live`(기본값)를 씁니다. DB까지 보는 `/health/ready`를 쓰면 RDS 재부팅처럼 DB가 잠깐 막힐 때 정상 태스크까지 계속 교체됩니다. 전환 판단용 `/health/ready` 확인은 백엔드가 따로 합니다.
+- **DB 접속 허용**: 기본은 앱 보안 그룹에서 오는 5432만 받습니다. CDC가 VPN으로 들어올 때는 원격 대역(예: OCI `10.50.0.0/16`)을 `cdc_allowed_cidrs`로 넣어야 합니다.
+- **데모용 설정(운영에서는 위험)**: `skip_final_snapshot = true`, `deletion_protection = false`, ECR `force_delete = true`, 비밀 `recovery_window_in_days = 0`은 `terraform destroy`가 깔끔하도록 둔 값입니다. 운영용으로 쓰기 전에 바꿔야 합니다.
+- **ALB 직접 접근**: ALB가 HTTP 80을 인터넷에 열어 두어서 ALB 주소로 직접 가면 Cloudflare Worker를 거치지 않습니다. 앞단 우회 차단(GCP의 #72와 같은 방식)은 후속 작업입니다.
