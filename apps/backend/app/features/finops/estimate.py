@@ -76,11 +76,20 @@ def active_share(traffic: Traffic | None) -> float:
     return 1.0 if traffic is None else 1 - traffic.idle_percent / 100
 
 
+def _sizing_notes(req: CostRequest) -> list[str]:
+    notes = []
+    if req.app_instances is None:
+        notes.append("앱 인스턴스 수를 받지 못해 1대로 계산했습니다 (가정).")
+    if req.target_app_vcpu is not None or req.target_app_memory_mib is not None:
+        notes.append("원본은 원본 앱 크기로, 후보는 목적지 앱 크기로 셉니다.")
+    return notes
+
+
 def assumptions(req: CostRequest) -> list[str]:
     t = req.traffic
     if t is None:
-        return ["앱은 한 달 내내 켜져 있다고 보고 계산했습니다 (트래픽 가정 없음)."]
-    return [
+        return ["앱은 한 달 내내 켜져 있다고 보고 계산했습니다 (트래픽 가정 없음)."] + _sizing_notes(req)
+    return _sizing_notes(req) + [
         f"트래픽 가정: 요청 없는 시간 {t.idle_percent:g}%, 요청 있는 시간 평균 {t.rps:g} RPS (실측 아님).",
         "AWS Fargate 는 서비스 태스크가 계속 떠 있어 내내 켜진 것으로 셉니다.",
         ("GCP Cloud Run 은 요청 없는 시간에 0대로 줄어든다고 봤고(min_instance_count = 0), "
@@ -96,21 +105,32 @@ def _unsupported(cand: Candidate) -> CloudCost:
 
 def build_input(req: CostRequest, aws: AwsPrices | None = None, gcp: GcpPrices | None = None,
                 azure: AzurePrices | None = None, today: date | None = None) -> FinopsInput:
-    """원본(AWS)과 후보들의 월 비용 항목을 가격 API 단가로 계산해 FinopsInput 으로 만듭니다."""
+    """원본(source_cloud)과 후보들의 월 비용 항목을 가격 API 단가로 계산해 FinopsInput 으로 만듭니다.
+
+    원본은 원본 앱 크기(app_vcpu·app_memory_mib)로, 후보는 목적지 앱 크기(target_app_*, 없으면 원본 크기)로 셉니다.
+    """
     stamp = (today or date.today()).isoformat()
     aws = aws or AwsPrices()
     gcp = gcp or GcpPrices()
-    current = aws.cost(req, f"{aws.api_name} {stamp}")
-    candidates = []
-    for cand in req.candidates:
-        if cand.cloud == "gcp":
-            candidates.append(gcp.cost(req, cand.region, f"gcp-cloud-billing-catalog {stamp}"))
-        elif cand.cloud == "azure":
-            candidates.append((azure or AzurePrices()).cost(req, cand.region, f"azure-retail-prices-api {stamp}"))
-        else:
-            candidates.append(_unsupported(cand))
+    azure_prices = azure
+
+    def price(cloud: str, region: str, r: CostRequest, candidate: Candidate | None) -> CloudCost:
+        nonlocal azure_prices
+        if cloud == "aws":
+            return aws.cost(r, f"{aws.api_name} {stamp}", region)
+        if cloud == "gcp":
+            return gcp.cost(r, region, f"gcp-cloud-billing-catalog {stamp}")
+        if cloud == "azure":
+            azure_prices = azure_prices or AzurePrices()
+            return azure_prices.cost(r, region, f"azure-retail-prices-api {stamp}")
+        return _unsupported(candidate or Candidate(cloud=cloud, region=region))
+
+    current = price(req.source_cloud, req.source_region, req, None)
+    cand_req = req.for_candidate()
+    candidates = [price(c.cloud, c.region, cand_req, c) for c in req.candidates]
+    # 교차점은 원본 Fargate(내내 켜짐)와 GCP Cloud Run(요청 없으면 0대)의 비교라 AWS 원본 + GCP 후보일 때만 냅니다
     gcp_region = next((c.region for c in req.candidates if c.cloud == "gcp"), None)
-    cross = crossover(req, aws, gcp, gcp_region) if gcp_region else None
+    cross = crossover(req, aws, gcp, gcp_region) if gcp_region and req.source_cloud == "aws" else None
     notes = assumptions(req) + (crossover_notes(cross, req) if cross else [])
     return FinopsInput(current=current, candidates=candidates, assumptions=notes, crossover=cross)
 
@@ -133,14 +153,14 @@ def crossover(req: CostRequest, aws: AwsPrices, gcp: GcpPrices, region: str) -> 
         return not_provided("앱 크기가 미제공이라 교차점을 계산하지 않았습니다")
     try:
         fargate = aws.app_monthly(req)
-        one = gcp.app_instance_month(req, region)
+        one = gcp.app_instance_month(req.for_candidate(), region)
     except Exception as exc:  # noqa: BLE001 - 단가 하나가 없으면 교차점도 없습니다. 0 으로 채우지 않습니다
         log.warning("finops 교차점 단가 조회 실패 (%s): %s", type(exc).__name__, exc)
         return not_provided(f"단가 조회에 실패해 교차점을 계산하지 않았습니다 ({type(exc).__name__})")
     if one <= 0 or fargate <= 0:
         return not_provided("단가가 0 이라 교차점을 정할 수 없습니다")
     # 같은 대수끼리: Cloud Run 이 켜져 있는 비율이 fargate / (1대 한 달 × 대수) 보다 작으면 쌉니다
-    idle = max(0.0, (1 - fargate / (one * req.app_instances)) * 100)
+    idle = max(0.0, (1 - fargate / (one * req.instances)) * 100)
     rps, reason = _break_even_rps(req.traffic, fargate, one)
     return Crossover(fargate_app_monthly_usd=round(fargate, 2), cloud_run_instance_monthly_usd=round(one, 2),
                      break_even_idle_percent=round(idle, 1), break_even_rps=rps, concurrency=CLOUD_RUN_CONCURRENCY,
@@ -175,13 +195,13 @@ def crossover_notes(x: Crossover, req: CostRequest) -> list[str]:
     if x.break_even_idle_percent is not None:
         when = ("한 달 내내 켜져 있어도" if x.break_even_idle_percent == 0
                 else f"유휴 {x.break_even_idle_percent:g}% 보다 길면")
-        lines.append(f"교차점: 같은 크기·같은 대수라면 {when} Cloud Run 앱 비용이 Fargate 보다 작습니다 "
+        lines.append(f"교차점: 입력한 원본·목적지 크기에서 같은 대수라면 {when} Cloud Run 앱 비용이 Fargate 보다 작습니다 "
                      f"(Fargate 월 ${x.fargate_app_monthly_usd:,.2f}, Cloud Run 1대 한 달 내내 "
                      f"${x.cloud_run_instance_monthly_usd:,.2f}, 앱 컴퓨팅만).")
     if x.break_even_rps is not None and req.traffic is not None:
         lines.append(f"교차점: 유휴 {req.traffic.idle_percent:g}% 에서 요청 있는 시간 평균 {x.break_even_rps:g} RPS 이하이면 "
                      f"Cloud Run 앱 비용이 Fargate 보다 작습니다 (처리 시간 {req.traffic.avg_latency_ms:g}ms, "
-                     f"인스턴스당 동시 {x.concurrency}건, Fargate {req.app_instances}대 고정 가정).")
+                     f"인스턴스당 동시 {x.concurrency}건, Fargate {req.instances}대 고정 가정).")
     elif x.reason:
         lines.append(f"교차점: {x.reason}.")
     return lines
@@ -310,11 +330,11 @@ class AzurePrices:
             active = (req.app_vcpu * self._aca(region, AZURE_ACA_VCPU, "vCPU-second")
                       + gib * self._aca(region, AZURE_ACA_MEMORY, "GiB-second"))
             share = active_share(req.traffic)
-            total = SECONDS_PER_MONTH * req.app_instances * share * active
+            total = SECONDS_PER_MONTH * req.instances * share * active
             if req.traffic is not None:
                 idle = (req.app_vcpu * self._aca(region, AZURE_ACA_VCPU_IDLE, "vCPU-second")
                         + gib * self._aca(region, AZURE_ACA_MEMORY_IDLE, "GiB-second"))
-                total += SECONDS_PER_MONTH * req.app_instances * (1 - share) * idle
+                total += SECONDS_PER_MONTH * req.instances * (1 - share) * idle
                 requests_m = req.traffic.rps * SECONDS_PER_MONTH * share / 1e6
                 total += requests_m * self._aca(region, AZURE_ACA_REQUESTS, "1M requests")
             return total
@@ -466,19 +486,20 @@ class AwsPrices:
                 prices.append(UnitPrice(tier[0], "GB", f"{usagetype} ({tier[1]})"))
         return _one(prices, "aws internet egress")
 
-    def app_monthly(self, req: CostRequest) -> float:
+    def app_monthly(self, req: CostRequest, region: str | None = None) -> float:
         """Fargate 앱 월 비용. 서비스 태스크가 계속 떠 있어 트래픽과 상관없이 내내 켜진 값입니다."""
-        vcpu, mem = self.fargate(req.source_region)
-        hours = HOURS_PER_MONTH * req.app_instances
+        vcpu, mem = self.fargate(region or req.source_region)
+        hours = HOURS_PER_MONTH * req.instances
         return hours * (req.app_vcpu * vcpu.usd + req.app_memory_mib / 1024 * mem.usd)
 
-    def cost(self, req: CostRequest, source: str) -> CloudCost:
-        region = req.source_region
+    def cost(self, req: CostRequest, source: str, region: str | None = None) -> CloudCost:
+        """region 을 주면 그 리전 견적(AWS 가 후보일 때), 안 주면 원본 리전 견적입니다."""
+        region = region or req.source_region
 
         def app() -> float | None:
             if req.app_vcpu is None or req.app_memory_mib is None:
                 return None
-            return self.app_monthly(req)
+            return self.app_monthly(req, region)
 
         def db() -> float | None:
             if not req.db_instance_class:
@@ -626,7 +647,7 @@ class GcpPrices:
             if req.app_vcpu is None or req.app_memory_mib is None:
                 return None
             # 트래픽 가정이 있으면 요청이 있는 시간만 켜져 있습니다 (min_instance_count = 0)
-            return self.app_instance_month(req, region) * req.app_instances * active_share(req.traffic)
+            return self.app_instance_month(req, region) * req.instances * active_share(req.traffic)
 
         shared = gcp_sql_shared(req.db_memory_gib) if is_burstable(req) else None
 

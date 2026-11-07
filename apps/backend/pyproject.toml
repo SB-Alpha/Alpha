@@ -19,6 +19,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cloud-sources = [  # assessment: GCP/Azure 원본 조회 (SDK 는 함수 안에서만 import)
+    "google-api-python-client>=2.100",
+    "google-auth>=2.23",
+    "azure-identity>=1.15",
+    "azure-mgmt-rdbms>=10.1",
+    "azure-mgmt-compute>=30.0",
+    "azure-mgmt-network>=25.0",
+]
 ai = [
     "anthropic",  # assessment AI 보강 (ALPHA_AI_ENABLED=1 일 때만 사용)
 ]

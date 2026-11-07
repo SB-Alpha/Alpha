@@ -35,7 +35,10 @@
 | Azure | Retail Prices API | Container Apps 활성·유휴 vCPU·GiB 초와 요청 수수료, PostgreSQL Flexible 등급별 시간(크기 이상 가장 작은 등급), Storage GB-월 | 없음 |
 
 가정과 한계 (화면·발표에서 같이 밝힐 것)
-- 앱 인스턴스(복제본)는 `app_instances` 개(기본 1)입니다. `traffic` 을 안 주면 한 달 내내 켜져 있다고 셉니다.
+- 원본 비용은 `source_cloud`(aws·gcp·azure, 기본 aws) 의 가격 API 로, `source_region` 에서 냅니다. 후보는 원본과 다른 클라우드여야 하고, AWS 도 후보가 될 수 있습니다.
+- 원본은 원본 앱 크기(`app_vcpu`·`app_memory_mib`)로, 후보는 목적지 앱 크기(`target_app_vcpu`·`target_app_memory_mib`, 없으면 원본 크기)로 셉니다. 원본 크기를 모르면 원본 앱 금액은 미제공이고, 목적지 크기로 채우지 않습니다.
+- 앱 인스턴스(복제본)는 `app_instances` 개입니다. 모르면 None 이고 1대로 계산했다고 가정에 적습니다. `traffic` 을 안 주면 한 달 내내 켜져 있다고 셉니다.
+- 차익거래(`arbitrage`)는 AWS 원본 + GCP 후보이고 원본 앱 크기·`avg_latency_ms`·`read_ratio`·`avg_response_kb` 가 모두 있을 때만 냅니다. 하나라도 없으면 null 이고, 예전처럼 0.5 vCPU·150ms·읽기 80%·4KB 로 채우지 않습니다. 차익거래 모델은 양쪽에 같은 앱 크기를 쓰므로 목적지 크기가 다를 때도 null 입니다 (월 비용·교차점은 각 크기로 계속 계산).
 - `traffic{idle_percent, rps}` 를 주면 배포 설정대로 켜진 시간을 셉니다. 값은 실측이 아니라 가정이라 결과 주의점에 그대로 적힙니다.
   - AWS Fargate: 서비스 태스크가 계속 떠 있어 그대로 내내.
   - GCP Cloud Run: `min_instance_count = 0` 이라 요청 없는 시간엔 0대. Terraform 이 `resources.limits` 를 적고 `cpu_idle` 은 안 적어서
@@ -49,7 +52,7 @@
 - 단가가 0건이거나 애매하게 여러 건 걸리면 추측하지 않고 그 항목을 "미제공" 으로 둡니다.
 - 원본 RDS 등급(`db_instance_class`)은 assessment 결과에 아직 없어서 호출하는 쪽이 넣어야 합니다. 없으면 AWS DB 는 미제공.
 
-### 교차점 (`FinopsInput.crossover`, GCP 후보가 있을 때)
+### 교차점 (`FinopsInput.crossover`, AWS 원본 + GCP 후보일 때)
 
 Cloud Run(요청 없는 시간 0대)과 Fargate(내내 켜짐)의 앱 컴퓨팅만 비교합니다. DB 는 트래픽과 상관없어 빼고 봅니다.
 결과 문장은 `assumptions` 에 붙어 `report.notes` 로 나옵니다.

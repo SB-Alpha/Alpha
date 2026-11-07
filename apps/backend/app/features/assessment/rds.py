@@ -129,6 +129,7 @@ def collect_rds(
         instance_class=db.get("DBInstanceClass"),
         allocated_storage_gb=db.get("AllocatedStorage"),
         logical_replication=lr,
+        ha_enabled=db.get("MultiAZ"), backup_retention_days=db.get("BackupRetentionPeriod"),
     )
     r.source_db = SourceDb(
         instance_id=db.get("DBInstanceIdentifier"), host=ep.get("Address"), port=ep.get("Port"),

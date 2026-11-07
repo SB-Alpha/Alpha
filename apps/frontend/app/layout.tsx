@@ -16,7 +16,14 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             <Link href="/" className="font-semibold tracking-tight">
               CloudMorph <span className="text-ink/50">이전 콘솔</span>
             </Link>
-            <span className="font-mono text-xs text-ink/50">AWS ECS·RDS → GCP Cloud Run·Cloud SQL</span>
+            <nav aria-label="주 메뉴" className="flex items-baseline gap-4 text-sm">
+              <Link href="/" className="text-ink/70 hover:text-ink">
+                전체 이전
+              </Link>
+              <Link href="/db-migration" className="text-ink/70 hover:text-ink">
+                DB 이전
+              </Link>
+            </nav>
           </div>
         </header>
         <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:px-6">{children}</main>

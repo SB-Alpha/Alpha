@@ -89,7 +89,7 @@ TARGET_ADAPTERS = {"gcp": GcpTargetAdapter(), "azure": AzureTargetAdapter(), "aw
 - PostgreSQL 16 이상
 - `subnet_cidrs`, `psa_range_cidr` 가 OCI `10.50.0.0/16`, AWS `172.31.0.0/16` 와 겹치지 않음
 
-`db.private_ip` 가 사설 IP 가 아니면 화면 지표 `cloud_sql_private_ip` 가 `PUBLIC` 으로 나옵니다.
+`db.private_ip` 가 사설 IP 면 화면 지표 `target_db_network` 가 `PRIVATE`, 공인 IP 면 `PUBLIC` 으로 나옵니다. IP 가 아닌 값(예: AWS RDS 호스트 이름)이면 보고하지 않아 "미제공"입니다.
 
 ### `deploy_app` 출력
 

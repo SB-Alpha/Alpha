@@ -1,0 +1,31 @@
+# PoC: 목적지 PG16 + cloudflared 터널. was는 이후 단계에서 front 네트워크에 추가.
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: alpha_admin
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?.env에 PG_PASSWORD 필요}
+      POSTGRES_DB: appdb
+    # ssl용 키는 postgres 소유·0600이어야 하므로 시작 시 복사한다
+    entrypoint: ["sh", "-c", "cp /certs/server.* /tmp/ && chown postgres:postgres /tmp/server.* && chmod 600 /tmp/server.key && exec docker-entrypoint.sh \"$$@\"", "--"]
+    command: ["postgres", "-c", "wal_level=logical", "-c", "shared_buffers=256MB",
+              "-c", "max_wal_senders=10", "-c", "max_replication_slots=10",
+              "-c", "ssl=on", "-c", "ssl_cert_file=/tmp/server.crt", "-c", "ssl_key_file=/tmp/server.key"]
+    volumes: [pgdata:/var/lib/postgresql/data, ./certs:/certs:ro]
+    networks: [back]
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    # 토큰은 인자가 아니라 환경변수로 넘긴다(프로세스 목록·docker inspect 의 명령줄에 남지 않게)
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?.env에 TUNNEL_TOKEN 필요}
+    command: tunnel --no-autoupdate run
+    depends_on: [postgres]
+    networks: [back, front]   # DB와 외부(front)를 잇는 유일한 컨테이너
+volumes:
+  pgdata:
+networks:
+  front: {}
+  back:
+    internal: true

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { DB_CLASSES, type FinOpsInputParams } from "@/lib/finops";
+import type { TargetProvider } from "@/lib/finops";
 import { request } from "@/lib/workflows";
 
 // POST /finops/estimate 계약 (apps/backend/app/features/finops/schemas.py). 숫자는 모두 백엔드 계산 코드가 냅니다.
@@ -65,41 +65,67 @@ export interface FinopsEstimate {
   arbitrage?: ArbitrageResult | null;
 }
 
-/** 가격 API 로 비교할 후보. 단가를 받는 리전은 서울 두 곳입니다. */
-export const ESTIMATE_CANDIDATES = [
-  { cloud: "gcp", region: "asia-northeast3" },
-  { cloud: "azure", region: "koreacentral" },
-] as const;
+/** 트래픽 가정 (사용자 입력). RPS 와 유휴율을 둘 다 넣어야 트래픽 조건을 보냅니다. */
+export interface TrafficInputs {
+  rps: number | null;
+  idlePercent: number | null;
+  avgLatencyMs: number | null;
+  /** 0~1 */
+  readRatio: number | null;
+  avgResponseKb: number | null;
+}
 
-// RDS db.t3 등급은 모두 vCPU 2개입니다. 메모리는 화면 선택값(DB_CLASSES)을 그대로 씁니다.
-const DB_T3_VCPU = 2;
-const SOURCE_REGION_FALLBACK = "ap-northeast-2";
+/** 화면이 /finops/estimate 에 보내는 입력. 모르면 null 이고, 보내지 않아 백엔드가 "미제공" 으로 둡니다. */
+export interface EstimateInputs {
+  sourceCloud: TargetProvider | null;
+  sourceRegion: string | null;
+  /** 원본 앱 크기. assessment 결과에 없어 사용자가 넣을 때만 있습니다 (목적지 크기로 채우지 않음). */
+  sourceAppVcpu: number | null;
+  sourceAppMemoryMib: number | null;
+  /** 후보에 띄울 앱 크기 (계획의 목적지 크기). */
+  targetAppVcpu: number | null;
+  targetAppMemoryMib: number | null;
+  /** 원본 RDS 등급 (사용자 입력). 없으면 AWS DB 금액은 미제공. */
+  dbInstanceClass: string | null;
+  dbVcpu: number | null;
+  dbMemoryGib: number | null;
+  dbStorageGb: number | null;
+  candidates: { cloud: string; region: string }[];
+  traffic: TrafficInputs;
+  replicationLagBytes: number | null;
+}
 
-/** 화면 입력값을 /finops/estimate 요청으로. 원본 앱 크기는 미제공이라 목적지 계획 크기를 씁니다 (화면에 "가정"). */
-export function estimateRequest(
-  params: FinOpsInputParams,
-  sourceRegion: string | undefined,
-  replicationLagBytes?: number | null,
-) {
-  const db = DB_CLASSES[params.dbClass];
+const optionalField = <T>(key: string, value: T | null) => (value === null ? {} : { [key]: value });
+
+/** 화면 입력값을 /finops/estimate 요청으로. 원본 위치를 모르면 null 이고 요청하지 않습니다. */
+export function estimateRequest(inputs: EstimateInputs) {
+  if (inputs.sourceCloud === null || inputs.sourceRegion === null) return null;
+  const t = inputs.traffic;
+  const lag = inputs.replicationLagBytes;
+  const traffic =
+    t.rps !== null && t.idlePercent !== null
+      ? {
+          rps: t.rps,
+          idle_percent: t.idlePercent,
+          ...optionalField("avg_latency_ms", t.avgLatencyMs),
+          ...optionalField("read_ratio", t.readRatio),
+          ...optionalField("avg_response_kb", t.avgResponseKb),
+          ...(typeof lag === "number" && Number.isFinite(lag) && lag >= 0 ? { replication_lag_bytes: Math.round(lag) } : {}),
+        }
+      : null;
   return {
-    source_region: sourceRegion || SOURCE_REGION_FALLBACK,
-    app_vcpu: params.sourceCpuCount,
-    app_memory_mib: params.sourceMemoryMb,
-    app_instances: 1,
-    db_instance_class: params.dbClass,
-    db_vcpu: DB_T3_VCPU,
-    db_memory_gib: db.memoryGb,
-    db_storage_gb: params.dbSizeGb,
-    candidates: ESTIMATE_CANDIDATES,
-    traffic: {
-      idle_percent: params.idlePercent,
-      rps: params.rps,
-      avg_latency_ms: params.avgRequestMs,
-      ...(typeof replicationLagBytes === "number" && Number.isFinite(replicationLagBytes) && replicationLagBytes >= 0
-        ? { replication_lag_bytes: Math.round(replicationLagBytes) }
-        : {}),
-    },
+    source_cloud: inputs.sourceCloud,
+    source_region: inputs.sourceRegion,
+    ...optionalField("app_vcpu", inputs.sourceAppVcpu),
+    ...optionalField("app_memory_mib", inputs.sourceAppMemoryMib),
+    ...optionalField("target_app_vcpu", inputs.targetAppVcpu),
+    ...optionalField("target_app_memory_mib", inputs.targetAppMemoryMib),
+    ...optionalField("db_instance_class", inputs.dbInstanceClass),
+    ...optionalField("db_vcpu", inputs.dbVcpu),
+    ...optionalField("db_memory_gib", inputs.dbMemoryGib),
+    ...optionalField("db_storage_gb", inputs.dbStorageGb),
+    candidates: inputs.candidates,
+    ...(traffic ? { traffic } : {}),
   };
 }
 
@@ -112,14 +138,16 @@ const DEBOUNCE_MS = 300;
 
 /**
  * 입력이 바뀌면 300ms 기다렸다가 한 번만 부릅니다. 이전 요청은 취소해서 늦게 온 옛 응답이 화면을 덮지 않게 합니다.
- * 새 값을 받는 동안에는 직전 결과를 흐리게 보여 줍니다 (첫 호출은 가격표를 받느라 수십 초 걸릴 수 있습니다).
+ * 새 값을 받는 동안에는 loading 으로 둡니다. 소비자는 이전 응답을 새 입력의 견적으로 표시하지 않습니다.
  */
 export function useFinopsEstimate(body: ReturnType<typeof estimateRequest>): EstimateState {
-  const key = JSON.stringify(body);
+  // 원본 위치를 몰라 요청을 만들지 못하면 부르지 않습니다 (key 가 null).
+  const key = body === null ? null : JSON.stringify(body);
   // 마지막으로 받은 응답과 그 요청. 지금 입력(key)과 다르면 "조회 중" 입니다 (effect 안에서 상태를 바로 바꾸지 않음).
   const [last, setLast] = useState<{ key: string; data: FinopsEstimate | null; error: string | null } | null>(null);
 
   useEffect(() => {
+    if (key === null) return;
     const controller = new AbortController();
     const timer = setTimeout(() => {
       request<FinopsEstimate>("/api/finops/estimate", { method: "POST", body: key, signal: controller.signal })

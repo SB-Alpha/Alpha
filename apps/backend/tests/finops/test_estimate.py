@@ -384,3 +384,94 @@ def test_warm_up_can_be_turned_off(monkeypatch):
     monkeypatch.setenv(estimate.WARMUP_ENV, "0")
     monkeypatch.setattr(estimate, "_warm_started", False)
     assert estimate.warm_up(jobs=[lambda: pytest.fail("must not run")]) is False
+
+
+# -- 원본 클라우드·목적지 크기·모르는 값 (PR: FinOps 를 백엔드 값만으로) -------------------------------------
+
+
+class RecordingGcp:
+    """어떤 크기·리전으로 불렸는지 남기는 가짜 GCP 가격."""
+
+    def __init__(self):
+        self.calls = []
+
+    def cost(self, req, region, source):
+        from app.features.finops.schemas import CloudCost, CostLine
+        self.calls.append((req.app_vcpu, req.app_memory_mib, region))
+        return CloudCost(cloud="gcp", region=region, lines=[
+            CostLine(item=estimate.APP, monthly_usd=10.0, source=source),
+            CostLine(item=estimate.DB, monthly_usd=20.0, source=source),
+            CostLine(item=estimate.STORAGE, monthly_usd=1.0, source=source),
+        ])
+
+    def app_instance_month(self, req, region):
+        return 30.0
+
+
+def test_gcp_source_is_priced_by_gcp_and_aws_can_be_a_candidate():
+    gcp = RecordingGcp()
+    req = _req(source_cloud="gcp", source_region="asia-northeast3",
+               candidates=[Candidate(cloud="aws", region="ap-northeast-2")])
+    inp = estimate.build_input(req, aws=AwsPrices(FakePricingClient()), gcp=gcp, today=TODAY)
+    assert inp.current.cloud == "gcp" and inp.current.region == "asia-northeast3"
+    assert gcp.calls == [(req.app_vcpu, req.app_memory_mib, "asia-northeast3")]
+    assert inp.candidates[0].cloud == "aws" and inp.candidates[0].region == "ap-northeast-2"
+    assert inp.crossover is None  # 교차점은 AWS 원본 + GCP 후보일 때만
+
+
+def test_candidate_cannot_be_the_source_cloud():
+    with pytest.raises(ValidationError):
+        _req(source_cloud="gcp", source_region="asia-northeast3",
+             candidates=[Candidate(cloud="gcp", region="asia-northeast3")])
+
+
+def test_candidates_use_the_target_app_size_and_the_source_keeps_its_own():
+    gcp = RecordingGcp()
+    req = _req(app_vcpu=None, app_memory_mib=None, target_app_vcpu=2.0, target_app_memory_mib=4096,
+               candidates=[Candidate(cloud="gcp", region="asia-northeast3")])
+    inp = estimate.build_input(req, aws=AwsPrices(FakePricingClient()), gcp=gcp, today=TODAY)
+    assert gcp.calls == [(2.0, 4096, "asia-northeast3")]
+    # 원본 앱 크기를 모르면 원본 앱 비용은 미제공입니다 (목적지 크기로 채우지 않음)
+    assert inp.current.lines[0].item == estimate.APP and inp.current.lines[0].monthly_usd is None
+
+
+def test_unknown_instance_count_is_priced_as_one_and_said_so():
+    inp = estimate.build_input(_req(app_instances=None, candidates=[]), aws=AwsPrices(FakePricingClient()), today=TODAY)
+    assert any("1대로 계산" in note for note in inp.assumptions)
+
+
+def test_arbitrage_is_not_made_up_when_an_input_is_unknown():
+    from app.features.finops.router import arbitrage_request
+
+    base = {"source_region": "ap-northeast-2", "app_vcpu": 1.0, "app_memory_mib": 2048,
+            "candidates": [{"cloud": "gcp", "region": "asia-northeast3"}]}
+    full = {"idle_percent": 70.0, "rps": 2.0, "avg_latency_ms": 100.0, "read_ratio": 0.8, "avg_response_kb": 4.0}
+    assert arbitrage_request(CostRequest(**base, traffic=full)) is not None
+    for missing in ("avg_latency_ms", "read_ratio", "avg_response_kb"):
+        traffic = {k: v for k, v in full.items() if k != missing}
+        assert arbitrage_request(CostRequest(**base, traffic=traffic)) is None, missing
+    assert arbitrage_request(CostRequest(**{**base, "app_vcpu": None}, traffic=full)) is None
+    azure_source = {**base, "source_cloud": "azure", "source_region": "koreacentral"}
+    assert arbitrage_request(CostRequest(**azure_source, traffic=full)) is None
+
+
+@pytest.mark.parametrize("target", [{"target_app_vcpu": 2}, {"target_app_memory_mib": 4096}])
+def test_arbitrage_does_not_price_a_different_target_as_the_source_size(target):
+    from app.features.finops.router import arbitrage_request
+
+    req = _req(**target, traffic=Traffic(idle_percent=70, rps=2, avg_latency_ms=100,
+                                       read_ratio=0.8, avg_response_kb=4))
+    assert arbitrage_request(req) is None
+    same_size = req.model_copy(update={"target_app_vcpu": req.app_vcpu,
+                                      "target_app_memory_mib": req.app_memory_mib})
+    assert arbitrage_request(same_size) is not None
+
+
+def test_crossover_uses_and_describes_the_target_size():
+    req = _req(target_app_vcpu=2, target_app_memory_mib=4096)
+    gcp = estimate.GcpPrices(GCP_SKUS.__getitem__)
+    inp = estimate.build_input(req, aws=AwsPrices(FakePricingClient()), gcp=gcp,
+                               azure=AzurePrices(fake_azure_query), today=TODAY)
+    assert inp.crossover.cloud_run_instance_monthly_usd == round(gcp.app_instance_month(req.for_candidate(), "asia-northeast3"), 2)
+    note = next(n for n in inp.assumptions if n.startswith("교차점:"))
+    assert "같은 크기" not in note and "입력한 원본·목적지 크기" in note

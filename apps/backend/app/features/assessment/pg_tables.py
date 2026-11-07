@@ -7,41 +7,60 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.features.assessment.schemas import TableInfo
 
-# rdsadmin: RDS 관리용 내부 DB, 템플릿 DB: 이관 대상 아님
+# rdsadmin·cloudsqladmin·azure_*: 각 CSP 관리용 내부 DB, 템플릿 DB: 이관 대상 아님
 SQL_DATABASES = (
     "SELECT datname FROM pg_database "
-    "WHERE NOT datistemplate AND datname <> 'rdsadmin' ORDER BY datname"
+    "WHERE NOT datistemplate AND datname NOT IN ('rdsadmin', 'cloudsqladmin', 'azure_maintenance', 'azure_sys') "
+    "ORDER BY datname"
 )
 SQL_CURRENT_DB = "SELECT current_database()"
 SQL_WAL_LEVEL = "SHOW wal_level"
 SQL_MAX_SLOTS = "SHOW max_replication_slots"
 SQL_SLOTS_IN_USE = "SELECT count(*) FROM pg_replication_slots"
+# CDC 에이전트 카탈로그(infra/db_migration/agent/cdc_agent/catalog.py)와 같은 대상·기준: alpha_cdc(마커)와
+# 확장 소유 테이블은 뺀다. 파티션·SELECT 권한은 CDC 가 거절하므로 함께 읽어 gap 으로 알린다.
 # PK 컬럼은 indkey 순서대로 정렬. reltuples는 통계 기반 추정치(미분석 테이블은 -1).
 SQL_TABLES = """
 SELECT n.nspname, c.relname, pg_get_userbyid(c.relowner), c.relreplident, c.reltuples,
        (SELECT array_agg(a.attname ORDER BY array_position(i.indkey::int2[], a.attnum))
           FROM pg_index i
           JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-         WHERE i.indrelid = c.oid AND i.indisprimary) AS pk_columns
+         WHERE i.indrelid = c.oid AND i.indisprimary) AS pk_columns,
+       c.relkind, c.relispartition,
+       has_schema_privilege(n.oid, 'USAGE') AND has_table_privilege(c.oid, 'SELECT')
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
  WHERE c.relkind IN ('r', 'p')
-   AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-   AND n.nspname NOT LIKE 'pg_toast%'
+   AND n.nspname !~ '^pg_' AND n.nspname NOT IN ('information_schema', 'alpha_cdc')
+   AND NOT EXISTS (SELECT 1 FROM pg_depend d
+                    WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
  ORDER BY n.nspname, c.relname
 """
-# rds_replication 멤버십은 직접 멤버만 본다(상속된 간접 멤버십은 미확인).
-SQL_CAN_REPLICATE = """
-SELECT r.rolreplication OR r.rolsuper OR EXISTS (
-         SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
-          WHERE m.member = r.oid AND g.rolname = 'rds_replication')
+# 복제 권한을 주는 역할. AWS 는 rds_superuser 가 rds_replication 의 멤버라 마스터 계정이 상속으로 얻으므로
+# 직접 멤버가 아니라 pg_has_role(USAGE) 로 상속까지 본다(실 RDS PG16 에서 확인). GCP/Azure 는 관리자 역할
+# (cloudsqlsuperuser, azure_pg_admin)이 REPLICATION 속성을 주지 않음이 Azure 실환경에서 확인돼 속성만 본다.
+# GCP 실환경(Cloud SQL PG16, 2026-11-07) 확인: cloudsqlsuperuser·postgres 모두 rolreplication=false 라 속성만 보는 판정이 맞다.
+# CDC 계정은 REPLICATION 속성을 따로 줘야 한다(ALTER ROLE … WITH REPLICATION, 아직 CDC 계정으로는 미시험).
+REPLICATION_ROLES = {"aws": ("rds_replication",), "gcp": (), "azure": ()}
+
+
+def sql_can_replicate(cloud: str = "aws") -> str:
+    roles = ", ".join(f"'{r}'" for r in REPLICATION_ROLES[cloud])  # 고정 상수라 주입 위험 없음
+    # 역할이 없으면 pg_roles 에서 0행이라 pg_has_role 이 호출되지 않아 오류가 나지 않음
+    member = f""" OR EXISTS (
+         SELECT 1 FROM pg_roles g
+          WHERE g.rolname IN ({roles}) AND pg_has_role(r.oid, g.oid, 'USAGE'))""" if roles else ""
+    return f"""
+SELECT r.rolreplication OR r.rolsuper{member}
   FROM pg_roles r WHERE r.rolname = current_user
 """
+
 
 _REPLIDENT = {"d": "default", "f": "full", "n": "nothing", "i": "index"}
 
@@ -78,7 +97,7 @@ def _row_estimate(v: Any) -> int | None:
     return None if v is None or float(v) < 0 else int(v)
 
 
-def collect_pg_catalog(cur: Any) -> dict:
+def collect_pg_catalog(cur: Any, cloud: str = "aws") -> dict:
     """카탈로그 정보를 수집한다. 실패한 항목은 None/[]로 두고 gaps에 사유를 남긴다."""
     out: dict[str, Any] = {
         "databases": [], "current_database": None, "wal_level": None,
@@ -103,17 +122,18 @@ def collect_pg_catalog(cur: Any) -> dict:
     step("wal_level", lambda: str(_one(cur, SQL_WAL_LEVEL)).strip())
     step("max_replication_slots", lambda: int(_one(cur, SQL_MAX_SLOTS)))
     step("slots_in_use", lambda: int(_one(cur, SQL_SLOTS_IN_USE)))
-    step("can_replicate", lambda: _bool(_one(cur, SQL_CAN_REPLICATE)))
+    step("can_replicate", lambda: _bool(_one(cur, sql_can_replicate(cloud))))
 
     def tables():
         res = []
-        for schema, name, owner, ident, tuples, pk in rows(SQL_TABLES):
+        for schema, name, owner, ident, tuples, pk, kind, is_part, can_select in rows(SQL_TABLES):
             cols = _pk_cols(pk)
             res.append({
                 "schema": schema, "name": name, "qualified": f"{schema}.{name}",
                 "has_primary_key": bool(cols), "primary_key_columns": cols,
                 "replica_identity": _REPLIDENT.get(ident, str(ident)),
                 "row_estimate": _row_estimate(tuples), "owner": owner,
+                "partitioned": kind == "p" or _bool(is_part) is True, "can_select": _bool(can_select),
             })
         return res
 
@@ -134,6 +154,22 @@ def tables_without_pk(catalog: dict) -> list[str]:
         if gap not in catalog["gaps"]:
             catalog["gaps"].append(gap)
     return names
+
+
+_CDC_TABLE_NAME = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$")  # job_request.py 와 같은 규칙
+
+
+def cdc_refusals(tables: list[dict]) -> list[str]:
+    """CDC(db_migration)가 작업 등록 때 거절하는 테이블. 승인 전에 미리 알린다. PK 없음은 rules.py 가 판정."""
+    checks = (("파티션 테이블은 CDC 가 지원하지 않음", lambda t: t.get("partitioned")),
+              ("원본 계정이 SELECT 할 수 없음", lambda t: t.get("can_select") is False),
+              ("테이블 이름이 소문자 규칙이 아님", lambda t: not _CDC_TABLE_NAME.fullmatch(t["qualified"])))
+    out = []
+    for why, bad in checks:
+        names = [t["qualified"] for t in tables if bad(t)]
+        if names:
+            out.append(f"{why}: {', '.join(names[:5])}" + (f" 외 {len(names) - 5}개" if len(names) > 5 else ""))
+    return out
 
 
 @dataclass
@@ -167,6 +203,7 @@ def catalog_to_dbinfo(catalog: dict, requested_database: str | None) -> CatalogR
         res.max_replication_slots = catalog.get("max_replication_slots")
         res.replication_slots_in_use = catalog.get("slots_in_use")
     if "tables" not in failed:
+        res.gaps += cdc_refusals(catalog["tables"])
         res.tables = [TableInfo(schema_name=t["schema"], name=t["name"], row_count=t["row_estimate"],
                                 has_primary_key=t["has_primary_key"]) for t in catalog["tables"]]
     return res

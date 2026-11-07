@@ -202,7 +202,18 @@ def _agent_live() -> AgentLive:
     )
 
 
+# 화면 프로브는 공용 Worker(게이트)로 실제 요청을 보냅니다. 팀 규칙(11/8 박준서)대로 공용 Worker 를 테스트에 쓰지 않도록
+# 기본은 끄고, 시연처럼 필요할 때만 ALPHA_LIVE_PROBE=1 로 켭니다. Worker 상태 읽기는 읽기 전용이라 그대로 둡니다.
+LIVE_PROBE_ENV = "ALPHA_LIVE_PROBE"
+
+
+def _live_probe_enabled() -> bool:
+    return os.environ.get(LIVE_PROBE_ENV, "0") in ("1", "true", "True")
+
+
 def _probe_live() -> ProbeLive:
+    if not _live_probe_enabled():
+        return ProbeLive(status="not_configured", error=f"{LIVE_PROBE_ENV} 가 꺼져 있어 화면 프로브를 보내지 않습니다")
     prober = prober_from_env()
     if prober is None:
         if os.environ.get(PROBE_URL_ENV, "").strip():

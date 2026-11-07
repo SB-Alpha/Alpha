@@ -67,6 +67,7 @@ AGENT_STATUS = {
 def clean_env(monkeypatch):
     for name in LIVE_ENVS:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALPHA_LIVE_PROBE", "1")  # 아래 프로브 테스트는 켠 상태를 봅니다. 꺼진 기본값은 따로 확인합니다
     live.reset_cache()
     yield
     live.reset_cache()
@@ -410,3 +411,11 @@ def test_probe_is_sent_without_a_worker(client, monkeypatch):
     sent = _count_probes(monkeypatch)
     assert client.get("/live/edge").json()["probe"]["status"] == "ok"
     assert len(sent) == 1
+
+
+def test_live_probe_is_off_by_default_so_the_shared_worker_gets_no_dashboard_traffic(client, monkeypatch):
+    monkeypatch.delenv("ALPHA_LIVE_PROBE")
+    sent = _count_probes(monkeypatch)
+    probe = client.get("/live/edge").json()["probe"]
+    assert sent == []
+    assert probe["status"] == "not_configured" and "ALPHA_LIVE_PROBE" in probe["error"]

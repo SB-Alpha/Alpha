@@ -1,0 +1,6 @@
+.env
+certs/
+.was.env
+*.docker.tar
+*.docker.tar.sha256
+was-image.json

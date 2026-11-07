@@ -34,7 +34,7 @@ def base(tables):
     }
 
 
-WORK = ("public", "work_items", "app", "d", 120.0, ["id"])
+WORK = ("public", "work_items", "app", "d", 120.0, ["id"], "r", False, True)
 
 
 def test_normal():
@@ -47,12 +47,13 @@ def test_normal():
         "schema": "public", "name": "work_items", "qualified": "public.work_items",
         "has_primary_key": True, "primary_key_columns": ["id"],
         "replica_identity": "default", "row_estimate": 120, "owner": "app",
+        "partitioned": False, "can_select": True,
     }]
     assert m.to_source_tables(c) == ["public.work_items"]
 
 
 def test_no_pk_kept_and_gap():
-    c = m.collect_pg_catalog(FakeCursor(base([WORK, ("public", "logs", "app", "d", 5.0, None)])))
+    c = m.collect_pg_catalog(FakeCursor(base([WORK, ("public", "logs", "app", "d", 5.0, None, "r", False, True)])))
     assert m.to_source_tables(c) == ["public.work_items", "public.logs"]
     assert m.tables_without_pk(c) == ["public.logs"]
     m.tables_without_pk(c)  # 중복 호출해도 gap은 하나
@@ -60,7 +61,7 @@ def test_no_pk_kept_and_gap():
 
 
 def test_composite_pk_and_replica_identity():
-    c = m.collect_pg_catalog(FakeCursor(base([("public", "m", "app", "f", 1.0, "{a,b}")])))
+    c = m.collect_pg_catalog(FakeCursor(base([("public", "m", "app", "f", 1.0, "{a,b}", "r", False, True)])))
     t = c["tables"][0]
     assert t["primary_key_columns"] == ["a", "b"] and t["replica_identity"] == "full"
 
@@ -74,7 +75,7 @@ def test_one_query_fails():
 
 
 def test_row_estimate_minus_one():
-    c = m.collect_pg_catalog(FakeCursor(base([("public", "t", "app", "d", -1.0, ["id"])])))
+    c = m.collect_pg_catalog(FakeCursor(base([("public", "t", "app", "d", -1.0, ["id"], "r", False, True)])))
     assert c["tables"][0]["row_estimate"] is None
 
 
@@ -86,7 +87,7 @@ def test_wal_level_parse():
 
 def test_system_schemas_excluded_in_sql():
     # 가짜 cursor는 필터링하지 않으므로, 제외 조건이 쿼리에 있는지 확인
-    for s in ("pg_catalog", "information_schema", "pg_toast"):
+    for s in ("^pg_", "information_schema", "alpha_cdc", "deptype = 'e'"):  # CDC 카탈로그와 같은 제외 기준
         assert s in m.SQL_TABLES
     assert "relkind IN ('r', 'p')" in m.SQL_TABLES
 
@@ -130,7 +131,7 @@ def test_dbinfo_empty_tables():
 
 
 def test_dbinfo_row_estimate_minus_one_and_no_pk():
-    r = m.catalog_to_dbinfo(_cat(rows=[("public", "t", "app", "d", -1.0, None)]), "appdb")
+    r = m.catalog_to_dbinfo(_cat(rows=[("public", "t", "app", "d", -1.0, None, "r", False, True)]), "appdb")
     assert r.tables[0].row_count is None and r.tables[0].has_primary_key is False
     assert r.gaps == []  # PK 판정은 rules.py
 
@@ -169,3 +170,14 @@ def test_dbinfo_carries_replication_slots():
 def test_dbinfo_drops_slots_when_either_query_failed():
     r = m.catalog_to_dbinfo(_cat(fail=["pg_replication_slots"]), "appdb")
     assert r.max_replication_slots is None and r.replication_slots_in_use is None
+
+
+def test_cdc_refusals_in_gaps():
+    rows = [WORK, ("public", "part", "app", "d", 1.0, None, "p", False, True),
+            ("public", "child", "app", "d", 1.0, ["id"], "r", True, True),
+            ("public", "locked", "app", "d", 1.0, ["id"], "r", False, False),
+            ("public", "Upper", "app", "d", 1.0, ["id"], "r", False, True)]
+    g = m.catalog_to_dbinfo(_cat(rows=rows), "appdb").gaps
+    assert g == ["파티션 테이블은 CDC 가 지원하지 않음: public.part, public.child",
+                 "원본 계정이 SELECT 할 수 없음: public.locked",
+                 "테이블 이름이 소문자 규칙이 아님: public.Upper"]

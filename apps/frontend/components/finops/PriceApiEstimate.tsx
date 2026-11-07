@@ -1,20 +1,20 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { NOT_PROVIDED, type FinOpsInputParams, type TargetProvider } from "@/lib/finops";
+import { useState } from "react";
+import { NOT_PROVIDED, cloudLabel, type TargetProvider } from "@/lib/finops";
 import type { ServingSide } from "@/lib/dashboard";
-import type { ArbitrageResult, CloudCost, Crossover, EstimateState, FinopsEstimate, Saving } from "@/lib/finopsApi";
+import type {
+  ArbitrageResult,
+  CloudCost,
+  Crossover,
+  EstimateState,
+  FinopsEstimate,
+  Saving,
+  TrafficInputs,
+} from "@/lib/finopsApi";
 
-// 백엔드 /finops/estimate 결과를 그립니다. 슬라이더를 움직이면 백엔드가 준 가격 API 단가(앵커)에
-// 슬라이더 값을 곱해 화면에서 다시 계산합니다. 이 값은 "추정 (화면 계산)" 으로 표시하고,
-// 모르는 금액은 0 으로 더하지 않고 "미제공" 으로 둡니다.
-
-const CLOUD_LABEL: Record<string, string> = { aws: "AWS", gcp: "GCP", azure: "Azure" };
-const CLOUD_REGION_LABEL: Record<string, string> = {
-  aws: "Seoul (ap-northeast-2)",
-  gcp: "Seoul (asia-northeast3)",
-  azure: "Korea Central (koreacentral)",
-};
+// 백엔드 /finops/estimate 결과만 그립니다. 금액·교차점·차익거래는 모두 백엔드가 가격 API 단가로 낸 값이고,
+// 화면에서 다시 계산하지 않습니다. 입력을 바꾸면 백엔드를 다시 부릅니다. 모르는 금액은 "미제공" 입니다.
 
 const LINE_COLORS: Record<string, string> = {
   "앱 컴퓨팅": "bg-ink",
@@ -22,14 +22,7 @@ const LINE_COLORS: Record<string, string> = {
   "DB 스토리지": "bg-ink/30",
 };
 
-const SECONDS_PER_MONTH = 730 * 3600;
-// 아래 값은 화면 추정에만 씁니다. 백엔드 차익거래(arbitrage.py · /finops/estimate)의 기본값과 같은 값이고 실측이 아닙니다
-const CLOUD_RUN_REQ_PER_MILLION_USD = 0.4; // arbitrage.CLOUD_RUN_REQ_PER_MILLION_DEFAULT
-const AVG_RESPONSE_KB = 4.0; // ArbitrageRequest.avg_response_kb 기본값
-const READ_RATIO = 0.8; // /finops/estimate 가 넣는 read_ratio
-// 읽기 분산을 막는 복제 지연 기준. 백엔드 finops MAX_SAFE_LAG_BYTES · 전환 승인 ② 와 같은 1 MiB
-const MAX_SAFE_LAG_BYTES = 1024 * 1024;
-const ESTIMATE_LABEL = "추정 (화면 계산)";
+const ESTIMATE_LABEL = "가격 API 견적";
 
 /** 실제 RunStatus 에서 읽은 실시간 지표 (가상 생성값 없음) */
 export interface RealRunTelemetry {
@@ -74,181 +67,7 @@ function arbitrageStatus(arb: ArbitrageResult): string {
   ) {
     return NOT_PROVIDED;
   }
-  return `읽기 GCP ${Math.round(arb.read_weight_target * 100)}% · AWS ${Math.round(arb.read_weight_source * 100)}%`;
-}
-
-/**
- * 슬라이더(RPS, 유휴율, 응답 지연)와 실제 run 의 replication_lag_bytes 를
- * 백엔드 가격 API 단가 앵커(fargate_app_monthly_usd, cloud_run_instance_monthly_usd, egress_usd_per_gb)에 결합합니다.
- */
-export function deriveLiveView(
-  base: FinopsEstimate,
-  params?: FinOpsInputParams,
-  replicationLagBytes?: number | null,
-): FinopsEstimate {
-  if (!params) return base;
-  const x = base.input.crossover;
-  const baseArb = base.arbitrage;
-  const fargateApp = x?.fargate_app_monthly_usd ?? null;
-  const crInstanceFull = x?.cloud_run_instance_monthly_usd ?? null;
-
-  const rps = params.rps;
-  const idlePct = params.idlePercent;
-  const latencyMs = params.avgRequestMs;
-  const activeShare = Math.max(0, Math.min(1, 1 - idlePct / 100));
-  const latencySec = Math.max(0.001, latencyMs / 1000);
-
-  const neededInstances =
-    x && rps > 0 ? Math.min(x.max_instances, Math.max(1, Math.ceil((rps * latencySec) / x.concurrency))) : 1;
-  const liveGcpAppUsd =
-    crInstanceFull !== null ? Number((crInstanceFull * neededInstances * activeShare).toFixed(2)) : null;
-
-  let liveBreakEvenRps = x?.break_even_rps ?? null;
-  let liveReason = x?.reason ?? null;
-  if (x && fargateApp !== null && crInstanceFull !== null && crInstanceFull > 0) {
-    const perInstance = crInstanceFull * activeShare;
-    if (perInstance <= 0) {
-      liveBreakEvenRps = null;
-      liveReason = null;
-    } else {
-      const cheaper = Math.ceil(fargateApp / perInstance) - 1;
-      if (cheaper < 1) {
-        liveBreakEvenRps = null;
-        liveReason = "이 유휴 비율에서는 Cloud Run 1대만 떠 있어도 Fargate 보다 비싸 RPS 교차점이 없습니다";
-      } else if (cheaper >= x.max_instances) {
-        const cap = Math.round((x.max_instances * x.concurrency) / latencySec);
-        liveBreakEvenRps = null;
-        liveReason = `Cloud Run 최대 ${x.max_instances}대(약 ${cap.toLocaleString("en-US")} RPS) 안에서는 교차점이 없습니다`;
-      } else {
-        liveBreakEvenRps = Number(((cheaper * x.concurrency) / latencySec).toFixed(1));
-        liveReason = null;
-      }
-    }
-  }
-
-  const currentTotal = base.report.savings[0]?.current_monthly_usd ?? null;
-  const liveCandidates = base.input.candidates.map((cand) => {
-    if (cand.cloud !== "gcp" || liveGcpAppUsd === null) return cand;
-    return {
-      ...cand,
-      lines: cand.lines.map((line) => (line.item === "앱 컴퓨팅" ? { ...line, monthly_usd: liveGcpAppUsd } : line)),
-    };
-  });
-
-  const liveSavings = base.report.savings.map((s) => {
-    if (s.cloud !== "gcp" || !s.complete || currentTotal === null || liveGcpAppUsd === null) return s;
-    const gcpCand = liveCandidates.find((c) => c.cloud === "gcp");
-    if (!gcpCand || gcpCand.lines.some((l) => l.monthly_usd === null)) return s;
-    // 위에서 금액이 빠진 항목이 있으면 이미 돌아갔으므로 여기서는 모든 항목이 금액을 가집니다
-    const knownAmounts = gcpCand.lines.map((l) => l.monthly_usd).filter((v): v is number => v !== null);
-    const candTotal = Number(knownAmounts.reduce((acc, v) => acc + v, 0).toFixed(2));
-    const diff = Number((currentTotal - candTotal).toFixed(2));
-    const pct = currentTotal > 0 ? Number(((diff / currentTotal) * 100).toFixed(1)) : null;
-    return {
-      ...s,
-      candidate_monthly_usd: candTotal,
-      monthly_saving_usd: diff,
-      saving_pct: pct,
-    };
-  });
-
-  let liveArb: ArbitrageResult | null | undefined = baseArb;
-  if (baseArb && crInstanceFull !== null) {
-    // 지연을 모르면 안전하다고 보지 않습니다 (백엔드 arbitrage.py 와 같은 판단)
-    const lagKnown =
-      typeof replicationLagBytes === "number" && Number.isFinite(replicationLagBytes) && replicationLagBytes >= 0;
-    const lagFenced = !lagKnown || replicationLagBytes > MAX_SAFE_LAG_BYTES;
-    const baselineUsd = baseArb.baseline_monthly_cost ?? fargateApp;
-    const egressPerGb = baseArb.egress_usd_per_gb;
-    const readRatio = READ_RATIO;
-    const readRps = rps * readRatio;
-    const activeSeconds = SECONDS_PER_MONTH * activeShare;
-    const totalReadReqs = readRps * activeSeconds;
-    const busyRatio = readRps > 0 && latencySec > 0 ? Math.min(1, 1 - Math.exp(-readRps * latencySec)) : 0;
-
-    const crPerSec = crInstanceFull / SECONDS_PER_MONTH;
-    const targetAppUsd =
-      activeSeconds * busyRatio * crPerSec + (totalReadReqs / 1_000_000) * CLOUD_RUN_REQ_PER_MILLION_USD;
-    const egressGb = (totalReadReqs * AVG_RESPONSE_KB) / (1024 * 1024);
-    const egressUsd = egressPerGb !== null ? egressGb * egressPerGb : null;
-
-    if (baselineUsd !== null) {
-      if (readRps <= 0) {
-        liveArb = {
-          ...baseArb,
-          lag_fenced: false,
-          read_weight_target: 0,
-          read_weight_source: 1,
-          arbitrage_monthly_cost: baselineUsd,
-          monthly_savings: 0,
-          savings_percent: 0,
-          cross_cloud_egress_monthly_usd: egressUsd !== null ? Number(egressUsd.toFixed(2)) : null,
-        };
-      } else if (lagFenced) {
-        liveArb = {
-          ...baseArb,
-          lag_fenced: true,
-          read_weight_target: 0,
-          read_weight_source: 1,
-          arbitrage_monthly_cost: baselineUsd,
-          monthly_savings: 0,
-          savings_percent: 0,
-          recommendation: lagKnown
-            ? "FENCED_PRIMARY: 복제 지연으로 인해 모든 트래픽이 원본 마스터에 고정되었습니다."
-            : "미제공: 복제 지연을 받지 못해 읽기 우회를 하지 않고 원본 마스터에 고정했습니다.",
-        };
-      } else if (egressUsd !== null) {
-        const arbTotalUsd = targetAppUsd + egressUsd;
-        const readPortionUsd = baselineUsd * readRatio;
-        if (arbTotalUsd >= readPortionUsd) {
-          liveArb = {
-            ...baseArb,
-            lag_fenced: false,
-            read_weight_target: 0,
-            read_weight_source: 1,
-            arbitrage_monthly_cost: baselineUsd,
-            monthly_savings: 0,
-            savings_percent: 0,
-            cross_cloud_egress_monthly_usd: Number(egressUsd.toFixed(2)),
-          };
-        } else {
-          const savings = Number((readPortionUsd - arbTotalUsd).toFixed(2));
-          const arbMonthly = Number((baselineUsd - readPortionUsd + arbTotalUsd).toFixed(2));
-          const pct = baselineUsd > 0 ? Number(((savings / baselineUsd) * 100).toFixed(1)) : 0;
-          liveArb = {
-            ...baseArb,
-            lag_fenced: false,
-            read_weight_target: 1.0,
-            read_weight_source: 0.0,
-            arbitrage_monthly_cost: arbMonthly,
-            monthly_savings: savings,
-            savings_percent: pct,
-            cross_cloud_egress_monthly_usd: Number(egressUsd.toFixed(2)),
-          };
-        }
-      }
-    }
-  }
-
-  return {
-    ...base,
-    input: {
-      ...base.input,
-      candidates: liveCandidates,
-      crossover: x
-        ? {
-            ...x,
-            break_even_rps: liveBreakEvenRps,
-            reason: liveReason,
-          }
-        : null,
-    },
-    report: {
-      ...base.report,
-      savings: liveSavings,
-    },
-    arbitrage: liveArb,
-  };
+  return `읽기 목적지 ${Math.round(arb.read_weight_target * 100)}% · 원본 ${Math.round(arb.read_weight_source * 100)}%`;
 }
 
 /**
@@ -257,20 +76,29 @@ export function deriveLiveView(
 function CompactCrossoverChart({
   x,
   arb,
-  params,
+  traffic,
   onChangeRps,
   onChangeIdlePercent,
 }: {
   x: Crossover | null;
   arb: ArbitrageResult | null | undefined;
-  params?: FinOpsInputParams;
+  traffic?: TrafficInputs;
   onChangeRps?: (rps: number) => void;
   onChangeIdlePercent?: (idle: number) => void;
 }) {
   const [axisMode, setAxisMode] = useState<"rps" | "idle">("rps");
 
-  // 입력(슬라이더 값)이 없으면 RPS·유휴율·처리 시간을 짐작하지 않고 그래프를 그리지 않습니다
-  if (!params || !x || x.fargate_app_monthly_usd === null || x.cloud_run_instance_monthly_usd === null) {
+  // 트래픽 입력(RPS·유휴율·처리 시간)이 없으면 짐작하지 않고 그래프를 그리지 않습니다.
+  // 곡선은 백엔드가 준 단가(Fargate 월, Cloud Run 1대 월, 동시 처리, 최대 대수)에 입력값을 대입해 그립니다.
+  if (
+    !traffic ||
+    traffic.rps === null ||
+    traffic.idlePercent === null ||
+    traffic.avgLatencyMs === null ||
+    !x ||
+    x.fargate_app_monthly_usd === null ||
+    x.cloud_run_instance_monthly_usd === null
+  ) {
     return (
       <div className="flex h-full items-center justify-center rounded-lg border border-ink/15 bg-paper/40 p-3 text-xs text-ink/50">
         교차점 그래프: {NOT_PROVIDED}
@@ -281,9 +109,10 @@ function CompactCrossoverChart({
   const fargate = x.fargate_app_monthly_usd;
   const crFull = x.cloud_run_instance_monthly_usd;
   const beIdle = x.break_even_idle_percent;
-  const rpsNow = params.rps;
-  const idleNow = params.idlePercent;
-  const latencySec = params.avgRequestMs / 1000;
+  const rpsNow = traffic.rps;
+  const idleNow = traffic.idlePercent;
+  const latencySec = traffic.avgLatencyMs / 1000;
+  const readRatio = traffic.readRatio;
   const activeShare = 1 - idleNow / 100;
 
   const W = 440;
@@ -307,12 +136,13 @@ function CompactCrossoverChart({
     return needed * crOneActive;
   };
 
+  // 읽기 비율을 모르면 차익거래 곡선을 그리지 않습니다 (예전 0.8 고정값 없음)
   const arbCostAtRps = (r: number) => {
-    if (!arb || arbBase <= 0) return null;
+    if (!arb || arbBase <= 0 || readRatio === null) return null;
     if (isFenced) return arbBase;
-    const writeShareCost = arbBase * (1 - READ_RATIO);
+    const writeShareCost = arbBase * (1 - readRatio);
     if (arbCrossRps && arbCrossRps > 0) {
-      const readCost = (r / arbCrossRps) * (arbBase * READ_RATIO);
+      const readCost = (r / arbCrossRps) * (arbBase * readRatio);
       return Math.min(arbBase, writeShareCost + readCost);
     }
     return null;
@@ -529,7 +359,7 @@ function CollapsibleDetailedSection({
                 <div className="flex items-baseline justify-between">
                   <span className="text-xs font-bold text-ink">
                     {isSource ? "[원본] " : ""}
-                    {CLOUD_LABEL[cost.cloud] ?? cost.cloud}
+                    {cloudLabel(cost.cloud)} {cost.region ?? ""}
                   </span>
                   <span className="text-sm font-bold tabular-nums text-ink">{usd(total)}/월</span>
                 </div>
@@ -599,7 +429,7 @@ export function PriceApiEstimate({
   state,
   selectedProvider = "gcp",
   onSelectProvider,
-  params,
+  traffic,
   onChangeRps,
   onChangeIdlePercent,
   realTelemetry,
@@ -607,15 +437,12 @@ export function PriceApiEstimate({
   state: EstimateState;
   selectedProvider?: TargetProvider;
   onSelectProvider?: (p: TargetProvider) => void;
-  params?: FinOpsInputParams;
+  traffic?: TrafficInputs;
   onChangeRps?: (rps: number) => void;
   onChangeIdlePercent?: (idle: number) => void;
   realTelemetry?: RealRunTelemetry;
 }) {
-  const liveData = useMemo(
-    () => (state.data ? deriveLiveView(state.data, params, realTelemetry?.replicationLagBytes) : null),
-    [state.data, params, realTelemetry?.replicationLagBytes],
-  );
+  const liveData = state.status === "ready" ? state.data : null;
 
   if (state.status === "error") {
     return (
@@ -633,12 +460,12 @@ export function PriceApiEstimate({
   const savingOf = (cloud: string) => report.savings.find((s) => s.cloud === cloud);
   const sourceTotal = report.savings[0]?.current_monthly_usd ?? null;
 
-  const selectedCost: CloudCost =
-    selectedProvider === "aws"
-      ? input.current
-      : input.candidates.find((c) => c.cloud === selectedProvider) ?? input.current;
-  const selectedSaving = selectedProvider === "aws" ? undefined : savingOf(selectedProvider);
-  const selectedTotal = lineTotal(selectedSaving, sourceTotal);
+  const isSourceSelected = selectedProvider === input.current.cloud;
+  const selectedCost: CloudCost | null = isSourceSelected
+    ? input.current
+    : (input.candidates.find((c) => c.cloud === selectedProvider) ?? null);
+  const selectedSaving = isSourceSelected ? undefined : savingOf(selectedProvider);
+  const selectedTotal = selectedCost === null ? null : lineTotal(selectedSaving, sourceTotal);
 
   return (
     <div className="mt-3">
@@ -650,22 +477,24 @@ export function PriceApiEstimate({
             <div className="flex items-baseline justify-between gap-2 border-b border-ink/10 pb-2">
               <div>
                 <span className="font-mono text-xs font-bold text-ink">
-                  [{CLOUD_LABEL[selectedProvider]}] {CLOUD_REGION_LABEL[selectedProvider]}
+                  [{cloudLabel(selectedProvider)}] {selectedCost?.region ?? NOT_PROVIDED}
                 </span>
                 <p className="mt-0.5 text-[11px] font-semibold text-indigo-900">
-                  {selectedProvider === "aws"
-                    ? `현재 원본 AWS 기준 (${usd(sourceTotal)}/월)`
-                    : savingText(selectedSaving)}
+                  {selectedCost === null
+                    ? "이 클라우드는 비교 후보에 없습니다"
+                    : isSourceSelected
+                      ? `현재 원본 ${cloudLabel(input.current.cloud)} 기준 (${usd(sourceTotal)}/월)`
+                      : savingText(selectedSaving)}
                 </p>
               </div>
               <div className="text-right">
                 <span className="font-mono text-xl font-bold tabular-nums text-ink">{usd(selectedTotal)}/월</span>
-                {params && <p className="text-[9px] text-amber-800">{ESTIMATE_LABEL} · 공시가 기준, 청구액 아님</p>}
+                <p className="text-[9px] text-amber-800">{ESTIMATE_LABEL} · 공시가 기준, 청구액 아님</p>
               </div>
             </div>
 
             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px]">
-              {selectedCost.lines.map((line) => (
+              {(selectedCost?.lines ?? []).map((line) => (
                 <span key={line.item} title={line.source} className="text-ink/70">
                   {line.item.replace(" 컴퓨팅", "")}:{" "}
                   <strong className="text-ink">{usd(line.monthly_usd)}</strong>
@@ -680,7 +509,7 @@ export function PriceApiEstimate({
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-semibold text-ink">
                   동적 차익거래 ({arbitrageStatus(arbitrage)})
-                  {params && <span className="ml-1 text-[9px] font-normal text-amber-800">{ESTIMATE_LABEL}</span>}
+                  <span className="ml-1 text-[9px] font-normal text-amber-800">{ESTIMATE_LABEL}</span>
                 </span>
                 <span className="font-bold text-indigo-900">
                   {arbitrage.monthly_savings !== null ? `월 ${usd(arbitrage.monthly_savings)} 절감` : NOT_PROVIDED}
@@ -711,7 +540,7 @@ export function PriceApiEstimate({
         <CompactCrossoverChart
           x={input.crossover}
           arb={arbitrage}
-          params={params}
+          traffic={traffic}
           onChangeRps={onChangeRps}
           onChangeIdlePercent={onChangeIdlePercent}
         />

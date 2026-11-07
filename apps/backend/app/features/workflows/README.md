@@ -91,7 +91,7 @@ provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어
 
 ## 화면 지표
 - `secret_encryption`: 요청의 자격 증명 참조가 모두 `secret://` 이고 암호화 저장소에 실제로 있을 때만 `ENCRYPTED`. 확인할 수 없으면 "미제공" 입니다.
-- `target_db_network`: provisioning 이 돌려준 목적지 DB 주소가 사설 IP 면 `PRIVATE`, 아니면 `PUBLIC` (db_migration `UI_API.md` 와 같은 키). 예전 run 의 `cloud_sql_private_ip`(`SECURE`/`PUBLIC`)는 화면이 같은 뜻으로 읽습니다.
+- `target_db_network`: provisioning 이 돌려준 목적지 DB 주소가 사설 IP 면 `PRIVATE`, 아니면 `PUBLIC` (db_migration `UI_API.md` 와 같은 키). 예전 run 의 `cloud_sql_private_ip`(`SECURE`/`PUBLIC`)는 화면이 같은 뜻으로 읽습니다. 주소가 IP 가 아니면 보고하지 않습니다. AWS 목적지는 `db.private_ip` 에 RDS 호스트 이름이 들어가므로 지금은 보고되지 않고 화면에 "미제공"으로 나옵니다.
 - `serving`: 에이전트의 `traffic_mode` 가 `TARGET` 이면 `target` 입니다 (db_migration 계약의 `source`/`target`). 예전 run 의 `gcp` 는 화면이 `target` 으로 읽습니다.
 - `cutover_seconds`·`cutover_seconds_source`: 팀 합의(박준서, 11/5)대로 Worker 의 `released_at - hold_started_at`(에이전트 `evidence.cutover.t0`·`t1`)을 씁니다 (`worker`). 두 값을 쓸 수 없으면 에이전트 `cutover_ms` 를 씁니다 (`agent`). 둘 다 없으면 "미제공" 입니다.
 - `cutover_steps`: 에이전트 `evidence.cutover.steps` 의 `step`·`elapsed_ms`·`waited_ms`·`mismatch`·`error`(접속 정보를 가린 뒤 300자까지)만 옮깁니다. 진행 중과 실패 직전에도 보고합니다.
