@@ -107,13 +107,14 @@ def test_blocked_summary_must_name_the_failing_check(monkeypatch):
     assert "blocking_not_named" in ai.check_notes(vague, plan, ai._plan_for_prompt(plan))
 
 
-# 실호출 평가(Sonnet 5.5)에서 나온 맞는 문장. 예전 키워드 검사가 '승인 가능' 글자만 보고 버렸던 것들
+# 실호출 평가(Sonnet 5.5)에서 나온 맞는 문장 모양. 예전 키워드 검사가 '승인 가능' 글자만 보고 버렸던 것들.
+# 필수 조건 개수는 검사가 늘 때마다 바뀌므로 계획에서 읽어 채웁니다
 REAL_BLOCKED_SUMMARIES = [
     ["target-app 과 PostgreSQL 16.4 데이터베이스를 GCP asia-northeast3 의 Cloud Run 과 Cloud SQL 로 옮기는 계획입니다.",
-     "승인 불가 상태입니다. 4개 필수 조건 중 3개가 통과했고, 막힌 조건은 '논리 복제 설정'(논리 복제 설정 미제공)입니다.",
+     "승인 불가 상태입니다. {total}개 필수 조건 중 {passed}개가 통과했고, 막힌 조건은 '논리 복제 설정'(논리 복제 설정 미제공)입니다.",
      "논리 복제 설정이 확인되어 승인 가능해지면 이미지 이동과 terraform apply, CDC 동기화가 진행됩니다."],
     ["target-app 을 GCP asia-northeast3 의 Cloud Run 과 Cloud SQL 로 옮기는 계획입니다.",
-     "현재 승인 불가 상태입니다. 필수 조건 4개 중 3개만 통과했고, 막힌 조건은 '논리 복제 설정' 입니다.",
+     "현재 승인 불가 상태입니다. 필수 조건 {total}개 중 {passed}개만 통과했고, 막힌 조건은 '논리 복제 설정' 입니다.",
      "논리 복제 설정이 확인되어 승인 가능 상태가 되면 이미지 이동, terraform apply, CDC 복사가 진행됩니다."],
 ]
 
@@ -121,8 +122,9 @@ REAL_BLOCKED_SUMMARIES = [
 @pytest.mark.parametrize("summary", REAL_BLOCKED_SUMMARIES)
 def test_conditional_future_approval_is_not_a_contradiction(summary):
     plan = _blocked_plan()
-    assert _counts(plan) == (3, 4)
-    notes = AiNotes(summary=summary)
+    passed, total = _counts(plan)
+    assert passed == total - 1  # 논리 복제 설정 하나만 막힘
+    notes = AiNotes(summary=[line.format(passed=passed, total=total) for line in summary])
     assert ai.check_notes(notes, plan, ai._plan_for_prompt(plan)) == []
 
 
