@@ -107,4 +107,5 @@ def rule_notes(inp: FinopsInput, savings: list[Saving]) -> list[str]:
     if inp.period_days is None and inp.rightsizing:  # 크기 제안이 있을 때만 근거 기간이 의미 있음
         notes.append("사용량을 본 기간이 미제공이라 크기 제안의 근거가 약할 수 있습니다.")
     notes += [f"{r.resource}: {r.current} → {r.suggested} 제안 ({r.evidence})" for r in inp.rightsizing]
+    notes += inp.assumptions
     return notes

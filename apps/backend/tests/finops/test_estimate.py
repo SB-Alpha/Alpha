@@ -4,9 +4,16 @@ import json
 from datetime import date
 
 import pytest
+from pydantic import ValidationError
 
 from app.features.finops import estimate, service
-from app.features.finops.estimate import AwsPrices, AzurePrices, Candidate, CostRequest
+from app.features.finops.estimate import (
+    AwsPrices,
+    AzurePrices,
+    Candidate,
+    CostRequest,
+    Traffic,
+)
 
 TODAY = date(2026, 11, 7)
 
@@ -87,6 +94,12 @@ def fake_azure_query(odata_filter: str) -> list[dict]:
         return [_az("Standard vCPU Active Usage", 0.000024)]
     if "Standard Memory Active Usage" in odata_filter:
         return [_az("Standard Memory Active Usage", 0.000003)]
+    if "Standard vCPU Idle Usage" in odata_filter:
+        return [_az("Standard vCPU Idle Usage", 0.000003)]
+    if "Standard Memory Idle Usage" in odata_filter:
+        return [_az("Standard Memory Idle Usage", 0.000003)]
+    if "Standard Requests" in odata_filter:
+        return [_az("Standard Requests", 0.4)]
     if "armSkuName eq 'B1MS'" in odata_filter:
         return [_az("B1MS", 0.026)]
     if "armSkuName eq 'B2S'" in odata_filter:
@@ -286,7 +299,7 @@ def test_aws_public_price_files_need_no_login(monkeypatch):
         return OFFERS[service]
 
     monkeypatch.setattr(estimate, "_get_json", fake_get_json)
-    monkeypatch.setattr(estimate, "_bulk_cache", {})
+    monkeypatch.setattr(estimate, "_cache", {})
     prices = AwsPrices()
     cost = prices.cost(_req(), f"{prices.api_name} 2026-11-07")
     app, db, storage = (line.monthly_usd for line in cost.lines)
@@ -295,3 +308,79 @@ def test_aws_public_price_files_need_no_login(monkeypatch):
     assert storage == round(20 * 0.131, 2)
     assert cost.lines[0].source.startswith("aws-price-list-bulk-api")
     assert len(fetched) == 2  # 서비스·리전 파일을 한 번씩만 받아 둠
+
+
+# -- 트래픽 가정 (Cloud Run 은 요청 없는 시간에 0대, Azure 는 유휴 요금) -------------------------------
+
+def test_traffic_assumption_follows_how_each_cloud_is_deployed():
+    traffic = Traffic(idle_percent=40, rps=10)
+    req = _req(traffic=traffic)
+    inp = estimate.build_input(req, aws=AwsPrices(FakePricingClient()), gcp=estimate.GcpPrices(GCP_SKUS.__getitem__),
+                               azure=AzurePrices(fake_azure_query), today=TODAY)
+    month = 730 * 3600
+    aws_app = inp.current.lines[0].monthly_usd
+    gcp_app = inp.candidates[0].lines[0].monthly_usd
+    azure_app = inp.candidates[1].lines[0].monthly_usd
+    assert aws_app == round(730 * (1 * 0.04656 + 2 * 0.00511), 2)  # Fargate 는 그대로 내내
+    assert gcp_app == round(month * 0.6 * (1 * 0.0000216 + 2 * 0.0000024), 2)  # 요청 있는 60% 만
+    active = month * 0.6 * (1 * 0.000024 + 2 * 0.000003)
+    idle = month * 0.4 * (1 * 0.000003 + 2 * 0.000003)
+    requests = 10 * month * 0.6 / 1e6 * 0.4
+    assert azure_app == round(active + idle + requests, 2)
+    assert "요청 있는 시간만" in inp.candidates[0].lines[0].source
+    notes = service.run(inp).notes
+    assert any("요청 없는 시간 40%" in n and "실측 아님" in n for n in notes)  # 가정은 주의점으로 드러남
+
+
+def test_without_traffic_the_app_is_priced_as_always_on():
+    inp = estimate.build_input(_req(), aws=AwsPrices(FakePricingClient()), gcp=estimate.GcpPrices(GCP_SKUS.__getitem__),
+                               azure=AzurePrices(fake_azure_query), today=TODAY)
+    assert inp.candidates[0].lines[0].monthly_usd == round(730 * 3600 * (1 * 0.0000216 + 2 * 0.0000024), 2)
+    assert any("내내 켜져" in a for a in inp.assumptions)
+
+
+@pytest.mark.parametrize("bad", [{"idle_percent": 100}, {"idle_percent": -1}, {"idle_percent": float("nan")},
+                                 {"idle_percent": 10, "rps": -1}])
+def test_impossible_traffic_assumptions_are_rejected(bad):
+    with pytest.raises(ValidationError):
+        Traffic(**bad)
+
+
+# -- 가격표 보관과 미리 받기 -------------------------------------------------------------------------
+
+def test_price_lists_are_fetched_once_per_process(monkeypatch):
+    calls = []
+    monkeypatch.setattr(estimate, "_cache", {})
+    monkeypatch.setattr(estimate, "_gcp_fetch", lambda service: calls.append(service) or GCP_SKUS[service])
+    for _ in range(2):  # 요청마다 새 GcpPrices 를 만들어도 카탈로그는 다시 받지 않음
+        estimate.GcpPrices().cost(_req(), "asia-northeast3", "gcp")
+    assert sorted(calls) == sorted({estimate.GCP_CLOUD_RUN, estimate.GCP_CLOUD_SQL})
+
+
+def _wait_for(done, timeout=2.0):
+    import time
+    end = time.monotonic() + timeout
+    while not done() and time.monotonic() < end:
+        time.sleep(0.01)
+
+
+def test_warm_up_runs_once_and_ignores_failures(monkeypatch):
+    monkeypatch.delenv(estimate.WARMUP_ENV, raising=False)
+    monkeypatch.setattr(estimate, "_warm_started", False)
+    ran = []
+
+    def boom():
+        ran.append("boom")
+        raise OSError("no network")
+
+    jobs = [boom, lambda: ran.append("ok")]
+    assert estimate.warm_up(jobs=jobs) is True
+    assert estimate.warm_up(jobs=jobs) is False  # 라우터 시작 훅이 두 번 불려도 한 번만
+    _wait_for(lambda: len(ran) == 2)
+    assert ran == ["boom", "ok"]  # 앞 작업이 실패해도 다음 작업은 돎
+
+
+def test_warm_up_can_be_turned_off(monkeypatch):
+    monkeypatch.setenv(estimate.WARMUP_ENV, "0")
+    monkeypatch.setattr(estimate, "_warm_started", False)
+    assert estimate.warm_up(jobs=[lambda: pytest.fail("must not run")]) is False

@@ -51,6 +51,7 @@ class FinopsInput(BaseModel):
     current: CloudCost  # 지금 원본
     candidates: list[CloudCost] = Field(default_factory=list)  # 이전 후보 (예: gcp, azure)
     rightsizing: list[Rightsizing] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)  # 계산에 쓴 가정. 규칙 주의점에 그대로 실립니다
 
 
 class Saving(BaseModel):
@@ -81,18 +82,27 @@ class Candidate(BaseModel):
     region: str  # 예: "asia-northeast3", "koreacentral"
 
 
+class Traffic(BaseModel):
+    """트래픽 가정. 실측이 아니라 호출하는 쪽(예: 화면 슬라이더)이 넣는 값입니다."""
+
+    idle_percent: float = Field(ge=0, le=95, allow_inf_nan=False)  # 한 달 중 요청이 없는 시간 비율
+    rps: float = Field(default=0, ge=0, le=100_000, allow_inf_nan=False)  # 요청이 있는 시간의 초당 평균 요청 수
+
+
 class CostRequest(BaseModel):
     """비용을 낼 때 필요한 크기. assessment 결과에서 채웁니다. 모르면 None."""
 
     source_region: str  # 원본 AWS 리전. 예: "ap-northeast-2"
     app_vcpu: float | None = None
     app_memory_mib: int | None = None
-    app_instances: int = Field(default=1, ge=1)  # 항상 떠 있는 인스턴스 수. assessment 가 아직 안 읽음
+    app_instances: int = Field(default=1, ge=1)  # 떠 있는 인스턴스(복제본) 수. assessment 가 아직 안 읽음
     db_instance_class: str | None = None  # 원본 RDS 등급. 예: "db.t3.micro"
     db_vcpu: int | None = None
     db_memory_gib: float | None = None
     db_storage_gb: int | None = None
     candidates: list[Candidate] = Field(default_factory=list)
+    # None 이면 앱이 한 달 내내 켜져 있다고 봅니다. 주면 Cloud Run 은 요청 없는 시간에 0대, Azure 는 유휴 요금
+    traffic: Traffic | None = None
 
 
 class FinopsEstimate(BaseModel):

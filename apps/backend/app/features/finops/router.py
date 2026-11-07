@@ -6,7 +6,8 @@ from fastapi.concurrency import run_in_threadpool
 from . import estimate, service
 from .schemas import CostRequest, FinopsEstimate, FinopsInput, FinopsReport
 
-router = APIRouter(prefix="/finops", tags=["finops"])
+# 서버가 뜰 때 큰 가격표를 백그라운드로 받아 둡니다 (첫 호출 20초 대기 방지, ALPHA_FINOPS_WARMUP=0 이면 끔)
+router = APIRouter(prefix="/finops", tags=["finops"], on_startup=[estimate.warm_up])
 
 
 @router.post("/estimate", response_model=FinopsEstimate)

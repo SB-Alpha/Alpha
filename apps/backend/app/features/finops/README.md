@@ -20,16 +20,22 @@
 ## 비용 산출 (`estimate.py`, `POST /finops/estimate`)
 
 크기(`CostRequest`)를 받아 항목 3개(앱 컴퓨팅 · DB 컴퓨팅 · DB 스토리지)의 월 비용을 가격 API 단가로 냅니다.
-첫 조회는 AWS RDS 가격 파일(서울 약 20MB) 때문에 20초 안팎 걸립니다. 월 환산은 730시간, 금액마다 `source` 에 API 이름과 조회 날짜를 남깁니다.
+가격표는 프로세스 안에 6시간 보관합니다. 서버가 뜰 때 큰 가격표(AWS 리전 파일 · GCP 카탈로그)를 백그라운드로 받아 두므로
+(약 20초, `ALPHA_FINOPS_WARMUP=0` 이면 끔) 그 뒤 첫 호출은 몇 초 안에 끝납니다. 월 환산은 730시간, 금액마다 `source` 에 API 이름과 조회 날짜를 남깁니다.
 
 | 클라우드 | 가격 API | 고르는 단가 | 인증 |
 |---|---|---|---|
-| AWS (원본) | Price List Bulk API (리전별 공개 가격 파일, 6시간 캐시). `AwsPrices(client=boto3 pricing)` 를 주면 Query API | Fargate Linux/x86 vCPU·GB 시간, RDS PostgreSQL Single-AZ 등급별 시간, gp3 GB-월 | 없음 (Query API 는 `pricing:GetProducts`) |
-| GCP | Cloud Billing Catalog API | Cloud Run 인스턴스 기반(항상 켜짐) vCPU·GiB 초, Cloud SQL Enterprise 단일 영역 vCPU·RAM 시간, SSD GiB-월 | `ALPHA_GCP_PRICING_API_KEY` 또는 ADC |
-| Azure | Retail Prices API | Container Apps 활성 vCPU·GiB 초, PostgreSQL Flexible 등급별 시간(크기 이상 가장 작은 등급), Storage GB-월 | 없음 |
+| AWS (원본) | Price List Bulk API (리전별 공개 가격 파일). `AwsPrices(client=boto3 pricing)` 를 주면 Query API | Fargate Linux/x86 vCPU·GB 시간, RDS PostgreSQL Single-AZ 등급별 시간, gp3 GB-월 | 없음 (Query API 는 `pricing:GetProducts`) |
+| GCP | Cloud Billing Catalog API | Cloud Run 인스턴스 기반 vCPU·GiB 초, Cloud SQL Enterprise 단일 영역 vCPU·RAM 시간, SSD GiB-월 | `ALPHA_GCP_PRICING_API_KEY` 또는 ADC |
+| Azure | Retail Prices API | Container Apps 활성·유휴 vCPU·GiB 초와 요청 수수료, PostgreSQL Flexible 등급별 시간(크기 이상 가장 작은 등급), Storage GB-월 | 없음 |
 
 가정과 한계 (화면·발표에서 같이 밝힐 것)
-- 앱은 항상 떠 있는 인스턴스 `app_instances` 개(기본 1)로 셉니다. 요청 기반 과금·자동 축소는 반영하지 않습니다.
+- 앱 인스턴스(복제본)는 `app_instances` 개(기본 1)입니다. `traffic` 을 안 주면 한 달 내내 켜져 있다고 셉니다.
+- `traffic{idle_percent, rps}` 를 주면 배포 설정대로 켜진 시간을 셉니다. 값은 실측이 아니라 가정이라 결과 주의점에 그대로 적힙니다.
+  - AWS Fargate: 서비스 태스크가 계속 떠 있어 그대로 내내.
+  - GCP Cloud Run: `min_instance_count = 0` 이라 요청 없는 시간엔 0대. Terraform 이 `resources.limits` 를 적고 `cpu_idle` 은 안 적어서
+    CPU 가 항상 할당되는 인스턴스 기반 과금이고 요청 수수료는 없습니다. 마지막 요청 뒤 줄어들기까지 기다리는 시간은 빠져 있습니다.
+  - Azure Container Apps: 최소 복제본이 남아 요청 없는 시간은 유휴 요금, 요청 있는 시간은 활성 요금 + 백만 건당 요청 수수료.
 - 무료 할당량·약정 할인·예약 할인은 빼지 않습니다 (결제 계정 단위라 이 앱 몫을 알 수 없음).
 - 네트워크 송신, 백업, 로드밸런서, 고가용성(Multi-AZ·Regional)은 아직 넣지 않았습니다.
 - 원본 DB 가 CPU 를 나눠 쓰는 저가형(RDS `db.t*`)이면 목적지도 저가형끼리, 원본 메모리 이상인 가장 작은 등급으로 셉니다
@@ -42,7 +48,7 @@
 
 | 계약 | 내용 |
 |---|---|
-| `FinopsInput` | `current`(지금 원본) · `candidates`(이전 후보) 각각 `CloudCost{cloud, region, lines[CostLine{item, monthly_usd, source}]}`, `rightsizing`, `period_days` |
+| `FinopsInput` | `current`(지금 원본) · `candidates`(이전 후보) 각각 `CloudCost{cloud, region, lines[CostLine{item, monthly_usd, source}]}`, `rightsizing`, `period_days`, `assumptions`(계산 가정, 주의점에 실림) |
 | `FinopsReport` | `savings[Saving{…, complete, missing}]`, `best`, `summary`, `notes`, `summary_source`("ai" 면 notes 끝에 AI 설명이 붙음) |
 
 `FinopsInput` 은 `estimate.py` 가 만들고, 수동 입력이나 다른 계산(예: Infracost)도 같은 형식으로 넣을 수 있습니다.

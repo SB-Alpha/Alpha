@@ -5,6 +5,9 @@
 - 곱셈·합계는 이 파일이 합니다. 월 환산은 클라우드 가격표들이 쓰는 730시간입니다.
 - 단가를 못 받거나 크기를 모르면 그 항목만 None("미제공") 입니다. 0 으로 채우지 않습니다.
   service.py 가 None 이 섞인 후보는 절감액을 내지 않으므로 싸 보이는 가짜 비교가 생기지 않습니다.
+- 트래픽 가정(`CostRequest.traffic`)을 주면 앱이 켜져 있는 시간을 배포 설정대로 셉니다.
+  Cloud Run 은 min_instance_count = 0 이라 요청 없는 시간엔 0대, Azure 는 최소 복제본이 남아 유휴 요금.
+  ECS Fargate 는 서비스 태스크가 계속 떠 있으므로 그대로입니다.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -20,11 +24,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 
-from .schemas import Candidate, CloudCost, CostLine, CostRequest, FinopsInput
+from .schemas import Candidate, CloudCost, CostLine, CostRequest, FinopsInput, Traffic
 
 log = logging.getLogger(__name__)
 
 HOURS_PER_MONTH = 730
+SECONDS_PER_MONTH = HOURS_PER_MONTH * 3600
 APP = "앱 컴퓨팅"
 DB = "DB 컴퓨팅"
 STORAGE = "DB 스토리지"
@@ -57,6 +62,24 @@ def _line(item: str, source: str, compute: Callable[[], float | None]) -> CostLi
     return CostLine(item=item, monthly_usd=None if value is None else round(value, 2), source=source)
 
 
+def active_share(traffic: Traffic | None) -> float:
+    """한 달 중 요청이 있는 시간 비율. 가정이 없으면 1 (내내 켜짐)."""
+    return 1.0 if traffic is None else 1 - traffic.idle_percent / 100
+
+
+def assumptions(req: CostRequest) -> list[str]:
+    t = req.traffic
+    if t is None:
+        return ["앱은 한 달 내내 켜져 있다고 보고 계산했습니다 (트래픽 가정 없음)."]
+    return [
+        f"트래픽 가정: 요청 없는 시간 {t.idle_percent:g}%, 요청 있는 시간 평균 {t.rps:g} RPS (실측 아님).",
+        "AWS Fargate 는 서비스 태스크가 계속 떠 있어 내내 켜진 것으로 셉니다.",
+        ("GCP Cloud Run 은 요청 없는 시간에 0대로 줄어든다고 봤고(min_instance_count = 0), "
+         "마지막 요청 뒤 줄어들기까지 기다리는 시간은 빠져 있어 실제보다 조금 낮을 수 있습니다."),
+        "Azure Container Apps 는 최소 복제본이 계속 떠 있어 요청 없는 시간은 유휴 요금으로 셉니다.",
+    ]
+
+
 def _unsupported(cand: Candidate) -> CloudCost:
     return CloudCost(cloud=cand.cloud, region=cand.region, lines=[
         CostLine(item=name, monthly_usd=None, source="가격 조회를 지원하지 않는 클라우드") for name in (APP, DB, STORAGE)])
@@ -76,7 +99,7 @@ def build_input(req: CostRequest, aws: AwsPrices | None = None, gcp: GcpPrices |
             candidates.append((azure or AzurePrices()).cost(req, cand.region, f"azure-retail-prices-api {stamp}"))
         else:
             candidates.append(_unsupported(cand))
-    return FinopsInput(current=current, candidates=candidates)
+    return FinopsInput(current=current, candidates=candidates, assumptions=assumptions(req))
 
 
 # -- 공통 ------------------------------------------------------------------------------
@@ -97,6 +120,25 @@ def _get_json(url: str, headers: dict[str, str] | None = None) -> dict:
         return json.load(response)
 
 
+_CACHE_S = 6 * 3600
+_cache: dict[tuple, tuple[float, object]] = {}
+_cache_locks: dict[tuple, threading.Lock] = {}
+_cache_guard = threading.Lock()
+
+
+def _cached(key: tuple, fetch: Callable[[], object]) -> object:
+    """가격표를 프로세스 안에 6시간 둡니다. 같은 표를 동시에 받으려 하면 먼저 받는 쪽을 기다립니다."""
+    with _cache_guard:
+        lock = _cache_locks.setdefault(key, threading.Lock())
+    with lock:
+        hit = _cache.get(key)
+        if hit and time.monotonic() - hit[0] < _CACHE_S:
+            return hit[1]
+        value = fetch()
+        _cache[key] = (time.monotonic(), value)
+        return value
+
+
 def _one(prices: list[UnitPrice], what: str) -> UnitPrice:
     """후보가 하나로 좁혀져야 씁니다. 같은 값이 여러 줄이면 하나로 봅니다."""
     distinct = {p.usd for p in prices}
@@ -110,6 +152,9 @@ def _one(prices: list[UnitPrice], what: str) -> UnitPrice:
 AZURE_PRICES = "https://prices.azure.com/api/retail/prices"
 AZURE_ACA_VCPU = "Standard vCPU Active Usage"  # 단위 "1 Second" = vCPU-초
 AZURE_ACA_MEMORY = "Standard Memory Active Usage"  # 단위 "1 GiB Second"
+AZURE_ACA_VCPU_IDLE = "Standard vCPU Idle Usage"  # 복제본이 떠 있지만 요청을 처리하지 않을 때
+AZURE_ACA_MEMORY_IDLE = "Standard Memory Idle Usage"
+AZURE_ACA_REQUESTS = "Standard Requests"  # 단위 "1M"
 AZURE_PG_STORAGE_PRODUCT = "Azure Database for PostgreSQL Flex Server Storage"
 # PostgreSQL Flexible Server 등급: (vCPU, 메모리 GiB, armSkuName). 원본 크기 이상인 가장 작은 등급을 고릅니다.
 # 이름 규칙이 등급마다 달라서(B1MS·B2S 는 접두어 없음) 가격 API 에 실제로 있는 값을 그대로 씁니다.
@@ -124,6 +169,10 @@ AZURE_PG_SKUS = [
 
 
 def azure_query(odata_filter: str) -> list[dict]:
+    return _cached(("azure", odata_filter), lambda: _azure_fetch(odata_filter))
+
+
+def _azure_fetch(odata_filter: str) -> list[dict]:
     url: str | None = AZURE_PRICES + "?" + urllib.parse.urlencode(
         {"currencyCode": "USD", "$filter": odata_filter}, quote_via=urllib.parse.quote)
     rows: list[dict] = []
@@ -163,17 +212,27 @@ class AzurePrices:
                           f"and type eq 'Consumption' and {extra}")
         return _one(_azure_prices(rows, unit), extra)
 
+    def _aca(self, region: str, meter: str, unit: str) -> float:
+        return self._meter(region, "Azure Container Apps", f"skuName eq 'Standard' and meterName eq '{meter}'", unit).usd
+
     def cost(self, req: CostRequest, region: str, source: str) -> CloudCost:
         def app() -> float | None:
             if req.app_vcpu is None or req.app_memory_mib is None:
                 return None
-            # Container Apps 소비 요금. 항상 떠 있는 복제본을 '활성' 요금으로 셉니다 (보수적으로 비싸게)
-            vcpu = self._meter(region, "Azure Container Apps", f"skuName eq 'Standard' and meterName eq '{AZURE_ACA_VCPU}'",
-                               "vCPU-second")
-            mem = self._meter(region, "Azure Container Apps", f"skuName eq 'Standard' and meterName eq '{AZURE_ACA_MEMORY}'",
-                              "GiB-second")
-            seconds = HOURS_PER_MONTH * 3600 * req.app_instances
-            return seconds * (req.app_vcpu * vcpu.usd + req.app_memory_mib / 1024 * mem.usd)
+            # Container Apps 소비 요금. 요청이 있는 시간은 '활성', 복제본만 떠 있는 시간은 '유휴' 요금.
+            # 트래픽 가정이 없으면 내내 활성으로 셉니다 (보수적으로 비싸게)
+            gib = req.app_memory_mib / 1024
+            active = (req.app_vcpu * self._aca(region, AZURE_ACA_VCPU, "vCPU-second")
+                      + gib * self._aca(region, AZURE_ACA_MEMORY, "GiB-second"))
+            share = active_share(req.traffic)
+            total = SECONDS_PER_MONTH * req.app_instances * share * active
+            if req.traffic is not None:
+                idle = (req.app_vcpu * self._aca(region, AZURE_ACA_VCPU_IDLE, "vCPU-second")
+                        + gib * self._aca(region, AZURE_ACA_MEMORY_IDLE, "GiB-second"))
+                total += SECONDS_PER_MONTH * req.app_instances * (1 - share) * idle
+                requests_m = req.traffic.rps * SECONDS_PER_MONTH * share / 1e6
+                total += requests_m * self._aca(region, AZURE_ACA_REQUESTS, "1M requests")
+            return total
 
         def db() -> float | None:
             sku = azure_pg_sku(req.db_vcpu, req.db_memory_gib, is_burstable(req))
@@ -191,7 +250,7 @@ class AzurePrices:
 
         sku = azure_pg_sku(req.db_vcpu, req.db_memory_gib, is_burstable(req))
         return CloudCost(cloud="azure", region=region, lines=[
-            _line(APP, f"{source} Container Apps", app),
+            _line(APP, f"{source} Container Apps" + (" 활성·유휴·요청 수수료" if req.traffic else " 내내 활성"), app),
             _line(DB, f"{source} PostgreSQL Flexible {sku or '등급 미정'}", db),
             _line(STORAGE, f"{source} PostgreSQL Flexible Storage", storage),
         ])
@@ -218,8 +277,6 @@ def _aws_ondemand(item: dict) -> list[float]:
 
 
 AWS_BULK = "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/{service}/current/{region}/index.json"
-_BULK_CACHE_S = 6 * 3600
-_bulk_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
 
 
 def _bulk_keep(service_code: str, product: dict) -> bool:
@@ -232,16 +289,14 @@ def _bulk_keep(service_code: str, product: dict) -> bool:
 
 def aws_bulk_items(service_code: str, region: str) -> list[dict]:
     """Price List Bulk API(공개 파일, 인증 없음) 의 리전 파일을 Query API 와 같은 모양(product + terms)으로."""
-    key = (service_code, _region(region))
-    cached = _bulk_cache.get(key)
-    if cached and time.monotonic() - cached[0] < _BULK_CACHE_S:
-        return cached[1]
+    return _cached(("aws", service_code, _region(region)), lambda: _aws_bulk_fetch(service_code, region))
+
+
+def _aws_bulk_fetch(service_code: str, region: str) -> list[dict]:
     offer = _get_json(AWS_BULK.format(service=service_code, region=region))
     ondemand = offer.get("terms", {}).get("OnDemand", {})
-    items = [{"product": product, "terms": {"OnDemand": ondemand.get(sku, {})}}
-             for sku, product in offer.get("products", {}).items() if _bulk_keep(service_code, product)]
-    _bulk_cache[key] = (time.monotonic(), items)
-    return items
+    return [{"product": product, "terms": {"OnDemand": ondemand.get(sku, {})}}
+            for sku, product in offer.get("products", {}).items() if _bulk_keep(service_code, product)]
 
 
 def _matches(product: dict, filters: list[dict]) -> bool:
@@ -333,7 +388,8 @@ GCP_CATALOG = "https://cloudbilling.googleapis.com/v1/services/{service}/skus"
 GCP_KEY_ENV = "ALPHA_GCP_PRICING_API_KEY"
 GCP_CLOUD_RUN = "152E-C115-5142"
 GCP_CLOUD_SQL = "9662-B51E-5089"
-# Cloud Run 은 category 가 모두 같아 설명 문구로 고릅니다. 항상 떠 있는 인스턴스라 '인스턴스 기반 과금' 단가입니다.
+# Cloud Run 은 category 가 모두 같아 설명 문구로 고릅니다. '인스턴스 기반 과금' 단가입니다: Terraform 이
+# resources.limits 를 적고 cpu_idle 은 안 적어서 CPU 가 항상 할당되는 방식입니다 (요청 수수료 없음).
 # 설명에 "in in" 오타가 있는 리전이 있어 앞부분만 맞춥니다.
 _RUN_CPU = re.compile(r"^Services CPU \(Instance-based billing\) in ")
 _RUN_MEMORY = re.compile(r"^Services Memory \(Instance-based billing\) in ")
@@ -366,6 +422,10 @@ def _gcp_auth_header() -> tuple[dict[str, str], dict[str, str]]:
 
 
 def gcp_list_skus(service: str) -> list[dict]:
+    return _cached(("gcp", service), lambda: _gcp_fetch(service))
+
+
+def _gcp_fetch(service: str) -> list[dict]:
     params, headers = _gcp_auth_header()
     skus: list[dict] = []
     page = ""
@@ -412,7 +472,8 @@ class GcpPrices:
                 return None
             cpu = self._pick(GCP_CLOUD_RUN, region, _RUN_CPU, "vCPU-second")
             mem = self._pick(GCP_CLOUD_RUN, region, _RUN_MEMORY, "GiB-second")
-            seconds = HOURS_PER_MONTH * 3600 * req.app_instances
+            # 트래픽 가정이 있으면 요청이 있는 시간만 켜져 있습니다 (min_instance_count = 0)
+            seconds = SECONDS_PER_MONTH * req.app_instances * active_share(req.traffic)
             return seconds * (req.app_vcpu * cpu.usd + req.app_memory_mib / 1024 * mem.usd)
 
         shared = gcp_sql_shared(req.db_memory_gib) if is_burstable(req) else None
@@ -433,8 +494,44 @@ class GcpPrices:
             return req.db_storage_gb * self._pick(GCP_CLOUD_SQL, region, _SQL_SSD, "GiB-month").usd
 
         return CloudCost(cloud="gcp", region=region, lines=[
-            _line(APP, f"{source} Cloud Run 인스턴스 기반", app),
+            _line(APP, f"{source} Cloud Run 인스턴스 기반" + (" 요청 있는 시간만" if req.traffic else " 내내 켜짐"), app),
             _line(DB, f"{source} Cloud SQL PostgreSQL 단일 영역 "
                       + (f"{shared[1]} (공유 코어)" if shared else f"{req.db_vcpu} vCPU·{req.db_memory_gib} GiB"), db),
             _line(STORAGE, f"{source} Cloud SQL SSD", storage),
         ])
+
+
+# -- 미리 받기 ----------------------------------------------------------------------------------------
+
+WARMUP_ENV = "ALPHA_FINOPS_WARMUP"  # "0" 이면 끕니다
+_warm_started = False
+_warm_guard = threading.Lock()
+
+
+def _warm_jobs(aws_region: str) -> list[Callable[[], object]]:
+    return [lambda: aws_bulk_items("AmazonECS", aws_region), lambda: aws_bulk_items("AmazonRDS", aws_region),
+            lambda: gcp_list_skus(GCP_CLOUD_RUN), lambda: gcp_list_skus(GCP_CLOUD_SQL)]
+
+
+def warm_up(aws_region: str = "ap-northeast-2", jobs: list[Callable[[], object]] | None = None) -> bool:
+    """서버가 뜰 때 큰 가격표(AWS 리전 파일, GCP 카탈로그)를 백그라운드로 받아 둡니다.
+    첫 /finops/estimate 가 20초쯤 기다리지 않게 하려는 것입니다. 실패해도 요청 때 다시 받으므로 기록만 합니다.
+    한 프로세스에서 한 번만 돕니다. 시작했으면 True."""
+    global _warm_started
+    if os.environ.get(WARMUP_ENV, "1") == "0":
+        return False
+    with _warm_guard:
+        if _warm_started:
+            return False
+        _warm_started = True
+    todo = jobs if jobs is not None else _warm_jobs(aws_region)
+
+    def run() -> None:
+        for job in todo:
+            try:
+                job()
+            except Exception as exc:  # 로그인 없음·네트워크 문제는 요청 때 "미제공" 으로 드러납니다
+                log.info("finops 가격표 미리 받기 실패: %s", exc)
+
+    threading.Thread(target=run, name="finops-warmup", daemon=True).start()
+    return True
