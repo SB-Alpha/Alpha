@@ -40,9 +40,10 @@ class FakeConnect:
 
 
 class FakeWorker:
-    def __init__(self, calls, fail_on=None):
+    def __init__(self, calls, fail_on=None, status=None):
         self.calls = calls
         self.fail_on = fail_on
+        self.status_result = status  # dict, or an exception to raise
 
     def _call(self, name):
         self.calls.append(("worker", name))
@@ -64,10 +65,16 @@ class FakeWorker:
         self._call("release")
         return {"released_at": "t1", "held_count": 2}
 
+    def status(self):
+        self.calls.append(("worker", "status"))
+        if isinstance(self.status_result, Exception):
+            raise self.status_result
+        return self.status_result or {}
+
 
 @pytest.fixture
 def setup(monkeypatch, tmp_path: Path):
-    def make(*, mismatch=0, marker_ok=True, worker_fail_on=None):
+    def make(*, mismatch=0, marker_ok=True, worker_fail_on=None, worker_status=None):
         calls: list = []
         job = Job(job_id="job01", request=JobRequest(**REQUEST), state="running", phase="cutover",
                   evidence={"cutover": {"steps": []}})
@@ -94,7 +101,7 @@ def setup(monkeypatch, tmp_path: Path):
 
         monkeypatch.setattr(jobs, "Credentials", lambda s, j: type("C", (), {
             "source": None, "source_app": None, "target": None, "target_ddl": None})())
-        monkeypatch.setattr(jobs, "WorkerClient", lambda s: FakeWorker(calls, worker_fail_on))
+        monkeypatch.setattr(jobs, "WorkerClient", lambda s: FakeWorker(calls, worker_fail_on, worker_status))
         monkeypatch.setattr(jobs.db, "job_lock", lock)
 
         @contextmanager
@@ -314,3 +321,53 @@ def test_worker_check_passes_on_source(setup, monkeypatch):
     runner, _ = setup()
     monkeypatch.setattr(jobs, "WorkerClient", lambda s: StatusWorker({"mode": "SOURCE"}))
     runner.check_worker()
+
+
+# -- switch 응답이 끊겼을 때: 되돌리기 전에 Worker 의 실제 방향을 확인 ---------------------------------
+
+def _steps(job):
+    return [s["step"] for s in job.evidence["cutover"]["steps"]]
+
+
+def test_lost_switch_reply_with_the_worker_on_target_goes_on(setup):
+    runner, calls = setup(worker_fail_on="switch",
+                          worker_status={"mode": "HOLD", "next_origin": "TARGET", "run_id": "job01"})
+    runner._cutover("job01")
+    job = runner.store.get("job01")
+
+    assert ("db", "unblock") not in calls and ("resume", "job01-sink") not in calls  # 원본 쓰기를 다시 열지 않음
+    assert calls[-4:] == [("worker", "switch"), ("worker", "status"), ("worker", "release"), ("db", "compare")]
+    assert "switch_confirmed_by_status" in _steps(job)
+    assert (job.state, job.phase) == ("running", "stabilizing")
+
+
+def test_lost_switch_reply_after_the_hold_already_released_to_target_goes_on(setup):
+    runner, calls = setup(worker_fail_on="switch",
+                          worker_status={"mode": "TARGET", "next_origin": "TARGET", "run_id": "job01"})
+    runner._cutover("job01")
+    assert runner.store.get("job01").phase == "stabilizing"
+    assert ("db", "unblock") not in calls
+
+
+def test_failed_switch_with_the_worker_still_on_source_returns_writes_to_source(setup):
+    runner, calls = setup(worker_fail_on="switch",
+                          worker_status={"mode": "HOLD", "next_origin": "SOURCE", "run_id": "job01"})
+    runner._cutover("job01")
+    job = runner.store.get("job01")
+
+    assert calls[-3:] == [("db", "unblock"), ("resume", "job01-sink"), ("worker", "release")]
+    assert (job.state, job.phase) == ("waiting_approval", "cutover_ready")
+
+
+@pytest.mark.parametrize("status", [
+    RuntimeError("status timed out"),  # 방향을 알 수 없음
+    {"mode": "TARGET", "next_origin": "TARGET", "run_id": "other"},  # 다른 작업이 잡고 있음
+])
+def test_unknown_worker_direction_keeps_source_writes_blocked_for_a_person(setup, status):
+    runner, calls = setup(worker_fail_on="switch", worker_status=status)
+    runner._cutover("job01")
+    job = runner.store.get("job01")
+
+    assert ("db", "unblock") not in calls and ("resume", "job01-sink") not in calls
+    assert ("worker", "release") not in calls
+    assert job.state == "failed" and "수동 확인" in job.message

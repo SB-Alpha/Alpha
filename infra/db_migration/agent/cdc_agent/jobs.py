@@ -50,6 +50,10 @@ class WorkerNotReady(RuntimeError):
     """Cutover would fail or do harm with the Worker as it is."""
 
 
+class SwitchUnknown(RuntimeError):
+    """The switch call failed and the Worker could not tell which way it now points."""
+
+
 def _secret_files(settings: Settings, job_id: str) -> tuple:
     name = f"{job_id}.properties"
     return settings.secrets_dir / name, settings.agent_secrets_dir / name
@@ -363,7 +367,7 @@ class Runner:
                 step("snapshot_fixed")
                 if time.monotonic() - t0 > max_hold_s:
                     raise RuntimeError(f"cutover took longer than the {max_hold_s}s hold limit")
-                worker.switch(job_id)
+                self._switch(worker, job_id, step)
                 switched = True
                 step("switched_to_target")
                 released = worker.release(job_id)
@@ -385,7 +389,11 @@ class Runner:
             log.exception("cutover %s failed", job_id)
             error = self.error_text(job_id, exc)
             step("failed", error=error)
-            if not switched:
+            if isinstance(exc, SwitchUnknown):
+                # The Worker may already point at the target. Reopening source writes now could split
+                # the writes in two, so keep them blocked and leave the decision to a person.
+                job.report(state="failed", message=f"Worker 방향을 확인하지 못해 원본으로 되돌리지 않음, 수동 확인 필요: {error}")
+            elif not switched:
                 # No write has reached the target yet: give writes back to the source.
                 # Without credentials or a Worker client nothing was held or blocked.
                 if creds is not None and worker is not None:
@@ -396,6 +404,31 @@ class Runner:
                 # Target may already have writes: never go back automatically.
                 job.report(state="failed", message=f"목적지로 전환 후 오류, 수동 확인 필요: {error}")
         self.store.put(job)
+
+    def _switch(self, worker: WorkerClient, job_id: str, step) -> None:
+        """Point the Worker at the target. If the call fails, ask the Worker where it points before going back.
+
+        The Worker may have applied the switch and only the reply was lost (timeout, dropped connection).
+        Going back then would release held requests to the target while source writes reopen.
+        """
+        try:
+            worker.switch(job_id)
+            return
+        except Exception as exc:
+            switch_error = self.error_text(job_id, exc)
+        try:
+            status = worker.status()
+        except Exception as exc:
+            raise SwitchUnknown(f"switch failed ({switch_error}) and the Worker status could not be read: "
+                                f"{self.error_text(job_id, exc)}") from exc
+        mode, next_origin, run_id = status.get("mode"), status.get("next_origin"), status.get("run_id")
+        if run_id == job_id and next_origin == "TARGET" and mode in ("HOLD", "TARGET"):
+            step("switch_confirmed_by_status", error=switch_error)
+            return
+        if mode in ("HOLD", "SOURCE") and next_origin == "SOURCE":
+            raise RuntimeError(f"switch failed and the Worker still points at the source: {switch_error}")
+        raise SwitchUnknown(f"switch failed ({switch_error}); Worker reports mode={mode} next_origin={next_origin} "
+                            f"run_id={run_id}")
 
     def _verify_snapshots(self, job: Job, source_conn, target_conn) -> None:
         """Compare the two sides as they were at the switch. Writes since then do not count."""
