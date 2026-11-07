@@ -77,7 +77,8 @@ def tunables() -> Tunables:
         complete_poll_s=_number("CDC_COMPLETE_POLL_S", 5),
         cutover_wait_s=_number("CDC_CUTOVER_WAIT_S", 60),
         cutover_poll_s=_number("CDC_CUTOVER_POLL_S", 1),
-        terraform_timeout_s=_number("CDC_TERRAFORM_TIMEOUT_S", 1800),
+        # Azure VPN Gateway 생성·삭제는 30분을 넘길 수 있다.
+        terraform_timeout_s=_number("CDC_TERRAFORM_TIMEOUT_S", 3600),
         tunnel_wait_s=_number("CDC_TUNNEL_WAIT_S", 600),
         tunnel_poll_s=_number("CDC_TUNNEL_POLL_S", 30),
         agent_timeout_s=_number("CDC_AGENT_TIMEOUT_S", 30),
