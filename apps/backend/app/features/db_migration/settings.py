@@ -8,8 +8,13 @@ import os
 from dataclasses import dataclass
 
 
-class MissingSetting(RuntimeError):
-    """A required environment variable is not set, or its value has the wrong form."""
+class MissingSetting(RuntimeError, KeyError):
+    """A required environment variable is not set, or its value has the wrong form.
+
+    Also a KeyError: workflows catches that around AgentSettings.from_env.
+    """
+
+    __str__ = BaseException.__str__  # KeyError would put quotes around the message
 
 
 def required(name: str) -> str:
