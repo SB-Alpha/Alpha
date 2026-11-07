@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import math
+import os
+from datetime import datetime, timezone
 from typing import Any
 
 from .schemas import CheckStatus, CutoverDecision, CutoverReadiness, ReadinessCheck, RunStatus, StageName
@@ -13,7 +15,29 @@ from .schemas import CheckStatus, CutoverDecision, CutoverReadiness, ReadinessCh
 # 임시 기준값입니다. 팀 합의 후 바꿉니다.
 MAX_REPLICATION_LAG_BYTES = 1024 * 1024
 
+# 복제 추적은 3초(복제 중)·10초(준비 완료)마다 값을 갱신합니다. 이 시간 넘게 갱신이 없으면 추적이 멈춘 것으로 봅니다.
+# 멈춘 뒤에도 저장된 마지막 값은 그대로 남아 "지연 0, 통과" 로 보이므로, 오래된 통과는 통과로 치지 않습니다.
+MAX_METRIC_AGE_S = 60.0
+
 _NOT_PROVIDED = "미제공"
+
+
+def _max_metric_age_s() -> float:
+    try:
+        value = float(os.environ.get("ALPHA_READINESS_MAX_METRIC_AGE_S", MAX_METRIC_AGE_S))
+    except ValueError:
+        return MAX_METRIC_AGE_S
+    return value if math.isfinite(value) and value > 0 else MAX_METRIC_AGE_S
+
+
+def _metric_age_s(run: RunStatus, at: datetime) -> float | None:
+    """지표를 보내는 복제 추적(db_migration)이 마지막으로 보고한 뒤 지난 초. 시각이 없으면 None."""
+    updated = run.stage(StageName.DB_MIGRATION).updated_at
+    if updated is None:
+        return None
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    return max((at - updated).total_seconds(), 0.0)
 
 
 def _find_metric(run: RunStatus, key: str) -> Any:
@@ -117,12 +141,35 @@ def _decision(checks: list[ReadinessCheck]) -> CutoverDecision:
     return "needs_confirmation" if "unknown" in statuses else "go"
 
 
-def cutover_readiness(run: RunStatus) -> CutoverReadiness:
+# 복제 추적이 보내는 지표로 계산하는 항목. 목적지 앱 상태는 배포 결과라 갱신 시각과 무관합니다.
+_TRACKED_CHECKS = {"cdc", "copy", "lag", "mismatch"}
+
+
+def _freshen(check: ReadinessCheck, age: float | None, limit: float) -> ReadinessCheck:
+    """오래된 통과는 확인 중(unknown)으로 바꿉니다. 실패는 그대로 둡니다. 막힌 것을 오래됐다고 풀어 주지 않습니다."""
+    if check.id not in _TRACKED_CHECKS or check.status != "pass":
+        return check
+    if age is None:
+        return check.model_copy(update={"status": "unknown", "detail": "확인 중 (갱신 시각 없음). " + check.detail})
+    if age > limit:
+        return check.model_copy(
+            update={"status": "unknown", "detail": f"확인 중 (마지막 갱신 {age:,.0f}초 전, 복제 추적이 멈췄을 수 있음). " + check.detail}
+        )
+    return check
+
+
+def cutover_readiness(run: RunStatus, at: datetime | None = None) -> CutoverReadiness:
+    """`at` 은 "지금" 입니다. 테스트에서 시각을 고정할 때만 넘깁니다."""
+    age = _metric_age_s(run, at or datetime.now(timezone.utc))
+    limit = _max_metric_age_s()
     checks = [
-        _cdc_check(run),
-        _copy_check(run),
-        _lag_check(run),
-        _mismatch_check(run),
-        _app_health_check(run),
+        _freshen(c, age, limit)
+        for c in (
+            _cdc_check(run),
+            _copy_check(run),
+            _lag_check(run),
+            _mismatch_check(run),
+            _app_health_check(run),
+        )
     ]
     return CutoverReadiness(decision=_decision(checks), checks=checks)
