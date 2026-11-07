@@ -43,9 +43,10 @@ from app.core.secrets import delete_secret, has_secret, put_secret, resolve
 
 from . import preflight, redact, vpn
 from .client import AgentError, AgentSettings, CdcAgentClient
+from .cloud_guides import credential_next_steps
 from .input_secrets import INPUT_SECRETS
 from .progress_log import ProgressLog
-from .run_input import InvalidInput, inject, parse
+from .run_input import InvalidInput, inject, parse, saved_clouds
 from .schemas import (
     CutoverResult,
     DbMigrationInput,
@@ -638,7 +639,7 @@ def _cleanup_result(run_id: str, job: dict | None, error: str | None) -> FinishR
     cleanup = (job or {}).get("evidence", {}).get("cleanup", {})
     done = error is None and not remaining
     accounts = cleanup.get("target_accounts", {})
-    next_steps = [IAM_NEXT_STEP] if done else []
+    next_steps = _credential_steps(run_id) if done else []
     if accounts.get("error"):
         # 에이전트가 관리자 비밀을 이미 지웠으므로 다시 불러도 해결되지 않는다.
         next_steps.append(TARGET_ACCOUNTS_NEXT_STEP.format(accounts=", ".join(accounts.get("accounts", []))))
@@ -652,6 +653,12 @@ def _cleanup_result(run_id: str, job: dict | None, error: str | None) -> FinishR
         vpn="kept" if has_secret(_ref(run_id, VPN_CONTEXT)) else "removed",
         remaining=remaining, next_steps=next_steps,
     )
+
+
+def _credential_steps(run_id: str) -> list[str]:
+    clouds = saved_clouds(run_id)
+    # workflows 경로는 run별 키를 실제로 지우므로 기존 문구가 맞다.
+    return credential_next_steps(*clouds) if clouds else [IAM_NEXT_STEP]
 
 
 def _remaining(run_id: str, job: dict | None) -> list[str]:
