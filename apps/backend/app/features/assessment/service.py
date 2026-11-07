@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Protocol
 
 from . import ai as ai_part
+from . import ai_mapping as ai_mapping_part
 from . import app as app_part
 from . import db as db_part
 from . import manual as manual_part
@@ -65,6 +66,7 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
     if ai_part.enabled():
         report(90, "AI 로 요약·위험 설명 보강")
         plan = ai_part.enhance(plan)  # 실패하면 규칙 결과 그대로
+        plan = ai_mapping_part.attach(plan, inventory)  # 환경 변수 대응·빠진 의존성 제안. 판정은 안 바꿈
 
     source = SourceInfo(
         account_id=app_res.account_id,

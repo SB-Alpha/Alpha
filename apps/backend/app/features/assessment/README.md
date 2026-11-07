@@ -45,6 +45,7 @@ python -m app.features.assessment.cli --profile <읽기 전용 프로필> --aws-
 | `manual.py` | 이주호 | `source_kind="manual"`: 사람이 입력한 원본 값 → `DbAssessment`·`AppAssessment` (AWS 조회와 같은 형식). 확인 안 한 값이라 gaps 에 '직접 입력' 을 남기고, 비밀처럼 보이는 환경 변수는 버림 |
 | `plan.py` · `rules.py` | 이주호 | 필수 조건 판정, 목적지 매핑, risks·summary |
 | `ai.py` | 이주호 | AI 보강 (기본 꺼짐, `ALPHA_AI_ENABLED=1` + `pip install -e ".[ai]"`). summary 3줄·설명용 risks 만. 판정·target_infra 는 안 바꿈, 실패하면 규칙 결과 |
+| `ai_mapping.py` | 이주호 | AI 제안 (같은 스위치). 규칙에 없는 환경 변수 이름의 목적지 대응·빠진 의존성을 `plan.suggestions` 에만 덧붙임. 판정·target_infra 는 안 바꿈. 비밀은 보내지 않고, 제안은 입력에 없는 이름·지어낸 숫자·주소를 항목별로 버림. 실패하면 빈 목록. 평가: `scripts/eval_assessment_ai_mapping.py` |
 | `cli.py` | 이주호 | 실제 원본 조회 → JSON (기본으로 가림) |
 
 ## 입력 — `AssessmentInput` (workflows → assessment)

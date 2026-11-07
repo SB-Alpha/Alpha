@@ -159,6 +159,17 @@ class TargetInfra(BaseModel):
         return self.model_dump(exclude_none=True)
 
 
+class Suggestion(BaseModel):
+    """AI 가 덧붙인 제안. 판정(checks · approvable)에는 쓰이지 않고 승인자가 참고만 합니다."""
+
+    kind: Literal["service_mapping", "missing_dependency", "needs_confirmation"]
+    subject: str  # 근거가 된 환경 변수 이름. 입력에 실제로 있는 이름만 허용
+    observation: str  # 무엇이 보였는지
+    suggestion: str  # 목적지에서 어떻게 하면 좋을지
+    confidence: Literal["high", "medium", "low"]
+    source: Literal["ai"] = "ai"
+
+
 class MigrationPlan(BaseModel):
     target_infra: TargetInfra
     checks: list[PlanCheck]
@@ -168,6 +179,7 @@ class MigrationPlan(BaseModel):
     steps: list[PlanStep]
     approvable: bool  # 모든 필수 조건이 pass 일 때만 True
     blocking: list[str] = Field(default_factory=list)  # approvable=False 인 이유
+    suggestions: list[Suggestion] = Field(default_factory=list)  # AI 제안(참고용). 꺼져 있으면 항상 빈 목록
     generated_at: datetime
 
 
