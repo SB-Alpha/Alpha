@@ -1,11 +1,12 @@
 """클라우드 간 순서·역할, 재사용·부분 실패·정리와 Terraform 비밀값 경계를 검증한다."""
 
 import copy
+import ipaddress
 import json
 import stat
 import subprocess
 from dataclasses import replace
-from itertools import permutations
+from itertools import combinations, permutations
 
 import pytest
 from cryptography.fernet import Fernet
@@ -13,12 +14,23 @@ from cryptography.fernet import Fernet
 from app.core.secrets import delete_secret, has_secret, put_secret, resolve
 from app.features.db_migration import vpn, vpn_workflow as flow
 from app.features.db_migration.vpn_peers import ADAPTERS, GcpPeer
-from app.features.db_migration.vpn_plan import TUNNEL_KEYS, PeerTunnel, VpnError, VpnLeg, VpnPlan
+from app.features.db_migration.vpn_plan import BGP_NETWORKS, TUNNEL_KEYS, PeerTunnel, VpnError, VpnLeg, VpnPlan
 from app.features.db_migration.vpn_terraform import TerraformSession
 
 SECRET = "private-key-do-not-echo"
 RUN_ID, JOB_ID = "mig-vpn-001", "mig_vpn_001"
 OCI_IPS = {key: f"9.0.0.{i + 1}" for i, key in enumerate(TUNNEL_KEYS)}
+
+
+def test_bgp_networks_fit_every_cloud_and_do_not_overlap():
+    networks = [ipaddress.ip_network(cidr) for pair in BGP_NETWORKS.values() for cidr in pair]
+    azure_low, azure_high = ipaddress.ip_address("169.254.21.0"), ipaddress.ip_address("169.254.22.255")
+    oci_low, oci_high = ipaddress.ip_address("169.254.10.0"), ipaddress.ip_address("169.254.19.255")
+
+    assert len(networks) == 4 and all(net.prefixlen == 30 for net in networks)
+    assert all(azure_low <= net[0] and net[-1] <= azure_high for net in networks)
+    assert not any(oci_low <= net[-1] and net[0] <= oci_high for net in networks)
+    assert not any(a.overlaps(b) for a, b in combinations(networks, 2))
 
 
 @pytest.fixture(autouse=True)

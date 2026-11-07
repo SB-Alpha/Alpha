@@ -13,9 +13,10 @@ if TYPE_CHECKING:
 ROLES = ("source", "target")
 CONTEXT_VERSION = 2
 TUNNEL_KEYS = tuple(f"{role}-{i}" for role in ROLES for i in range(2))
-# OCI가 거부하는 169.254.10.0~19.255를 피한다. 같은 역할은 어느 클라우드든 같은 주소를 쓴다.
+# Azure가 허용하는 169.254.21.0~22.255 안에서 고른다. OCI가 거부하는 169.254.10.0~19.255와 겹치지 않는다.
+# 같은 역할은 어느 클라우드든 같은 주소를 쓴다.
 BGP_NETWORKS = {"source": ("169.254.21.0/30", "169.254.22.0/30"),
-                "target": ("169.254.31.0/30", "169.254.32.0/30")}
+                "target": ("169.254.21.4/30", "169.254.22.4/30")}
 
 
 class VpnError(RuntimeError):
