@@ -678,6 +678,40 @@ def test_target_secrets_under_another_name_are_kept_and_reported(fake, vpn_calls
     assert "shared-admin-pw" not in str(result.next_steps)
 
 
+def test_finish_is_refused_after_a_mismatch_at_the_switch(fake, vpn_calls):
+    def mismatch(job):
+        return {**job, **SWITCHED, "state": "failed", "evidence": {
+            **steps("switched_to_target", "released"), "verification": {"state": "mismatch"}}}
+
+    fake.on_cutover = mismatch
+    start_to_ready(fake)
+    db_workflow.cutover(RUN_ID, "pm", agent=fake.client())
+
+    with pytest.raises(db_workflow.NotAllowed, match="by hand"):
+        db_workflow.finish(RUN_ID, agent=fake.client())
+    assert "destroy_vpn" not in vpn_calls
+
+
+def test_finish_during_the_comparison_can_be_called_again(fake, vpn_calls):
+    to_stabilizing(fake)
+    fake.close_status = 409
+
+    waiting = db_workflow.finish(RUN_ID, agent=fake.client())
+
+    assert waiting.state == "incomplete" and "destroy_vpn" not in vpn_calls
+    fake.close_status = None
+    assert db_workflow.finish(RUN_ID, agent=fake.client()).state == "finished"
+
+
+def test_unfinished_comparison_is_told_as_a_next_step(fake, vpn_calls):
+    to_stabilizing(fake)
+    fake.job = {**fake.job, "evidence": {**fake.job["evidence"], "verification": {"state": "unverifiable"}}}
+
+    result = db_workflow.finish(RUN_ID, agent=fake.client())
+
+    assert result.state == "finished" and any("직접 확인" in step for step in result.next_steps)
+
+
 def test_errors_hide_target_secrets_under_another_name(fake, monkeypatch):
     put_secret("shared/target-admin", {"user": "postgres", "password": "shared-admin-pw"})
     credentials = {**INPUT["target"]["credentials_ref"], "admin": "secret://shared/target-admin"}

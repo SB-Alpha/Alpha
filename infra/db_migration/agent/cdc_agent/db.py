@@ -9,6 +9,7 @@ Accounts (from /etc/alpha-cdc/secrets/<job_id>.properties):
   target.admin.user / target.admin.password  admin account, creates the two target accounts
 """
 
+import hashlib
 import os
 import subprocess
 import time
@@ -22,6 +23,8 @@ import psycopg
 from psycopg import sql
 
 from cdc_agent.models import MARKER_TABLE, Job
+
+DIGEST_DEADLINE_CHECK_ROWS = 10_000
 
 
 @dataclass(frozen=True)
@@ -292,14 +295,20 @@ def sync_sequences(source: psycopg.Connection, target: psycopg.Connection, seque
     return values
 
 
-def table_digest(conn: psycopg.Connection, table: str) -> dict:
+def table_digest(conn: psycopg.Connection, table: str, deadline: float | None = None) -> dict:
+    """Hashed here row by row: a hash built in one SQL value stops at PostgreSQL's 1GB limit on large tables."""
     pk = primary_key(conn, table)
     order = sql.SQL(", ").join(sql.Identifier(c) for c in pk)
-    row = conn.execute(
-        sql.SQL("SELECT count(*), md5(coalesce(string_agg(md5(t::text), '' ORDER BY {}), '')) FROM {} t")
-        .format(order, ident(table))
-    ).fetchone()
-    return {"rows": row[0], "checksum": row[1]}
+    query = sql.SQL("SELECT md5(t::text) FROM {} t ORDER BY {}").format(ident(table), order)
+    digest = hashlib.sha256()
+    rows = 0
+    with conn.cursor() as cur:
+        for (row_hash,) in cur.stream(query):
+            digest.update(row_hash.encode())
+            rows += 1
+            if deadline is not None and rows % DIGEST_DEADLINE_CHECK_ROWS == 0 and time.monotonic() > deadline:
+                raise TimeoutError(f"comparing {table} ran past its time limit")
+    return {"rows": rows, "checksum": digest.hexdigest()}
 
 
 def table_rows(conn: psycopg.Connection, table: str) -> int:
@@ -325,16 +334,22 @@ def compare(source: Endpoint, target: Endpoint, tables: list[str]) -> dict:
     return result
 
 
-def compare_frozen(src: psycopg.Connection, tgt: psycopg.Connection, tables: list[str]) -> dict:
-    """compare() for the cutover reference point, on open connections.
+def fix_snapshot(conn: psycopg.Connection) -> None:
+    """Keep what this connection reads at this moment, whatever is written later. No table is read here."""
+    conn.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+    conn.execute("SELECT 1")  # The snapshot is taken at the first statement.
 
-    Both sides are frozen, so a digest always applies; its row count replaces the separate
-    count. The two sides run at once because every millisecond here is held traffic.
+
+def compare_frozen(src: psycopg.Connection, tgt: psycopg.Connection, tables: list[str],
+                   deadline: float | None = None) -> dict:
+    """compare() for the cutover reference point, on connections holding its snapshot (fix_snapshot).
+
+    Both sides are frozen, so a digest always applies; its row count replaces the separate count.
     """
     result: dict = {"tables": {}, "mismatch": 0}
     with ThreadPoolExecutor(max_workers=2) as pool:
         for table in tables:
-            source, target = pool.submit(table_digest, src, table), pool.submit(table_digest, tgt, table)
+            source, target = pool.submit(table_digest, src, table, deadline), pool.submit(table_digest, tgt, table, deadline)
             s, t = source.result(), target.result()
             same = s == t
             result["tables"][table] = {"source": s, "target": t, "match": same}

@@ -26,7 +26,7 @@ def sides(monkeypatch):
     monkeypatch.setattr(db, "table_exists", lambda conn, table: table in rows[conn])
     monkeypatch.setattr(db, "table_rows", lambda conn, table: rows[conn][table])
 
-    def digest(conn, table):
+    def digest(conn, table, deadline=None):
         digested.append((conn, table))
         return {"rows": rows[conn][table], "checksum": rows.get("checksums", {}).get((conn, table), "same")}
 

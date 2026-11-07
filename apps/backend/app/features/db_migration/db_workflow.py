@@ -87,6 +87,7 @@ VPN_CONTEXT = "vpn-context"
 IAM_NEXT_STEP = "AWS 콘솔에서 이번 이전용으로 만든 IAM 사용자를 삭제하세요. 키는 이 앱에서 이미 지웠습니다."
 TARGET_ACCOUNTS_NEXT_STEP = "목적지 계정 {accounts}의 로그인을 막지 못했습니다. 관리자 계정으로 ALTER ROLE ... NOLOGIN을 직접 실행하세요."
 OTHER_REFS_NEXT_STEP = "다른 이름표로 저장된 목적지 비밀값은 다른 작업이 쓸 수 있어 지우지 않았습니다. 쓰지 않으면 직접 지우세요: {refs}"
+UNVERIFIED_NEXT_STEP = "전환 시점 데이터 비교를 끝내지 못했습니다. 원본과 목적지의 업무 데이터를 직접 확인하세요."
 BUSY_MESSAGE = "run {run_id} is already running or being cleaned up"
 # 이 run 밖에 저장된 입력의 이름표. 값은 담지 않는다.
 OTHER_REFS = "other-refs"
@@ -534,7 +535,7 @@ def _cutover_outcome(job: dict) -> str | None:
 
 
 CUTOVER_MESSAGES = {
-    "switched": "전환이 끝났습니다. 안정화를 확인한 뒤 finish를 부르세요.",
+    "switched": "전환이 끝났습니다. 전환 시점 데이터 비교(metrics의 verification)와 안정화를 확인한 뒤 finish를 부르세요.",
     "returned_to_source": "전환하지 못해 원본으로 복귀했습니다. 쓰기는 원본으로 갑니다. 원인을 확인한 뒤 다시 부를 수 있습니다.",
     "manual_check": "자동으로 복구하지 못했습니다. 트래픽 방향과 원본 쓰기 차단을 직접 확인하세요.",
     "timed_out": "기다리는 시간이 지났습니다. 전환은 끝나지 않았을 수 있으니 status로 확인하세요.",
@@ -577,10 +578,10 @@ def _finish(run_id: str, agent: CdcAgentClient) -> FinishResult:
             raise NotAllowed("no job was registered; use stop") from None
         raise
     closed = job["state"] == "succeeded" and job["phase"] == CLOSED_PHASE
+    if job["state"] == "failed" and _switched(job):
+        # TODO: 전환 후 실패한 작업의 정리 경로. 목적지에 쓰기가 들어갔을 수 있어 사람이 판단한다.
+        raise NotAllowed("the job failed after switching to the target; check it by hand before cleaning up")
     if job["phase"] != STABILIZING_PHASE and not closed:
-        if job["state"] == "failed" and _switched(job):
-            # TODO: 전환 후 실패한 작업의 정리 경로. 목적지에 쓰기가 들어갔을 수 있어 사람이 판단한다.
-            raise NotAllowed("the job failed after switching to the target; check it by hand before cleaning up")
         raise NotAllowed(f"finish needs phase {STABILIZING_PHASE}, the job is {job['state']}/{job['phase']}; "
                          "before cutover use stop")
     try:
@@ -624,6 +625,8 @@ def _cleanup_result(run_id: str, job: dict | None, error: str | None) -> FinishR
     if accounts.get("error"):
         # 에이전트가 관리자 비밀을 이미 지웠으므로 다시 불러도 해결되지 않는다.
         next_steps.append(TARGET_ACCOUNTS_NEXT_STEP.format(accounts=", ".join(accounts.get("accounts", []))))
+    if ((job or {}).get("evidence", {}).get("verification") or {}).get("state") == "unverifiable":
+        next_steps.append(UNVERIFIED_NEXT_STEP)
     if done and (refs := _other_refs(run_id)):
         next_steps.append(OTHER_REFS_NEXT_STEP.format(refs=", ".join(refs)))
     return FinishResult(

@@ -42,6 +42,10 @@ class JobBusy(RuntimeError):
     """Another agent is working on the job. Try again."""
 
 
+class CloseRefused(RuntimeError):
+    """Cleanup would remove what the comparison or a person still needs."""
+
+
 class WorkerNotReady(RuntimeError):
     """Cutover would fail or do harm with the Worker as it is."""
 
@@ -311,6 +315,7 @@ class Runner:
                 if not locked:
                     raise RuntimeError("another agent holds this job")
                 sequences = db.sequences_of(source_conn, job.request.source.tables)
+                max_hold_s = job.request.options.max_hold_ms / 1000
                 hold = worker.hold(job_id, job.request.options.max_hold_ms)
                 t0 = time.monotonic()
                 ev["t0"] = hold.get("hold_started_at") or now()
@@ -321,7 +326,7 @@ class Runner:
                 blocked = True
                 step("source_writes_blocked", sessions_ended=ended)
                 marker = db.insert_marker(source_conn, job_id)
-                budget_s = job.request.options.max_hold_ms / 1000 - (time.monotonic() - t0)
+                budget_s = max_hold_s - (time.monotonic() - t0)
                 waited = db.wait_marker(target_conn, marker,
                                         max(0.1, min(self.settings.marker_timeout_s, budget_s)))
                 ev["marker_id"] = marker
@@ -331,11 +336,11 @@ class Runner:
                 # Writes are held and blocked, so both sides are frozen: this is the reference point.
                 synced = db.sync_sequences(app_conn, ddl_conn, sequences)
                 step("sequences_synced", sequences=synced)
-                check = db.compare_frozen(source_conn, target_conn, job.request.source.tables)
-                job.evidence["validation"] = {**check, "checked_at": now(), "at": "cutover_reference_point"}
-                step("validated", mismatch=check["mismatch"])
-                if check["mismatch"]:
-                    raise RuntimeError(f"data mismatch at reference point: {check['mismatch']} table(s)")
+                db.fix_snapshot(source_conn)
+                db.fix_snapshot(target_conn)
+                step("snapshot_fixed")
+                if time.monotonic() - t0 > max_hold_s:
+                    raise RuntimeError(f"cutover took longer than the {max_hold_s}s hold limit")
                 worker.switch(job_id)
                 switched = True
                 step("switched_to_target")
@@ -345,10 +350,15 @@ class Runner:
                 ev["hold_ms"] = round((t1 - t0) * 1000, 1)
                 ev["held_count"] = released.get("held_count")
                 step("released")
-            job.metrics.update({"traffic_mode": "TARGET", "mismatch": check["mismatch"],
-                                "cutover_ms": ev["hold_ms"]})
-            job.report(phase="stabilizing", progress=90,
-                       message=f"전환 완료 ({ev['hold_ms']}ms), 안정화 관찰 중")
+                # The result of the check before the hold no longer says anything about this moment.
+                job.metrics.pop("mismatch", None)
+                job.metrics.update({"traffic_mode": "TARGET", "cutover_ms": ev["hold_ms"], "verification": "running"})
+                job.evidence["verification"] = {"state": "running", "started_at": now()}
+                job.report(phase="stabilizing", progress=90,
+                           message=f"전환 완료 ({ev['hold_ms']}ms), 전환 시점 데이터 비교 중")
+                self.store.put(job)
+                # Traffic is released; this may take long. The lock stays held so any agent can see it is alive.
+                self._verify_snapshots(job, source_conn, target_conn)
         except Exception as exc:
             log.exception("cutover %s failed", job_id)
             error = self.error_text(job_id, exc)
@@ -365,6 +375,47 @@ class Runner:
                 job.report(state="failed", message=f"목적지로 전환 후 오류, 수동 확인 필요: {error}")
         self.store.put(job)
 
+    def _verify_snapshots(self, job: Job, source_conn, target_conn) -> None:
+        """Compare the two sides as they were at the switch. Writes since then do not count."""
+        deadline = time.monotonic() + self.settings.verify_timeout_s
+        try:
+            check = db.compare_frozen(source_conn, target_conn, job.request.source.tables, deadline)
+        except Exception as exc:
+            log.warning("job %s: could not finish the comparison after the switch", job.job_id)
+            self._mark_unverifiable(job, self.error_text(job.job_id, exc))
+            return
+        job.evidence["validation"] = {**check, "checked_at": now(), "at": "cutover_reference_point"}
+        job.metrics["mismatch"] = check["mismatch"]
+        if check["mismatch"]:
+            job.evidence["verification"] = {"state": "mismatch", "finished_at": now()}
+            job.metrics["verification"] = "mismatch"
+            # Target may already have writes: never go back automatically, and keep what a person needs.
+            job.report(state="failed", message=f"전환 시점 데이터 불일치 {check['mismatch']}개 테이블, 수동 확인 필요")
+        else:
+            job.evidence["verification"] = {"state": "match", "finished_at": now()}
+            job.metrics["verification"] = "match"
+            job.report(message=f"전환 완료 ({job.evidence['cutover']['hold_ms']}ms), 데이터 일치, 안정화 관찰 중")
+
+    def _mark_unverifiable(self, job: Job, reason: str) -> None:
+        # The snapshots are gone and the target has moved on, so this cannot be repeated.
+        job.evidence["verification"] = {"state": "unverifiable", "reason": reason, "finished_at": now()}
+        job.metrics["verification"] = "unverifiable"
+        job.report(message="전환 완료, 전환 시점 데이터 비교를 끝내지 못함. 데이터를 직접 확인하세요")
+
+    def _require_closable(self, job: Job, creds: Credentials) -> None:
+        if job.evidence.get("verification", {}).get("state") == "running":
+            with db.job_lock(creds.source, job.job_id) as locked:
+                if not locked:
+                    raise CloseRefused("the data comparison after the switch is still running; call again")
+                latest = self.store.get(job.job_id)  # it may have ended just before the lock came free
+                job.state, job.message = latest.state, latest.message
+                job.metrics, job.evidence = latest.metrics, latest.evidence
+                if job.evidence["verification"]["state"] == "running":
+                    self._mark_unverifiable(job, "the agent running the comparison stopped")
+                    self.store.put(job)
+        if job.state == "failed":
+            raise CloseRefused(job.message)
+
     def _resume_source(self, job: Job, creds: Credentials, worker: WorkerClient, blocked: bool, step) -> None:
         # Each step runs on its own: a failed unblock must not leave requests held.
         actions = [("source_writes_unblocked", lambda: db.unblock_app_writes(creds.source_app))] if blocked else []
@@ -379,6 +430,7 @@ class Runner:
 
     def close(self, job: Job) -> None:
         creds = Credentials(self.settings, job)
+        self._require_closable(job, creds)
         job.evidence["cleanup"] = self._cleanup(job, creds)
         job.report(state="succeeded", phase="closed", progress=100, message="종료, 복제 자원 정리 완료")
         self.store.put(job)

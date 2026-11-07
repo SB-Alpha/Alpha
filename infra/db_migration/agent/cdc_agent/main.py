@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from cdc_agent.config import get_settings
-from cdc_agent.jobs import SETUP_PHASES, JobBusy, Runner, WorkerNotReady
+from cdc_agent.jobs import SETUP_PHASES, CloseRefused, JobBusy, Runner, WorkerNotReady
 from cdc_agent.models import JOB_ID_PATTERN, CutoverRequest, Job, JobRequest
 from cdc_agent.secret_store import SecretsDisabled, SecretStore
 from cdc_agent.store import JobStore
@@ -136,7 +136,10 @@ def close(job_id: str) -> Job:
     job = load(job_id)
     if job.phase != "stabilizing":
         raise HTTPException(409, "close is allowed after cutover (stabilizing)")
-    runner.close(job)
+    try:
+        runner.close(job)
+    except CloseRefused as exc:
+        raise HTTPException(409, str(exc)) from exc
     return job
 
 

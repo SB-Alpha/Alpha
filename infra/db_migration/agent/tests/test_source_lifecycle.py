@@ -420,6 +420,38 @@ def test_accounts_stay_while_another_job_uses_the_same_target(setup):
     assert any(c[0] == "retire" for c in calls)
 
 
+def test_close_waits_for_the_comparison_while_its_agent_holds_the_lock(setup):
+    runner, calls = setup(phase="stabilizing", locked=False)
+    job = runner.store.get("job01")
+    job.evidence["verification"] = {"state": "running"}
+
+    with pytest.raises(jobs.CloseRefused, match="still running"):
+        runner.close(job)
+    assert not any(c[0] == "drop_slot" for c in calls)
+
+
+def test_close_goes_on_when_the_agent_comparing_has_stopped(setup):
+    runner, calls = setup(phase="stabilizing")
+    job = runner.store.get("job01")
+    job.evidence["verification"] = {"state": "running"}
+    runner.store.put(job.model_copy(deep=True))
+
+    runner.close(job)
+
+    assert job.state == "succeeded" and job.evidence["verification"]["state"] == "unverifiable"
+    assert any(c[0] == "drop_slot" for c in calls)
+
+
+def test_close_is_refused_after_a_mismatch(setup):
+    runner, calls = setup(phase="stabilizing", state="failed")
+    job = runner.store.get("job01")
+    job.message = "mismatch"
+
+    with pytest.raises(jobs.CloseRefused, match="mismatch"):
+        runner.close(job)
+    assert not any(c[0] == "drop_slot" for c in calls)
+
+
 def test_failure_to_retire_is_reported_and_does_not_undo_the_cleanup(setup, monkeypatch):
     runner, calls = setup(phase="stabilizing")
 

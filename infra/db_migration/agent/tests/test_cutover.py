@@ -1,5 +1,6 @@
 """Cutover ordering and rollback, with the DB, Connect and Worker replaced by fakes."""
 
+import itertools
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -108,6 +109,7 @@ def setup(monkeypatch, tmp_path: Path):
         monkeypatch.setattr(jobs.db, "wait_marker", wait_marker)
         monkeypatch.setattr(jobs.db, "sequences_of", lambda conn, tables: ["public.t_id_seq"])
         monkeypatch.setattr(jobs.db, "sync_sequences", record("sync_sequences", {"public.t_id_seq": 5}))
+        monkeypatch.setattr(jobs.db, "fix_snapshot", record("fix_snapshot"))
         monkeypatch.setattr(jobs.db, "compare_frozen", record("compare", {"mismatch": mismatch, "rows_checked": 10}))
         return runner, calls
 
@@ -122,9 +124,13 @@ def test_success_runs_steps_in_order(setup):
     assert calls == [
         ("db", "connect"), ("db", "connect"), ("db", "connect"), ("db", "connect"),
         ("worker", "hold"), ("worker", "inflight_zero"), ("db", "block"), ("db", "insert_marker"),
-        ("db", "wait_marker"), ("pause", "job01-sink"), ("db", "sync_sequences"), ("db", "compare"),
-        ("worker", "switch"), ("worker", "release"),
+        ("db", "wait_marker"), ("pause", "job01-sink"), ("db", "sync_sequences"),
+        ("db", "fix_snapshot"), ("db", "fix_snapshot"),
+        ("worker", "switch"), ("worker", "release"), ("db", "compare"),
     ]
+    assert job.metrics["verification"] == "match" and job.metrics["mismatch"] == 0
+    assert job.evidence["verification"]["state"] == "match"
+    assert job.evidence["validation"]["at"] == "cutover_reference_point"
     assert (job.state, job.phase) == ("running", "stabilizing")
     assert job.metrics["traffic_mode"] == "TARGET"
     assert job.evidence["cutover"]["held_count"] == 2
@@ -140,14 +146,47 @@ def test_marker_timeout_returns_writes_to_source(setup):
     assert (job.state, job.phase) == ("waiting_approval", "cutover_ready")
 
 
-def test_mismatch_at_reference_point_does_not_switch(setup):
+def test_mismatch_at_the_switch_needs_a_person_and_never_goes_back(setup):
     runner, calls = setup(mismatch=1)
     runner._cutover("job01")
     job = runner.store.get("job01")
 
-    assert ("worker", "switch") not in calls
-    assert (job.state, job.phase) == ("waiting_approval", "cutover_ready")
-    assert "mismatch" in job.message
+    assert ("db", "unblock") not in calls and ("resume", "job01-sink") not in calls
+    assert (job.state, job.phase) == ("failed", "stabilizing")
+    assert job.evidence["verification"]["state"] == "mismatch"
+    assert job.metrics["mismatch"] == 1
+
+
+def test_comparison_that_cannot_finish_is_recorded_and_does_not_fail_the_job(setup, monkeypatch):
+    runner, calls = setup()
+
+    def broken(*args):
+        raise RuntimeError("connection lost, password=hunter2")
+
+    monkeypatch.setattr(jobs.db, "compare_frozen", broken)
+    runner._cutover("job01")
+    job = runner.store.get("job01")
+
+    assert (job.state, job.phase) == ("running", "stabilizing")
+    assert job.evidence["verification"]["state"] == "unverifiable"
+    assert "hunter2" not in job.evidence["verification"]["reason"]
+    assert ("worker", "release") in calls
+
+
+def test_traffic_is_released_before_the_comparison(setup, monkeypatch):
+    runner, calls = setup()
+    seen = {}
+
+    def compare(*args):
+        stored = runner.store.get("job01")
+        seen.update(phase=stored.phase, verification=stored.evidence["verification"]["state"])
+        return {"mismatch": 0, "rows_checked": 1}
+
+    monkeypatch.setattr(jobs.db, "compare_frozen", compare)
+    runner._cutover("job01")
+
+    assert ("worker", "release") in calls
+    assert seen == {"phase": "stabilizing", "verification": "running"}
 
 
 def test_failed_sequence_sync_returns_writes_to_source(setup, monkeypatch):
@@ -163,6 +202,18 @@ def test_failed_sequence_sync_returns_writes_to_source(setup, monkeypatch):
     assert ("worker", "switch") not in calls
     assert calls[-3:] == [("db", "unblock"), ("resume", "job01-sink"), ("worker", "release")]
     assert (job.state, job.phase) == ("waiting_approval", "cutover_ready")
+
+
+def test_going_past_the_hold_limit_returns_writes_to_source(setup, monkeypatch):
+    runner, calls = setup()
+    ticks = itertools.count(step=100)
+    monkeypatch.setattr(jobs.time, "monotonic", lambda: next(ticks))
+    runner._cutover("job01")
+    job = runner.store.get("job01")
+
+    assert ("worker", "switch") not in calls
+    assert (job.state, job.phase) == ("waiting_approval", "cutover_ready")
+    assert "hold limit" in job.message
 
 
 def test_failure_after_switch_never_goes_back(setup):

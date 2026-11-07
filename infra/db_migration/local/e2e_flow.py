@@ -142,6 +142,8 @@ def main() -> int:
     except db_workflow.NotAllowed:
         check("전환 후 stop 거부", True)
 
+    wait("전환 시점 데이터 비교", lambda: db_workflow.status(RUN_ID).metrics.get("verification") != "running")
+    check("전환 시점 데이터 일치", db_workflow.status(RUN_ID).metrics.get("verification") == "match")
     new_id = target("SET ROLE tgt_app; INSERT INTO public.tickets (title) VALUES ('after cutover') RETURNING id;")
     # psql은 명령 태그도 함께 찍는다: SET, 21, INSERT 0 1
     check("전환 후 자동 증가 ID INSERT", "21" in new_id.splitlines(), new_id)
