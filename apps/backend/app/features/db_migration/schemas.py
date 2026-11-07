@@ -2,7 +2,8 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing_extensions import TypedDict
 
 from .settings import tunables
 
@@ -219,18 +220,89 @@ class Route(BaseModel):
     target: RouteEnd
 
 
-class RunStatus(BaseModel):
+# 에이전트가 정하는 값은 새 값이 와도 상태 조회가 깨지지 않게 문자열로 받고, 허용값은 API 문서에 싣는다.
+RUN_STATES = ("pending", "running", "waiting_approval", "paused", "succeeded", "failed", "aborted", "stopped", "unknown")
+AGENT_PHASES = ("source_prepare", "target_prepare", "precheck", "replication_setup", "snapshot", "streaming",
+                "cutover_ready", "cutover", "stabilizing", "closed")
+RUN_PHASES = ("inputs", "vpn", "probe", "secrets", "job", *AGENT_PHASES, "unknown")
+LAST_STEP = 12
+
+
+class RunError(BaseModel):
+    """화면은 code로 분기하고 message는 그대로 보여 준다. 비밀값과 응답 원문은 담지 않는다."""
+
+    code: str
+    message: str
+
+
+class DatabaseChoices(BaseModel):
+    """이 값 중에서 골라 POST /runs/{run_id}/retry로 보낸다."""
+
+    source: list[str]
+    target: list[str]
+
+
+class TableProgress(TypedDict, total=False):
+    source_rows: int
+    target_rows: int
+    percent: float
+    match: bool
+
+
+class CutoverStep(TypedDict, total=False):
+    step: str
+    elapsed_ms: float
+    waited_ms: float
+    mismatch: int
+    error: str
+
+
+class RunMetrics(TypedDict, total=False):
+    """없는 값은 보내지 않는다. 화면은 없는 값을 미제공으로 표시한다."""
+
+    __pydantic_config__ = ConfigDict(extra="allow")
+
+    phase: str
+    simulated: bool
+    copy_percent: float
+    tables: dict[str, TableProgress]
+    rows_checked: int
+    mismatch: int
+    measured_at: str
+    measure_error: str
+    replication_lag_bytes: int
+    verification: Literal["running", "match", "mismatch", "unverifiable", "unknown"]
+    cutover_seconds: float
+    cutover_seconds_source: Literal["worker", "agent"]
+    cutover_steps: list[CutoverStep]
+    cutover_sequence: Literal["VERIFIED", "INCOMPLETE"]
+    cutover_sequence_missing: list[str]
+    cutover_outcome: CutoverOutcome
+    serving: Literal["source", "target"]
+    target_db_network: Literal["PRIVATE", "PUBLIC"]
+    cdc_error: str
+
+
+class MigrationRunStatus(BaseModel):
     run_id: str
     job_id: str
     route: Route | None = None
-    state: str
-    phase: str
+    state: str = Field(json_schema_extra={"enum": list(RUN_STATES)})
+    phase: str = Field(json_schema_extra={"enum": list(RUN_PHASES)})
+    step: int | None = Field(default=None, ge=1, le=LAST_STEP, description="실행 단계 1~12. 전환 승인 이후에는 null")
+    last_step: int = LAST_STEP
     progress: int
     message: str | None = None
-    metrics: dict[str, Any] = {}
+    error: RunError | None = None
+    database_choices: DatabaseChoices | None = None
+    metrics: RunMetrics = {}
     ready_for_cutover: bool = False
     cleanup_required: bool = False
     remaining: list[str] = []
+
+
+# workflows에도 RunStatus가 있어 API 문서의 이름이 겹치지 않게 모델 이름을 나눴다.
+RunStatus = MigrationRunStatus
 
 
 class CloudStatus(BaseModel):
@@ -248,7 +320,7 @@ class CutoverResult(BaseModel):
     message: str
     detail: str | None = None
     hold_ms: float | None = None
-    metrics: dict[str, Any] = {}
+    metrics: RunMetrics = {}
     evidence: dict[str, Any] = {}
 
 

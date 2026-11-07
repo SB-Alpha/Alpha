@@ -34,7 +34,7 @@ def test_only_the_agreed_keys_leave_the_module():
             "measure_error": "password=secret",
             "something_new": 1,
         },
-    })
+    }, lambda text: "[cleaned]")
 
     assert metrics == {
         "phase": "streaming",
@@ -43,6 +43,7 @@ def test_only_the_agreed_keys_leave_the_module():
         "mismatch": 1,
         "rows_checked": 1000,
         "measured_at": "2026-11-07T00:00:00+00:00",
+        "measure_error": "[cleaned]",
         "tables": {"public.a": {"source_rows": 2, "target_rows": 1, "percent": 50.0, "match": False}},
     }
 

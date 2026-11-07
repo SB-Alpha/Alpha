@@ -70,6 +70,8 @@ from .progress_view import (
     clamp_progress,
     classify_cutover,
     network_exposure,
+    step_of_phase,
+    still_on_source,
     to_metrics,
 )
 from .run_input import (
@@ -77,18 +79,22 @@ from .run_input import (
     InvalidInput,
     inject,
     parse,
+    save_target_network,
     saved_clouds,
     saved_route,
+    saved_target_network,
 )
 from .schemas import (
     CutoverOutcome,
     CutoverResult,
+    DatabaseChoices,
     DbMigrationInput,
     DbMigrationResult,
     FinishResult,
     JobOptions,
     JobRequest,
     Route,
+    RunError,
     RunStatus,
     SourceSpec,
     TargetSpec,
@@ -126,6 +132,17 @@ _SAFE_RUN_ERRORS = (
     JobRequestError, MissingSetting, preflight.PreflightError, AgentError,
 )
 _STAGE_MESSAGES = {"vpn": "VPN 구축 중", "probe": "DB 접속 확인 중", "secrets": "DB 계정 전달과 작업 등록 중"}
+_STAGE_STEPS = {"vpn": 7, "probe": 8, "secrets": 10, "job": 10}
+# code 속성이 없는 오류의 코드. 화면은 이 값으로 안내를 나눈다.
+_ERROR_CODES = (
+    (cloud_lookup.LookupFailed, "lookup_failed"),
+    (ExecutionModelError, "invalid_route"),
+    (ConnectivityError, "db_unreachable"),
+    (MissingSetting, "missing_setting"),
+    (preflight.PreflightError, "preflight_failed"),
+    (AgentError, "agent_error"),
+    (httpx.HTTPError, "agent_unreachable"),
+)
 
 class NotAllowed(RuntimeError):
     """지금 상태에서는 할 수 없는 호출."""
@@ -163,6 +180,10 @@ class _Progress:
     target_network: str | None = None
     lookup: cloud_lookup.FoundRoute | None = None
     execution: ExecutionModel | None = None
+    # 004의 단계 번호. 작업 등록 전 어디까지 왔는지(실패했다면 어디서 멈췄는지)를 말한다.
+    step: int = 3
+    error_code: str | None = None
+    database_choices: DatabaseChoices | None = None
 
 
 _active: set[str] = set()
@@ -193,14 +214,19 @@ def run(inp: Any, *, agent: CdcAgentClient | None = None, ctx: Reporter | None =
             _runs.pop(run_id, None)
         _release(run_id)
         raise
+    _start_background(injected, agent, ctx)
+    return run_id
+
+
+def _start_background(injected: InjectedRun, agent: CdcAgentClient | None, ctx: Reporter | None) -> None:
+    run_id = injected.run_id
     try:
         threading.Thread(target=_run_in_background, args=(injected, agent, ctx), daemon=True,
                          name=f"cdc-run-{run_id}").start()
     except BaseException:
-        _set_progress(run_id, state="failed", message="실행을 시작하지 못했습니다. 다시 실행하세요.")
+        _set_progress(run_id, state="failed", message="실행을 시작하지 못했습니다. 다시 실행하세요.", error_code="internal")
         _release(run_id)
         raise
-    return run_id
 
 
 def _run_in_background(injected: InjectedRun, agent: CdcAgentClient | None, ctx: Reporter | None) -> None:
@@ -227,22 +253,23 @@ def _run_in_background(injected: InjectedRun, agent: CdcAgentClient | None, ctx:
         return not stopped
 
     try:
-        _set_progress(run_id, message="DB 주소·네트워크 조회 중")
+        _set_progress(run_id, step=4, message="DB 주소·네트워크 조회 중")
         if ctx is not None:
             ctx.report("running", 0, None, "DB 주소·네트워크 조회 중")
         found = cloud_lookup.find_route(injected)
         target_network = cloud_lookup.network_exposure(found.target.db)
         if not hand_off(lookup=found, target_network=target_network):
             return
+        save_target_network(run_id, target_network)
 
         fallback = "실행 모델로 변환하지 못했습니다. 입력과 조회 결과를 확인하세요."
-        _set_progress(run_id, message="실행 모델로 변환 중")
+        _set_progress(run_id, step=5, message="실행 모델로 변환 중")
         execution = build_execution_model(injected, found)
         if not hand_off(execution=execution):
             return
 
         fallback = "실행을 끝내지 못했습니다. 같은 run_id로 다시 실행하거나 stop으로 정리하세요."
-        _set_progress(run_id, message="시작 전 검사 중")
+        _set_progress(run_id, step=6, message="시작 전 검사 중")
         client = agent or _default_agent()
         _claim_execution_source(run_id, execution)
         check_start(StartCheckInput.from_route(execution), job_id=job_id, agent=client, network=CdcNetwork.from_env())
@@ -255,11 +282,11 @@ def _run_in_background(injected: InjectedRun, agent: CdcAgentClient | None, ctx:
         preflight.check_job_secrets(secret_values)
 
         def stage(name: str) -> None:
-            _set_progress(run_id, stage=name, message=_STAGE_MESSAGES.get(name))
+            _set_progress(run_id, stage=name, step=_STAGE_STEPS[name], message=_STAGE_MESSAGES.get(name))
             log.event("stage", stage=name)
 
         def discover_and_build() -> dict:
-            _set_progress(run_id, message="DB·테이블 조회 중")
+            _set_progress(run_id, step=9, message="DB·테이블 조회 중")
             selection = CatalogSelection(source_database=injected.source_database,
                                          target_database=injected.target_database)
             catalog = discover_catalog(execution, agent=client, selection=selection,
@@ -277,7 +304,8 @@ def _run_in_background(injected: InjectedRun, agent: CdcAgentClient | None, ctx:
     except Exception as exc:  # noqa: BLE001 - 스레드 밖으로 나갈 곳이 없으므로 status에 남긴다
         logger.warning("run %s failed", run_id)
         message = _run_error_message(run_id, exc, fallback)
-        _set_progress(run_id, state="failed", message=message)
+        _set_progress(run_id, state="failed", message=message, error_code=_run_error_code(exc),
+                      database_choices=_database_choices(exc))
         _end(ctx, "failed", 0, message)
     finally:
         _release(run_id)
@@ -287,12 +315,28 @@ def _run_error_message(run_id: str, exc: Exception, fallback: str) -> str:
     """API 원문은 상태나 로그에 쓰지 않는다."""
     if isinstance(exc, DatabaseSelectionRequired):
         names = "; ".join(f"{side}: {', '.join(found)}" for side, found in exc.candidates.items())
-        return f"DB가 여러 개입니다 ({names}). source.db.database와 target.db.database를 지정해 같은 run_id로 다시 실행하세요."
+        return f"DB가 여러 개입니다 ({names}). DB를 골라 다시 실행하세요."
     if isinstance(exc, _SAFE_RUN_ERRORS):
         return _clean(run_id, str(exc))
     if isinstance(exc, httpx.HTTPError):
         return "CDC agent unreachable"
     return fallback
+
+
+def _run_error_code(exc: Exception) -> str:
+    code = getattr(exc, "code", None)
+    if isinstance(code, str):
+        return code
+    for kinds, name in _ERROR_CODES:
+        if isinstance(exc, kinds):
+            return name
+    return "internal"
+
+
+def _database_choices(exc: Exception) -> DatabaseChoices | None:
+    if not isinstance(exc, DatabaseSelectionRequired):
+        return None
+    return DatabaseChoices(source=list(exc.candidates["source"]), target=list(exc.candidates["target"]))
 
 
 def _run_steps(injected: InjectedRun, found: cloud_lookup.FoundRoute, execution: ExecutionModel,
@@ -354,11 +398,16 @@ def status(run_id: str, *, agent: CdcAgentClient | None = None) -> RunStatus:
     message = job.get("message") or (progress.message if progress else None)
     remaining = _remaining(run_id, job)
     metrics = to_metrics(job, lambda text: _clean(run_id, text))
-    if progress is not None and progress.target_network:
-        metrics["target_db_network"] = progress.target_network
+    network = progress.target_network if progress is not None and progress.target_network else _saved_network(run_id)
+    if network:
+        metrics["target_db_network"] = network
+    if still_on_source(job):
+        metrics["serving"] = "source"
+    shown = _clean(run_id, message) if message else None
     return RunStatus(
         run_id=run_id, job_id=job_id, route=_route(run_id, progress), state=job["state"], phase=job["phase"],
-        progress=clamp_progress(job["progress"]), message=_clean(run_id, message) if message else None,
+        step=step_of_phase(job["phase"]), progress=clamp_progress(job["progress"]), message=shown,
+        error=RunError(code="job_failed", message=shown or "복제 작업이 실패했습니다.") if job["state"] == "failed" else None,
         metrics=metrics,
         ready_for_cutover=job["phase"] == READY_PHASE and job["state"] == "waiting_approval",
         cleanup_required=job["state"] in CLEANUP_STATES and bool(remaining), remaining=remaining,
@@ -1052,10 +1101,19 @@ def _run_result(run_id: str, state: str, job: dict, vpn_destroyed: bool, vpn_err
 
 def _status_from_memory(run_id: str, progress: _Progress) -> RunStatus:
     remaining = _remaining(run_id, None)
+    failed = progress.state == "failed"
+    # 등록된 작업을 잃었다면 전환했는지 알 수 없다.
+    metrics: dict[str, Any] = {} if progress.job_registered else {"serving": "source"}
+    if progress.target_network:
+        metrics["target_db_network"] = progress.target_network
+    if failed and progress.message:
+        metrics["cdc_error"] = progress.message
     return RunStatus(
         run_id=run_id, job_id=to_job_id(run_id), route=_route(run_id, progress), state=progress.state,
-        phase=progress.stage, progress=0, message=progress.message,
-        metrics={"target_db_network": progress.target_network} if progress.target_network else {},
+        phase=progress.stage, step=progress.step, progress=0, message=progress.message,
+        error=RunError(code=progress.error_code or "internal", message=progress.message or "실행이 실패했습니다.") if failed else None,
+        database_choices=progress.database_choices,
+        metrics=metrics,
         cleanup_required=progress.state in CLEANUP_STATES and bool(remaining), remaining=remaining,
     )
 
@@ -1063,8 +1121,17 @@ def _status_from_memory(run_id: str, progress: _Progress) -> RunStatus:
 def _unknown_status(run_id: str, message: str) -> RunStatus:
     remaining = _remaining(run_id, None)
     return RunStatus(run_id=run_id, job_id=to_job_id(run_id), route=_route(run_id, None), state="unknown",
+                     error=RunError(code="status_unknown", message=message),
                      phase="unknown", progress=0, message=message, cleanup_required=bool(remaining),
                      remaining=remaining)
+
+
+def _saved_network(run_id: str) -> str | None:
+    try:
+        return saved_target_network(run_id)
+    except Exception:  # noqa: BLE001 - 표시용 값이 상태 조회를 막으면 안 된다
+        logger.warning("run %s: could not read its target network", run_id)
+        return None
 
 
 def _route(run_id: str, progress: _Progress | None) -> Route | None:
@@ -1124,8 +1191,11 @@ def _release(run_id: str) -> None:
 def _set_progress(run_id: str, **fields: Any) -> None:
     with _active_lock:
         progress = _runs[run_id]
+        changed = fields.get("message") not in (None, progress.message)
         for name, value in fields.items():
             setattr(progress, name, value)
+    if changed:
+        ProgressLog(run_id, to_job_id(run_id)).event("progress", message=fields["message"])
 
 
 def _claim_source(run_id: str, mig: DbMigrationInput) -> None:

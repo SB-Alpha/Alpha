@@ -27,6 +27,18 @@ _STEP_ALIASES = {"snapshot_fixed": ("snapshot_fixed", "validated")}
 _STEP_NUMBERS = ("elapsed_ms", "waited_ms", "mismatch")
 _COUNT_METRICS = ("replication_lag_bytes", "mismatch", "rows_checked")
 _VERIFICATIONS = {"running", "match", "mismatch", "unverifiable", "unknown"}
+# 004의 11·12번. 전환부터는 단계가 아니라 phase와 전환 값을 본다.
+_AGENT_STEPS = {"source_prepare": 11, "target_prepare": 12, "precheck": 12, "replication_setup": 12,
+                "snapshot": 12, "streaming": 12, READY_PHASE: 12}
+
+
+def step_of_phase(phase: Any) -> int | None:
+    return _AGENT_STEPS.get(phase)
+
+
+def still_on_source(job: Mapping[str, Any]) -> bool:
+    """전환을 시도한 적이 없을 때만 원본이라고 말한다. 시도했다면 판단은 전환 결과가 맡는다."""
+    return job.get("phase") in _AGENT_STEPS and not _cutover_evidence(job)
 
 
 def clamp_progress(value: Any) -> int:
@@ -77,6 +89,8 @@ def to_metrics(job: Mapping[str, Any], clean: Callable[[str], str] = str) -> dic
         metrics["verification"] = raw["verification"]
     if raw.get("simulated") is True:
         metrics["simulated"] = True
+    if isinstance(raw.get("measure_error"), str) and raw["measure_error"].strip():
+        metrics["measure_error"] = clean(raw["measure_error"])
     if raw.get("traffic_mode") == "TARGET":
         metrics["serving"] = "target"
     if _is_number(raw.get("cutover_ms")) and raw["cutover_ms"] >= 0:

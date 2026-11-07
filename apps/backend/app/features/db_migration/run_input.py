@@ -178,6 +178,19 @@ def inject(run_id: str, inp: RunInput) -> InjectedRun:
     )
 
 
+def save_target_network(run_id: str, network: str | None) -> None:
+    """앱을 다시 켜도 상태에 나오도록 run과 함께 남긴다."""
+    if network:
+        put_secret(f"{run_id}/{CLOUDS_TAG}", {**resolve(f"secret://{run_id}/{CLOUDS_TAG}"), "target_db_network": network})
+
+
+def saved_target_network(run_id: str) -> str | None:
+    try:
+        return resolve(f"secret://{run_id}/{CLOUDS_TAG}").get("target_db_network")
+    except KeyError:
+        return None
+
+
 def credentials_registered(cloud: str) -> bool:
     try:
         _credentials_ref(cloud)
