@@ -171,11 +171,13 @@ def _lag_at(lag: int, measured_at: str | None):
     return make_run(metrics)
 
 
-def test_a_stale_lag_value_is_not_counted_as_pass():
+def test_a_stale_lag_value_is_not_counted_as_pass(monkeypatch):
     from datetime import timedelta
 
-    from app.features.workflows.readiness import MAX_LAG_AGE_S
+    from app.features.workflows.readiness import max_lag_age_s
 
+    monkeypatch.delenv("CDC_AGENT_METRICS_INTERVAL_S", raising=False)
+    assert max_lag_age_s() == 20  # 에이전트 주기 10초의 두 번
     run = _lag_at(400, MEASURED.isoformat())
     stale = cutover_readiness(run, now=MEASURED + timedelta(seconds=30))
     lag = next(c for c in stale.checks if c.id == "lag")
@@ -183,7 +185,7 @@ def test_a_stale_lag_value_is_not_counted_as_pass():
     assert "30초 전" in lag.detail
     assert stale.decision == "needs_confirmation"
 
-    fresh = cutover_readiness(run, now=MEASURED + timedelta(seconds=MAX_LAG_AGE_S - 1))
+    fresh = cutover_readiness(run, now=MEASURED + timedelta(seconds=max_lag_age_s() - 1))
     assert next(c for c in fresh.checks if c.id == "lag").status == "pass"
     assert fresh.decision == "go"
 
@@ -212,3 +214,24 @@ def test_measured_at_from_another_stage_is_not_used_for_the_lag():
     run = with_stage(run, StageName.PROVISIONING, metrics={"measured_at": MEASURED.isoformat()})
     lag = next(c for c in cutover_readiness(run, now=MEASURED + timedelta(seconds=300)).checks if c.id == "lag")
     assert lag.status == "pass"
+
+
+def test_the_stale_limit_follows_the_agent_metrics_interval(monkeypatch):
+    """에이전트가 30초마다 재는 환경은 같은 값을 넣어 판정이 30초 주기로 흔들리지 않게 합니다 (기준 60초)."""
+    from datetime import timedelta
+
+    from app.features.workflows.readiness import max_lag_age_s
+
+    monkeypatch.setenv("CDC_AGENT_METRICS_INTERVAL_S", "30")
+    assert max_lag_age_s() == 60
+    run = _lag_at(400, MEASURED.isoformat())
+    # softwareDefine 실측: measured_at 이 31초 간격으로 바뀜. 기준 60초면 그 사이에 확인 중으로 바뀌지 않음
+    assert next(c for c in cutover_readiness(run, now=MEASURED + timedelta(seconds=31)).checks if c.id == "lag").status == "pass"
+
+
+@pytest.mark.parametrize("bad", ["abc", "0", "-5", "nan"])
+def test_an_unusable_agent_interval_falls_back_to_the_default(monkeypatch, bad):
+    from app.features.workflows.readiness import max_lag_age_s
+
+    monkeypatch.setenv("CDC_AGENT_METRICS_INTERVAL_S", bad)
+    assert max_lag_age_s() == 20

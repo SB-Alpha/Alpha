@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,9 +15,24 @@ from .schemas import CheckStatus, CutoverDecision, CutoverReadiness, ReadinessCh
 # 임시 기준값입니다. 팀 합의 후 바꿉니다.
 MAX_REPLICATION_LAG_BYTES = 1024 * 1024
 # 복제 지연 값이 이보다 오래 갱신되지 않으면 지금 값으로 보지 않습니다 (확인 중).
-# 에이전트 보고 주기(db_migration log_interval_s, 기본 10초)의 두 번입니다. 한 번 놓쳐도 판정이 흔들리지 않고,
-# a333af6e 처럼 30초 전 값으로 "가능"을 내지는 않습니다.
-MAX_LAG_AGE_S = 20.0
+# 기준은 에이전트가 지표를 다시 재는 주기(cdc_agent config METRICS_INTERVAL_S)의 두 번입니다. 승인 대기
+# (cutover_ready) 중에는 백엔드가 더 자주 물어도 에이전트가 그 주기마다만 재므로, 주기보다 짧은 기준은 판정이
+# 오락가락합니다 (softwareDefine 실측: 30초 주기에 20초 기준이면 28% 가 확인 중). 한 번 놓쳐도 흔들리지 않고,
+# a333af6e 처럼 30초 전 값으로 "가능"을 내지 않으려면 에이전트 주기를 10초로 두고 기준 20초를 씁니다.
+# 에이전트 주기를 바꾸지 못한 환경은 CDC_AGENT_METRICS_INTERVAL_S 에 에이전트와 같은 값을 넣습니다 (기준도 두 배로 늘어남).
+AGENT_METRICS_INTERVAL_ENV = "CDC_AGENT_METRICS_INTERVAL_S"
+DEFAULT_AGENT_METRICS_INTERVAL_S = 10.0
+
+
+def max_lag_age_s() -> float:
+    """지연 값이 지금 값으로 인정되는 최대 나이 (초). 에이전트 측정 주기의 두 번입니다."""
+    try:
+        interval = float(os.getenv(AGENT_METRICS_INTERVAL_ENV, DEFAULT_AGENT_METRICS_INTERVAL_S))
+    except ValueError:
+        interval = DEFAULT_AGENT_METRICS_INTERVAL_S
+    if not math.isfinite(interval) or interval <= 0:
+        interval = DEFAULT_AGENT_METRICS_INTERVAL_S
+    return 2 * interval
 
 _NOT_PROVIDED = "미제공"
 
@@ -82,11 +98,12 @@ def _lag_check(run: RunStatus, now: datetime) -> ReadinessCheck:
     if measured is None:
         return ReadinessCheck(**base, status="pass", detail=f"{detail} · 측정 시각 미제공")
     age = (now - measured).total_seconds()
-    if age > MAX_LAG_AGE_S:
+    limit = max_lag_age_s()
+    if age > limit:
         return ReadinessCheck(
             **base,
             status="unknown",
-            detail=f"확인 중: 마지막 측정 {age:.0f}초 전 ({value:,.0f} bytes, 기준 {MAX_LAG_AGE_S:.0f}초 이내 값만 통과)",
+            detail=f"확인 중: 마지막 측정 {age:.0f}초 전 ({value:,.0f} bytes, 기준 {limit:.0f}초 이내 값만 통과)",
         )
     return ReadinessCheck(**base, status="pass", detail=f"{detail} · {max(age, 0):.0f}초 전 측정")
 
