@@ -58,6 +58,9 @@ class DbInfo(BaseModel):
     # 클라우드 중립 DB 크기. 직접 입력처럼 인스턴스 클래스가 없는 원본에서 채웁니다. 없으면 클래스 표로 계산
     memory_gib: float | None = None
     vcpu: int | None = None
+    # 복제 슬롯 여유 (PG 카탈로그 조회). CDC 가 슬롯을 하나 만들어야 합니다. 모르면 None
+    max_replication_slots: int | None = None
+    replication_slots_in_use: int | None = None
 
 
 class InventoryForPlanning(BaseModel):
@@ -94,6 +97,8 @@ class PlanCheck(BaseModel):
         "pg_version_compatible",
         "logical_replication_enabled",
         "primary_keys_present",
+        "table_names_supported",
+        "replication_slot_available",
         "image_available",
     ]
     title: str

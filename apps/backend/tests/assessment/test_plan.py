@@ -52,7 +52,7 @@ def _check(plan, check_id):
 
 def test_all_checks_pass_is_approvable():
     plan = run(_ready_input())
-    assert [c.result for c in plan.checks] == ["pass"] * 4
+    assert [c.result for c in plan.checks] == ["pass"] * 5  # 슬롯 값이 없어 슬롯 검사는 빠짐
     assert plan.approvable and plan.blocking == []
     infra = plan.target_infra
     assert infra.cpu == 1 and infra.memory == 1024
@@ -195,3 +195,54 @@ def test_image_move_step_names_the_real_source_registry(uri, label):
     # AWS 가 아닌 원본(#56 manual)에서도 "ECR" 이라고 쓰지 않게 합니다
     step = rules.build_steps(uri)[1]
     assert step.action == f"이미지 이동 {label} → Artifact Registry"
+
+
+# --- CDC 에이전트 사전 검사와 같은 기준 (cdc_agent/db.py precheck_source, models.py TABLE_PATTERN) ---
+
+@pytest.mark.parametrize("version", ["10.23", "14.9", "15.8"])
+def test_source_older_than_16_fails_like_cdc_precheck(version):
+    plan = run(_ready_input(engine_version=version))
+    assert _check(plan, "pg_version_compatible").result == "fail"
+    assert not plan.approvable
+
+
+def test_real_wal_level_wins_over_rds_parameter():
+    # 파라미터는 켰지만 재시작 전이라 실제 wal_level 은 replica: CDC 가 막히므로 통과시키면 안 됨
+    plan = run(_ready_input(logical_replication=True, wal_level="replica"))
+    check = _check(plan, "logical_replication_enabled")
+    assert check.result == "fail" and "아직 적용되지 않았습니다" in check.detail
+    assert not plan.approvable
+
+
+def test_wal_level_logical_passes_even_without_rds_parameter():
+    plan = run(_ready_input(logical_replication=None, wal_level="logical"))
+    assert _check(plan, "logical_replication_enabled").result == "pass"
+
+
+@pytest.mark.parametrize("schema, name", [("public", "OrderItems"), ("Sales", "orders"), ("public", "order-items")])
+def test_table_names_cdc_cannot_take_block_approval(schema, name):
+    tables = [{"schema_name": schema, "name": name, "has_primary_key": True}]
+    plan = run(_ready_input(tables=tables))
+    check = _check(plan, "table_names_supported")
+    assert check.result == "fail" and f"{schema}.{name}" in check.detail
+    assert not plan.approvable
+
+
+def test_full_replication_slots_block_approval():
+    plan = run(_ready_input(max_replication_slots=5, replication_slots_in_use=5))
+    assert _check(plan, "replication_slot_available").result == "fail"
+    assert not plan.approvable
+
+
+def test_free_replication_slot_passes():
+    plan = run(_ready_input(max_replication_slots=10, replication_slots_in_use=2))
+    assert _check(plan, "replication_slot_available").result == "pass"
+    assert plan.approvable
+    assert not any(r.title == "복제 슬롯 여유 미확인" for r in plan.risks)
+
+
+def test_unknown_replication_slots_are_a_risk_not_a_check():
+    # 직접 입력 원본은 슬롯 값이 없을 수 있어 승인을 막지 않고 risks 로만 알립니다
+    plan = run(_ready_input())
+    assert all(c.id != "replication_slot_available" for c in plan.checks)
+    assert any(r.title == "복제 슬롯 여유 미확인" for r in plan.risks)

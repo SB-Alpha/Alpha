@@ -15,7 +15,11 @@ from .schemas import (
 )
 
 TARGET_PG_MAJOR = 16  # 목적지 Cloud SQL PostgreSQL 16 고정 (MVP 범위)
-MIN_SOURCE_PG_MAJOR = 10  # pgoutput 논리 복제 최소 버전
+# CDC 에이전트 사전 검사와 같은 기준 (infra/db_migration/agent/cdc_agent/db.py precheck_source:
+# server_version_num >= 160000). 더 낮은 버전을 통과시키면 승인 뒤 CDC 단계에서 막힙니다.
+MIN_SOURCE_PG_MAJOR = 16
+# CDC 에이전트가 받는 테이블 이름 형식 (cdc_agent/models.py TABLE_PATTERN 과 같음). 소문자 schema.table 만
+CDC_TABLE_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$")
 
 # 원본이 값을 안 줬을 때 쓰는 기본값. 쓰이면 risks 에 남깁니다.
 DEFAULT_PORT = 8080
@@ -74,7 +78,7 @@ def run_checks(inv: InventoryForPlanning) -> list[PlanCheck]:
     elif major < MIN_SOURCE_PG_MAJOR:
         checks.append(PlanCheck(
             id="pg_version_compatible", title="PostgreSQL 버전 호환", result="fail",
-            detail=f"원본 {major} 은 논리 복제(pgoutput)를 지원하지 않습니다 (최소 {MIN_SOURCE_PG_MAJOR}).",
+            detail=f"원본 {major} 은 CDC 가 지원하지 않습니다 (원본 PostgreSQL {MIN_SOURCE_PG_MAJOR} 이상 필요).",
         ))
     else:
         checks.append(PlanCheck(
@@ -82,17 +86,29 @@ def run_checks(inv: InventoryForPlanning) -> list[PlanCheck]:
             detail=f"원본 {db.engine_version} → 목적지 {TARGET_PG_MAJOR}",
         ))
 
-    # 2. 논리 복제 가능
-    if db.logical_replication is True or (db.wal_level or "").lower() == "logical":
+    # 2. 논리 복제 가능. 실제로 조회한 wal_level 이 있으면 그 값이 우선입니다
+    #    (rds.logical_replication=1 이어도 재시작 전이면 wal_level 은 아직 replica 일 수 있음).
+    wal = (db.wal_level or "").strip().lower() or None
+    if wal == "logical":
         checks.append(PlanCheck(
             id="logical_replication_enabled", title="논리 복제 설정", result="pass",
-            detail="rds.logical_replication 또는 wal_level=logical 확인",
+            detail="wal_level=logical 확인",
         ))
-    elif db.logical_replication is False or db.wal_level is not None:
+    elif wal is not None:
+        pending = " rds.logical_replication 은 켜져 있지만 아직 적용되지 않았습니다." if db.logical_replication else ""
         checks.append(PlanCheck(
             id="logical_replication_enabled", title="논리 복제 설정", result="fail",
-            detail=f"논리 복제가 꺼져 있습니다 (wal_level={db.wal_level or '미제공'}). "
-                   "켜려면 원본 DB 재시작이 필요합니다.",
+            detail=f"wal_level={wal} 입니다 (logical 필요).{pending} 켜려면 원본 DB 재시작이 필요합니다.",
+        ))
+    elif db.logical_replication is True:
+        checks.append(PlanCheck(
+            id="logical_replication_enabled", title="논리 복제 설정", result="pass",
+            detail="rds.logical_replication=1 확인 (wal_level 은 조회하지 못함)",
+        ))
+    elif db.logical_replication is False:
+        checks.append(PlanCheck(
+            id="logical_replication_enabled", title="논리 복제 설정", result="fail",
+            detail="논리 복제가 꺼져 있습니다 (rds.logical_replication=0). 켜려면 원본 DB 재시작이 필요합니다.",
         ))
     else:
         checks.append(PlanCheck(
@@ -124,6 +140,27 @@ def run_checks(inv: InventoryForPlanning) -> list[PlanCheck]:
                 id="primary_keys_present", title="모든 테이블에 PK", result="pass",
                 detail=f"{len(db.tables)}개 테이블 모두 PK 있음",
             ))
+
+    # 3-1. 테이블 이름이 CDC 가 받는 형식인지 (목록이 없으면 PK 검사가 이미 unknown 으로 막음)
+    if db.tables:
+        bad = [f"{t.schema_name}.{t.name}" for t in db.tables
+               if not CDC_TABLE_PATTERN.match(f"{t.schema_name}.{t.name}")]
+        checks.append(PlanCheck(
+            id="table_names_supported", title="CDC 가 받는 테이블 이름", result="fail" if bad else "pass",
+            detail=("소문자·숫자·_ 로만 된 schema.table 이 아닌 테이블: " + ", ".join(bad)) if bad
+            else "모든 테이블 이름이 CDC 형식과 맞음",
+        ))
+
+    # 3-2. 복제 슬롯 여유. 조회한 값이 있을 때만 판정합니다 (직접 입력 원본은 값이 없을 수 있어 risks 로 남김)
+    if db.max_replication_slots is not None and db.replication_slots_in_use is not None:
+        free = db.max_replication_slots - db.replication_slots_in_use
+        detail = f"사용 중 {db.replication_slots_in_use} / 최대 {db.max_replication_slots}"
+        if free < 1:
+            detail += ". CDC 가 슬롯을 만들 수 없습니다 (max_replication_slots 를 늘리거나 안 쓰는 슬롯 정리)"
+        checks.append(PlanCheck(
+            id="replication_slot_available", title="복제 슬롯 여유", result="pass" if free >= 1 else "fail",
+            detail=detail,
+        ))
 
     # 4. 이미지 확보 가능 (주소가 있는지까지만. 실제 pull 은 provisioning 이 확인)
     if app.image_uri:
@@ -266,6 +303,10 @@ def collect_risks(inv: InventoryForPlanning, checks: list[PlanCheck]) -> list[Ri
 
     if inv.db.database_name is None:
         risks.append(Risk(level="medium", title="DB 이름 미제공", detail="목적지 DB 이름을 정할 수 없습니다."))
+
+    if inv.db.max_replication_slots is None or inv.db.replication_slots_in_use is None:
+        risks.append(Risk(level="medium", title="복제 슬롯 여유 미확인",
+                          detail="원본에 빈 복제 슬롯이 없으면 CDC 시작 단계에서 실패합니다."))
 
     if inv.db.publicly_accessible is True:
         risks.append(Risk(

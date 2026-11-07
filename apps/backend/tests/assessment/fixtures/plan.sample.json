@@ -39,6 +39,12 @@
       "detail": "1개 테이블 모두 PK 있음"
     },
     {
+      "id": "table_names_supported",
+      "title": "CDC 가 받는 테이블 이름",
+      "result": "pass",
+      "detail": "모든 테이블 이름이 CDC 형식과 맞음"
+    },
+    {
       "id": "image_available",
       "title": "컨테이너 이미지 확보",
       "result": "unknown",
@@ -89,6 +95,12 @@
       "source": "rule"
     },
     {
+      "level": "medium",
+      "title": "복제 슬롯 여유 미확인",
+      "detail": "원본에 빈 복제 슬롯이 없으면 CDC 시작 단계에서 실패합니다.",
+      "source": "rule"
+    },
+    {
       "level": "low",
       "title": "Cloud SQL 생성 시간",
       "detail": "Cloud SQL 생성은 오래 걸릴 수 있습니다. 실제 소요 시간은 provisioning 측정값을 따릅니다.",
@@ -109,7 +121,7 @@
   ],
   "summary": [
     "target-app 를 GCP asia-northeast3 의 Cloud Run(1 vCPU, 512MiB) + Cloud SQL PostgreSQL 16 로 옮깁니다.",
-    "필수 조건 2/4 통과.",
+    "필수 조건 3/5 통과.",
     "승인 불가: 논리 복제 설정, 컨테이너 이미지 확보 확인 필요."
   ],
   "summary_source": "rule",
