@@ -453,3 +453,25 @@ def test_arbitrage_is_not_made_up_when_an_input_is_unknown():
     assert arbitrage_request(CostRequest(**{**base, "app_vcpu": None}, traffic=full)) is None
     azure_source = {**base, "source_cloud": "azure", "source_region": "koreacentral"}
     assert arbitrage_request(CostRequest(**azure_source, traffic=full)) is None
+
+
+@pytest.mark.parametrize("target", [{"target_app_vcpu": 2}, {"target_app_memory_mib": 4096}])
+def test_arbitrage_does_not_price_a_different_target_as_the_source_size(target):
+    from app.features.finops.router import arbitrage_request
+
+    req = _req(**target, traffic=Traffic(idle_percent=70, rps=2, avg_latency_ms=100,
+                                       read_ratio=0.8, avg_response_kb=4))
+    assert arbitrage_request(req) is None
+    same_size = req.model_copy(update={"target_app_vcpu": req.app_vcpu,
+                                      "target_app_memory_mib": req.app_memory_mib})
+    assert arbitrage_request(same_size) is not None
+
+
+def test_crossover_uses_and_describes_the_target_size():
+    req = _req(target_app_vcpu=2, target_app_memory_mib=4096)
+    gcp = estimate.GcpPrices(GCP_SKUS.__getitem__)
+    inp = estimate.build_input(req, aws=AwsPrices(FakePricingClient()), gcp=gcp,
+                               azure=AzurePrices(fake_azure_query), today=TODAY)
+    assert inp.crossover.cloud_run_instance_monthly_usd == round(gcp.app_instance_month(req.for_candidate(), "asia-northeast3"), 2)
+    note = next(n for n in inp.assumptions if n.startswith("교차점:"))
+    assert "같은 크기" not in note and "입력한 원본·목적지 크기" in note

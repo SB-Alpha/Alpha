@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .context import now
-from .runners import _agent_is_simulated, _aware_datetime
+from .runners import _aware_datetime, _require_real_agent
 from .schemas import (
     PreflightCheck,
     PreflightReport,
@@ -90,6 +90,8 @@ def _measure_failed(metrics: Mapping[str, Any]) -> bool:
 def _default_get_job(job_id: str) -> Any:
     from app.features.db_migration.client import AgentSettings, CdcAgentClient
 
+    # 모의 에이전트의 값으로 go 를 말하지 않습니다. 거부되면 _load_job 이 연결 실패처럼 unknown 으로 둡니다.
+    _require_real_agent()
     return CdcAgentClient(AgentSettings.from_env()).get_job(job_id)
 
 
@@ -247,10 +249,7 @@ def _agent_checks(job: Mapping[str, Any] | None, max_lag_bytes: Any) -> list[Pre
     return [_guarded(check_id, check) for check_id, check in checks]
 
 
-def _verdict(checks: list[PreflightCheck], simulated: bool) -> PreflightVerdict:
-    # 모의 에이전트는 실제 전환 준비를 보여 주지 못하므로 go 도 no_go 도 말하지 않습니다.
-    if simulated:
-        return "unverified"
+def _verdict(checks: list[PreflightCheck]) -> PreflightVerdict:
     statuses = {check.status for check in checks}
     if "fail" in statuses:
         return "no_go"
@@ -271,11 +270,9 @@ def evaluate_cutover(
         _guarded("target_ready", lambda: _check_target_ready(run, http_get)),
         _guarded("worker_target", lambda: _check_worker_target(run, worker_target)),
     ]
-    simulated = _agent_is_simulated()
     return PreflightReport(
         run_id=run.run_id,
-        verdict=_verdict(checks, simulated),
-        simulated=simulated,
+        verdict=_verdict(checks),
         checks=checks,
         measured_at=now(),
     )

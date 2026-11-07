@@ -35,7 +35,6 @@ def built(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
-    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")  # CDC 설정 검사는 이 테스트의 관심사가 아니다
     monkeypatch.setenv("CDC_AGENT_URL", "https://cdc.example")
     monkeypatch.delenv("AWS_ACCOUNT_ID", raising=False)
     monkeypatch.delenv(runners.ALLOW_SAME_ACCOUNT_ENV, raising=False)

@@ -80,7 +80,7 @@ provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어
 - 미제공 항목만 있으면 `acknowledge_unknown: true` 일 때만 승인합니다.
 - 복제 지연 기준값(1MiB)은 임시값입니다. 팀 합의 후 바꿉니다.
 - 초기 복사·행 수 불일치 테이블: 쓰기 중에는 두 DB 를 다른 순간에 읽어 값이 오가므로, 에이전트가 `cutover_ready` 로 올린 뒤의 순간값으로는 막지 않습니다. 이 값은 행 수만 비교합니다. 내용 비교는 전환 시점 스냅샷으로 트래픽을 푼 뒤에 합니다 (`verification`).
-- CDC 설정 사전 점검: `provisioning` runner 는 목적지를 만들기 전에 `CDC_AGENT_URL` 과 OCI 설정(`vpn.OciSettings`)을 봅니다. 값이 없으면 변수 이름을 남기고 실패합니다. 시뮬레이션은 보지 않습니다. 클러스터 상태와 대역 겹침은 VPN 을 만들기 전에 `db_migration` 이 봅니다.
+- CDC 설정 사전 점검: `provisioning` runner 는 목적지를 만들기 전에 `CDC_AGENT_URL` 과 OCI 설정(`vpn.OciSettings`)을 봅니다. 값이 없으면 변수 이름을 남기고 실패합니다. `CDC_AGENT_URL` 이 mock 주소면 설정 오류로 실패합니다. `CDC_USE_EXISTING_VPN` 이 켜져 있으면 VPN 을 미리 띄운 것이므로 OCI 설정은 보지 않습니다. 클러스터 상태와 대역 겹침은 VPN 을 만들기 전에 `db_migration` 이 봅니다.
 - `cdc_error`: CDC 추적이 streaming 이후 끝나면 `db_migration` 단계 지표에 남아 승인을 막습니다. 전환이 끝나 돌아온 경우는 정상 종료라 남기지 않습니다. 끝난 단계는 다시 열지 않고 지표만 갱신합니다.
 
 ## 중단과 복제 자원 정리
@@ -89,13 +89,13 @@ provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어
 - 전환을 시작한 작업은 자동으로 정리하지 않습니다(`failed`). 목적지에 새 쓰기가 있을 수 있어 트래픽과 데이터를 사람이 확인해야 합니다.
 - CDC 추적 스레드는 "다음 `ctx.report()` 때 멈춤" 의 예외입니다. 중단을 봐도 스스로 정리하지 않고 추적을 이어 갑니다. 정리는 `clean_up_cdc` 한 곳에서만 합니다. 정리가 작업을 멈추면 추적이 `aborted` 를 보고 VPN 을 지우고, 정리가 거부되면 복제와 VPN 이 그대로 남습니다.
 
-## 화면 지표와 시뮬레이션
+## 화면 지표
 - `secret_encryption`: 요청의 자격 증명 참조가 모두 `secret://` 이고 암호화 저장소에 실제로 있을 때만 `ENCRYPTED`. 확인할 수 없으면 "미제공" 입니다.
 - `target_db_network`: provisioning 이 돌려준 목적지 DB 주소가 사설 IP 면 `PRIVATE`, 아니면 `PUBLIC` (db_migration `UI_API.md` 와 같은 키). 예전 run 의 `cloud_sql_private_ip`(`SECURE`/`PUBLIC`)는 화면이 같은 뜻으로 읽습니다. 주소가 IP 가 아니면 보고하지 않습니다. AWS 목적지는 `db.private_ip` 에 RDS 호스트 이름이 들어가므로 지금은 보고되지 않고 화면에 "미제공"으로 나옵니다.
 - `serving`: 에이전트의 `traffic_mode` 가 `TARGET` 이면 `target` 입니다 (db_migration 계약의 `source`/`target`). 예전 run 의 `gcp` 는 화면이 `target` 으로 읽습니다.
 - `cutover_seconds`·`cutover_seconds_source`: 팀 합의(박준서, 11/5)대로 Worker 의 `released_at - hold_started_at`(에이전트 `evidence.cutover.t0`·`t1`)을 씁니다 (`worker`). 두 값을 쓸 수 없으면 에이전트 `cutover_ms` 를 씁니다 (`agent`). 둘 다 없으면 "미제공" 입니다.
 - `cutover_steps`: 에이전트 `evidence.cutover.steps` 의 `step`·`elapsed_ms`·`waited_ms`·`mismatch`·`error`(접속 정보를 가린 뒤 300자까지)만 옮깁니다. 진행 중과 실패 직전에도 보고합니다.
-- `cutover_sequence`·`cutover_sequence_missing`: 성공 시 순서 검증 결과(`VERIFIED`/`INCOMPLETE`)와 빠진 단계입니다. 세 번째 단계는 `snapshot_fixed` 이고, 이전 에이전트의 `validated` 도 인정합니다. 증적이 없으면(시뮬레이터 포함) 단계 지표는 모두 "미제공" 입니다.
+- `cutover_sequence`·`cutover_sequence_missing`: 성공 시 순서 검증 결과(`VERIFIED`/`INCOMPLETE`)와 빠진 단계입니다. 세 번째 단계는 `snapshot_fixed` 이고, 이전 에이전트의 `validated` 도 인정합니다. 증적이 없으면 단계 지표는 모두 "미제공" 입니다.
 - `verification`: 전환 시점 스냅샷 비교 결과입니다. 전환 시간은 트래픽을 푼 시점에 확정하고, 단계는 이 값이 정해질 때까지 기다립니다.
   - `running`(비교 중), `match`(일치), `mismatch`(불일치), `unverifiable`(비교를 끝내지 못함)은 에이전트 값이고, `unknown`(기다리는 동안 결과를 못 받음)은 workflows 값입니다. 보고가 없는 에이전트는 기다리지 않고 "미제공" 입니다.
   - `mismatch` 는 단계를 실패로 남기고 `cutover_outcome` 을 `post_switch_failed` 로 바꿉니다. `unverifiable`·`unknown` 은 데이터가 다르다는 뜻이 아니어서 경고만 남기고 단계는 성공합니다.
@@ -103,11 +103,11 @@ provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어
   - `rolled_back` 은 에이전트 보고만으로 쓰지 않습니다. 복귀 단계에 실패가 없고, Worker 상태가 `mode`·`next_origin` 모두 `SOURCE` 일 때만 씁니다. `WORKER_URL` 이 없거나 읽지 못하면 `unknown` 입니다. 전환 요청 응답을 잃은 경우도 `unknown` 입니다.
   - 결과를 모르는데 트래픽이 원본이라고 확인되지 않으면 중단 뒤 복제 자원을 자동으로 정리하지 않습니다.
   - 불확실한 결과로 승인 ② 대기에 돌아오면, 승인 조건이 막아도 메모를 남겨 `cutover` 를 수동 입력으로 기록할 수 있습니다. 전환을 다시 요청하지 않습니다.
-- `failed_requests`·`probe_*`: `ALPHA_PROBE_URL`(Worker 공개 주소)이 있으면 전환 중 프로버가 GET 으로 실측합니다. 응답 코드 400 이상, 연결 실패, 시간 초과를 실패로 셉니다. 읽기만 잽니다. 주소가 없으면 "미제공" 입니다. 시뮬레이션에서는 프로버를 켜지 않으며, 시뮬레이터가 보낸 값이 그대로 보이고 화면에 시뮬레이션으로 표시합니다. 에이전트 loadcheck 결과를 이 값으로 보고할지는 미정입니다 (박준서).
+- `failed_requests`·`probe_*`: `ALPHA_PROBE_URL`(Worker 공개 주소)이 있으면 전환 중 프로버가 GET 으로 실측합니다. 응답 코드 400 이상, 연결 실패, 시간 초과를 실패로 셉니다. 읽기만 잽니다. 주소가 없으면 "미제공" 입니다. 에이전트 loadcheck 결과를 이 값으로 보고할지는 미정입니다 (박준서).
 - `write_requests`·`write_failed_requests`: `WORKER_URL` 이 있으면 전환 뒤 Worker 의 `request_counts` 에서 읽습니다. 보류 시작부터 끝난 실제 쓰기 요청을 세며, 원본 5xx·연결 실패가 실패입니다. 집계가 이번 보류의 것이 아니면(Worker 객체 재시작 등) 보고하지 않습니다.
 - 에이전트 오류 문구: 단계 `error`, 전환 단계 메시지, `cdc_error` 는 저장 전에 주소·포트·사용자·비밀번호·토큰을 가리고 300자로 자릅니다. `measure_error` 는 예외 원문이고 화면이 쓰지 않아 cutover·db_migration 지표로 넘기지 않습니다. 실시간 점검은 이 값을 에이전트에서 직접 읽습니다.
 - `iam_audit_status`: 보내는 모듈이 아직 없어 "미제공" 입니다. 그래서 `COMPLIANT` 배지도 켜지지 않습니다.
-- 시뮬레이션: `CDC_AGENT_URL` 이 비어 있고 `ALPHA_CDC_SIMULATION=1` 일 때만 켜집니다. 실제 URL 이 있으면 실제 에이전트를 부릅니다. 실제 VPN 은 만들지 않고, 화면에 시뮬레이션으로 표시합니다.
+- 시뮬레이션 모드는 지원하지 않습니다. 화면의 모든 값은 실제 CDC 에이전트에서 옵니다. `ALPHA_CDC_SIMULATION=1` 등으로 에이전트 주소가 mock 주소가 되면 provisioning·db_migration·cutover·이전 자원 정리는 시작하지 않고 설정 오류로 실패하며, 전환 전 점검은 에이전트 점검을 `unknown` 으로 둡니다. 중단 시 정리(`clean_up_cdc`)는 주소가 없을 때처럼 손대지 않습니다.
 - AI 진단: `ALPHA_AI_ENABLED=1` + `pip install -e ".[ai]"`. 없으면 규칙 기반으로 진단하고 화면에 그렇게 표시합니다.
 
 ## 전환 전 점검 (`preflight.py`)
@@ -124,7 +124,7 @@ provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어
 | `target_ready` | `app_deploy` 의 `app_url` + `/health/ready` | 200 이면 `pass`, 아니면 `fail`. 수동 입력 주소나 https 가 아닌 주소는 호출하지 않고 `unknown` |
 | `worker_target` | `WorkerClient.get_target()` | `app_url` 과 같으면 `pass`, 저장된 주소가 다르면 `fail`. 저장된 주소가 없으면 Worker 가 설정된 기본 대상을 쓰는 것이라 `unknown`. Worker 미설정이면 `unknown` |
 
-- 판정: `fail` 이 하나라도 있으면 `no_go`, 없고 `unknown` 이 있으면 `unverified`, 그 외는 `go` 입니다. `info` 는 판정에 영향이 없습니다. 시뮬레이션이면 항상 `unverified` 입니다.
+- 판정: `fail` 이 하나라도 있으면 `no_go`, 없고 `unknown` 이 있으면 `unverified`, 그 외는 `go` 입니다. `info` 는 판정에 영향이 없습니다.
 - 에이전트에 연결하지 못하면 앞의 네 점검은 `unknown` 입니다. 예외 원문·호스트·주소는 결과와 로그에 남기지 않습니다.
 
 ## 전환 순서

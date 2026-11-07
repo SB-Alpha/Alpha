@@ -146,13 +146,7 @@ export function RunView() {
           {/* Step 3 포함: 전환 기록 및 물리 전환 시뮬레이션 / 데모 주행 */}
           <CutoverTimeline run={run} />
 
-          <SelfHealingCard
-            run={run}
-            isBusy={isBusy}
-            onApplySimulationInput={(output) =>
-              run.current_stage && act(() => workflows.submitManual(run.run_id, run.current_stage!, output, "시뮬레이션 값"))
-            }
-          />
+          <SelfHealingCard run={run} isBusy={isBusy} />
 
           {/* Step 3 포함: 승인 ② 대기 시 CutoverApprovalPanel 내부에 물리 전환 시뮬레이션 렌더링 */}
           <RunActions

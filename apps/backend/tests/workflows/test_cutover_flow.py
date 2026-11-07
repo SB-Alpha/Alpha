@@ -621,7 +621,7 @@ def test_preflight_returns_the_report_at_cutover_gate(api):
     assert body["gate"] == "cutover"
     assert body["verdict"] == "no_go"
     assert body["advisory"] is True
-    assert body["simulated"] is False
+    assert "simulated" not in body
     assert body["checks"][0]["id"] == "data_match"
     assert api.evaluator.calls == 1
 
@@ -1156,7 +1156,6 @@ def test_failing_final_report_does_not_fail_a_finished_switch(monkeypatch):
 
     monkeypatch.setattr(runners, "prober_from_env", lambda: Prober())
     monkeypatch.setattr(runners, "_cutover_worker", lambda: None)
-    monkeypatch.setattr(runners, "_agent_is_simulated", lambda: False)
     monkeypatch.setattr(runners, "_request_cutover", lambda *a: {"state": "running", "phase": "stabilizing"})
     monkeypatch.setattr(
         runners.ProbedContext, "finish", lambda self, extra=None: (_ for _ in ()).throw(ValueError("store down"))

@@ -52,8 +52,7 @@ def bank(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def no_simulation(monkeypatch):
-    monkeypatch.delenv("ALPHA_CDC_SIMULATION", raising=False)
+def clean_env(monkeypatch):
     monkeypatch.delenv("CDC_AGENT_URL", raising=False)
     monkeypatch.delenv("ALPHA_AI_ENABLED", raising=False)
 

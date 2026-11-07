@@ -71,11 +71,6 @@ function MeasuredFacts({ measured }: { measured: CutoverOverlayFacts }) {
   return (
     <div className="pointer-events-auto rounded-md border border-ink/20 bg-white/95 px-3 py-1 font-mono text-[10px] text-ink/75 shadow-xs">
       <p className="flex flex-wrap items-center gap-x-1">
-        {measured.simulated && (
-          <span className="rounded border border-amber-400 bg-amber-50 px-1 font-semibold text-amber-900">
-            시뮬레이션 값
-          </span>
-        )}
         <span>
           이 run 보고값: 전환 소요 {cutoverSeconds !== null ? `${cutoverSeconds.toFixed(1)}초` : "미제공"} (
           {cutoverSecondsSource ? SECONDS_SOURCE_LABEL[cutoverSecondsSource] : "출처 미제공"}) · 읽기 실패{" "}

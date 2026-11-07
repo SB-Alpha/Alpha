@@ -132,7 +132,6 @@ export interface PreflightReport {
   gate: Gate;
   verdict: PreflightVerdict;
   advisory: boolean;
-  simulated: boolean;
   checks: PreflightCheck[];
   measured_at: string;
 }

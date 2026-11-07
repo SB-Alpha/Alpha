@@ -195,7 +195,7 @@ def crossover_notes(x: Crossover, req: CostRequest) -> list[str]:
     if x.break_even_idle_percent is not None:
         when = ("한 달 내내 켜져 있어도" if x.break_even_idle_percent == 0
                 else f"유휴 {x.break_even_idle_percent:g}% 보다 길면")
-        lines.append(f"교차점: 같은 크기·같은 대수라면 {when} Cloud Run 앱 비용이 Fargate 보다 작습니다 "
+        lines.append(f"교차점: 입력한 원본·목적지 크기에서 같은 대수라면 {when} Cloud Run 앱 비용이 Fargate 보다 작습니다 "
                      f"(Fargate 월 ${x.fargate_app_monthly_usd:,.2f}, Cloud Run 1대 한 달 내내 "
                      f"${x.cloud_run_instance_monthly_usd:,.2f}, 앱 컴퓨팅만).")
     if x.break_even_rps is not None and req.traffic is not None:

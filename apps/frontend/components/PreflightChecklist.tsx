@@ -17,7 +17,6 @@ const STATUS_META: Record<PreflightStatus, StatusMeta> = {
   unknown: { label: "미확인", tone: "text-amber-700" },
   info: { label: "참고", tone: "text-ink/60" },
 };
-const SIMULATED_META: StatusMeta = { label: "시뮬레이션", tone: "text-amber-700" };
 
 const VERDICT_TONE: Record<PreflightVerdict, string> = {
   go: "border-emerald-300 bg-emerald-50 text-emerald-900",
@@ -25,9 +24,7 @@ const VERDICT_TONE: Record<PreflightVerdict, string> = {
   unverified: "border-amber-400 bg-amber-50 text-amber-900",
 };
 
-function statusMeta(check: PreflightCheck, isSimulated: boolean): StatusMeta {
-  // 시뮬레이션의 통과는 실제 통과가 아닙니다.
-  if (isSimulated && check.status === "pass") return SIMULATED_META;
+function statusMeta(check: PreflightCheck): StatusMeta {
   return STATUS_META[check.status] ?? STATUS_META.unknown;
 }
 
@@ -56,22 +53,16 @@ export function PreflightChecklist({ report, isLoading, error }: Props) {
 
   return (
     <div className="space-y-2">
-      {report.simulated ? (
-        <p role="status" className="rounded-lg border-2 border-amber-500 bg-amber-50 p-3 text-sm font-semibold text-amber-950">
-          시뮬레이션 점검입니다. 실제 DB나 전환 상태를 확인한 결과가 아닙니다. 판정: 미확인
-        </p>
-      ) : (
-        <p role="status" className={`rounded-md border px-3 py-2 text-sm font-semibold ${VERDICT_TONE[verdict]}`}>
-          판정: {PREFLIGHT_VERDICT_LABEL[verdict]}
-        </p>
-      )}
+      <p role="status" className={`rounded-md border px-3 py-2 text-sm font-semibold ${VERDICT_TONE[verdict]}`}>
+        판정: {PREFLIGHT_VERDICT_LABEL[verdict]}
+      </p>
 
       {report.checks.length === 0 ? (
         <p className="text-sm text-ink/50">점검 항목 미제공</p>
       ) : (
         <ul className="divide-y divide-ink/10">
           {report.checks.map((check) => {
-            const meta = statusMeta(check, report.simulated);
+            const meta = statusMeta(check);
             return (
               <li key={check.id} className="py-2">
                 <div className="flex justify-between gap-3 text-sm">

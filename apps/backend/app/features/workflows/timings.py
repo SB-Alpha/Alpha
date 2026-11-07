@@ -4,7 +4,7 @@
 - 한 단계의 끝 = 그 단계가 마지막으로 바뀐 시각 (StageStatus.updated_at). 성공한 단계만 셉니다.
 - 수동 입력으로 넘긴 단계, 시각이 없는 단계, 순서가 맞지 않는 단계는 값 없이 이유만 남깁니다 (지어내지 않음).
 - baseline 은 지난 run 들의 실측 분포(최소·중앙값·최대)입니다. "예상"이 아니라 "과거 N회 실측" 으로 보여 주세요.
-  모의(simulated) 실행이 섞인 run 은 빼고, 표본 수를 함께 돌려줍니다. 데이터 크기·클라우드 상태에 따라 달라집니다.
+  예전에 저장된 모의(simulated) 실행이 섞인 run 은 빼고, 표본 수를 함께 돌려줍니다. 데이터 크기·클라우드 상태에 따라 달라집니다.
 - 한계: 같은 단계를 다시 시도(retry)했으면 실패한 시도의 시간도 들어갑니다 (시도별 시각은 저장되지 않음).
 """
 
@@ -115,6 +115,7 @@ def timing_baseline(runs: list[RunStatus]) -> TimingBaseline:
 def _is_real_success(run: RunStatus) -> bool:
     if run.state != WorkflowState.SUCCEEDED:
         return False
+    # simulated 지표는 시뮬레이션을 없애기 전에 저장된 예전 run 을 거르기 위한 것입니다. 새 run 에는 남지 않습니다.
     if any(s.manual or s.metrics.get("simulated") for s in run.stages):
         return False
     return True

@@ -45,7 +45,6 @@ const ROSE = "bg-rose-50 text-rose-800";
 function preflightWarning(isLoading: boolean, report: PreflightReport | null): Warning | null {
   if (isLoading) return { text: "점검이 끝나지 않았습니다. 지금 승인하면 결과를 보지 않고 전환합니다.", tone: AMBER };
   if (report === null) return { text: "점검 결과가 없습니다. 지금 승인하면 점검 없이 전환합니다.", tone: AMBER };
-  if (report.simulated) return { text: "시뮬레이션 결과라 실제 상태를 확인하지 못했습니다.", tone: AMBER };
   const verdict = preflightVerdict(report);
   if (verdict === "no_go") return { text: "실패 항목이 있습니다. 위험을 확인한 뒤 판단하세요.", tone: ROSE };
   if (verdict === "unverified") return { text: "확인하지 못한 항목이 있습니다. 직접 확인한 뒤 판단하세요.", tone: AMBER };

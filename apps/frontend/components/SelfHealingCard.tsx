@@ -7,7 +7,6 @@ import { workflows, type RunStatus, type SelfHealingDiagnosis } from "@/lib/work
 type Props = {
   run: RunStatus;
   isBusy: boolean;
-  onApplySimulationInput: (input: Record<string, unknown>) => void;
 };
 
 /** 어느 실패에 대한 응답인지 key 로 남깁니다. key 가 다르면 지난 실패의 결과이므로 보여주지 않습니다. */
@@ -17,7 +16,7 @@ type DiagnosisResult = {
   error: string | null;
 };
 
-export function SelfHealingCard({ run, isBusy, onApplySimulationInput }: Props) {
+export function SelfHealingCard({ run, isBusy }: Props) {
   const isFailed = run.state === "failed";
   const runId = run.run_id;
   const failureKey = `${runId}:${run.updated_at}`;
@@ -61,9 +60,6 @@ export function SelfHealingCard({ run, isBusy, onApplySimulationInput }: Props) 
       setIsRediagnosing(false);
     }
   };
-
-  const simulationInput = diagnosis?.suggested_manual_input;
-  const hasSimulationInput = !!simulationInput && Object.keys(simulationInput).length > 0;
 
   return (
     <section className="rounded-lg border-2 border-amber-500/30 bg-amber-50/50 p-4 shadow-sm">
@@ -126,22 +122,6 @@ export function SelfHealingCard({ run, isBusy, onApplySimulationInput }: Props) 
               ))}
             </ol>
           </div>
-
-          {hasSimulationInput && (
-            <div className="mt-2 border-t border-amber-200/40 pt-2">
-              <p className="mb-2 text-xs text-amber-900/80">
-                시뮬레이션 전용 값입니다. 실제 인프라가 아니며 이 단계는 수동으로 표시됩니다.
-              </p>
-              <button
-                type="button"
-                disabled={isBusy}
-                onClick={() => onApplySimulationInput(simulationInput)}
-                className="rounded bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white shadow hover:bg-amber-700 disabled:opacity-50"
-              >
-                시뮬레이션 값으로 수동 진행
-              </button>
-            </div>
-          )}
         </div>
       )}
     </section>

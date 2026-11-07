@@ -7,7 +7,6 @@ from unittest.mock import patch
 import pytest
 from fastapi import HTTPException
 
-from app.features.db_migration.schemas import TargetInput
 from app.features.workflows.healer import (
     AiDiagnosis,
     SelfHealingDiagnosis,
@@ -57,18 +56,11 @@ def _sample_run(
 
 
 @pytest.fixture
-def no_simulation(monkeypatch):
-    monkeypatch.delenv("ALPHA_CDC_SIMULATION", raising=False)
+def no_agent(monkeypatch):
     monkeypatch.delenv("CDC_AGENT_URL", raising=False)
 
 
-@pytest.fixture
-def simulation(monkeypatch):
-    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
-    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
-
-
-def test_terraform_missing_gives_no_invented_input_outside_simulation(no_simulation):
+def test_terraform_missing_gives_no_invented_input(no_agent):
     diag = _rule_based_diagnosis(StageName.PROVISIONING, TERRAFORM_MISSING)
     assert diag.category == "environment_dependency"
     assert diag.diagnosed_by == "rule"
@@ -76,26 +68,15 @@ def test_terraform_missing_gives_no_invented_input_outside_simulation(no_simulat
     assert diag.suggested_manual_input is None
 
 
-def test_real_agent_url_gives_no_invented_input_even_with_simulation_flag(monkeypatch):
-    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
-    monkeypatch.setenv("CDC_AGENT_URL", "https://cdc.example")
-    assert _rule_based_diagnosis(StageName.PROVISIONING, TERRAFORM_MISSING).suggested_manual_input is None
-
-
-def test_simulation_input_passes_db_migration_validation_and_is_marked(simulation):
-    fixture = _rule_based_diagnosis(StageName.PROVISIONING, TERRAFORM_MISSING).suggested_manual_input
-    assert fixture["simulated"] is True
-    TargetInput.model_validate(fixture["target"])
-
-
-def test_simulation_input_for_app_deploy_is_not_marked_healthy(simulation):
-    fixture = _rule_based_diagnosis(StageName.APP_DEPLOY, TERRAFORM_MISSING).suggested_manual_input
-    assert fixture["simulated"] is True
-    assert fixture["healthy"] is False
-
-
-def test_simulation_input_is_not_offered_for_other_stages(simulation):
-    assert _rule_based_diagnosis(StageName.CUTOVER, TERRAFORM_MISSING).suggested_manual_input is None
+@pytest.mark.parametrize("stage", [StageName.PROVISIONING, StageName.APP_DEPLOY, StageName.CUTOVER])
+@pytest.mark.parametrize("agent_url", [None, "https://cdc.example", "mock://agent"])
+def test_rules_never_invent_manual_input(monkeypatch, stage, agent_url):
+    # 실제 인프라가 아닌 값을 수동 입력 추천으로 주지 않습니다. 에이전트 주소가 무엇이든 같습니다.
+    if agent_url is None:
+        monkeypatch.delenv("CDC_AGENT_URL", raising=False)
+    else:
+        monkeypatch.setenv("CDC_AGENT_URL", agent_url)
+    assert _rule_based_diagnosis(stage, TERRAFORM_MISSING).suggested_manual_input is None
 
 
 def test_rule_based_cdc_agent_url_missing():
@@ -105,7 +86,13 @@ def test_rule_based_cdc_agent_url_missing():
     assert len(diag.action_plan) == 3
 
 
-def test_diagnose_run_uses_rules_when_ai_disabled(monkeypatch, no_simulation):
+def test_rule_based_cdc_agent_url_points_to_the_real_agent_status():
+    plan = " ".join(_rule_based_diagnosis(StageName.CUTOVER, "CDC_AGENT_URL 미설정").action_plan)
+    assert "/status" in plan
+    assert "시뮬레이션" not in plan and "ALPHA_CDC_SIMULATION" not in plan
+
+
+def test_diagnose_run_uses_rules_when_ai_disabled(monkeypatch, no_agent):
     monkeypatch.delenv("ALPHA_AI_ENABLED", raising=False)
     diag = diagnose_run(_sample_run())
     assert diag.category == "environment_dependency"
@@ -118,7 +105,7 @@ def test_diagnose_run_picks_the_failed_stage(monkeypatch):
     assert "db_migration" in diagnose_run(run).root_cause
 
 
-def test_diagnose_run_falls_back_on_ai_exception(monkeypatch, no_simulation):
+def test_diagnose_run_falls_back_on_ai_exception(monkeypatch, no_agent):
     monkeypatch.setenv("ALPHA_AI_ENABLED", "1")
     with patch("app.features.workflows.healer._ask_claude_healer", side_effect=RuntimeError("API error")):
         diag = diagnose_run(_sample_run())
@@ -174,7 +161,7 @@ def test_ai_call_payload_scrubs_credentials_and_urls(monkeypatch):
     assert "[숨김]" in content["error_message"]
 
 
-def test_diagnosis_endpoint_returns_report_for_failed_run(no_simulation, monkeypatch):
+def test_diagnosis_endpoint_returns_report_for_failed_run(no_agent, monkeypatch):
     monkeypatch.delenv("ALPHA_AI_ENABLED", raising=False)
     engine = SimpleNamespace(get=lambda run_id: _sample_run())
     assert isinstance(get_diagnosis("mig-test-healer-1", engine), SelfHealingDiagnosis)
