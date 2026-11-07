@@ -57,7 +57,6 @@ export function CutoverApprovalPanel({ run, runId, readiness, isBusy, isTrafficU
   const [isUnknownConfirmed, setIsUnknownConfirmed] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [result, setResult] = useState<PreflightResult | null>(null);
-  const [sequenceTrigger, setSequenceTrigger] = useState(0);
 
   const requestKey = `${runId}:${attempt}`;
   const current = result?.key === requestKey ? result : null;
@@ -94,16 +93,12 @@ export function CutoverApprovalPanel({ run, runId, readiness, isBusy, isTrafficU
   const isUnknownAcknowledged = decision === "needs_confirmation" && isUnknownConfirmed;
   const canApprove = hasApprover && (decision === "go" || isUnknownAcknowledged);
 
+  // 승인은 애니메이션을 시작하지 않습니다. 아래 전환 트래픽 뷰는 실제 Worker 상태만 따라갑니다.
   const handleApproveClick = async () => {
     try {
-      const ok = await onApprove(comment, approver, displayed, isUnknownAcknowledged);
-      // 승인 API가 성공(true)을 반환한 경우에만 전환 시뮬레이션 애니메이션을 트리거합니다.
-      // API 실패나 거부로 false가 반환되거나 오류가 발생하면 트리거하지 않습니다.
-      if (ok === true) {
-        setSequenceTrigger((n) => n + 1);
-      }
+      await onApprove(comment, approver, displayed, isUnknownAcknowledged);
     } catch {
-      // 승인이 거절되거나 실패하면 전환 시뮬레이션 애니메이션을 시작하지 않습니다.
+      // 승인 실패 안내는 onApprove 쪽에서 합니다.
     }
   };
 
@@ -160,13 +155,12 @@ export function CutoverApprovalPanel({ run, runId, readiness, isBusy, isTrafficU
         <PreflightChecklist report={report} isLoading={isLoading} error={error} />
       </div>
 
-      {/* Step 3: 승인 ② 물리 엔진 기반 트래픽 전환 시뮬레이터 & 데모 주행 모드 */}
+      {/* Step 3: 승인 ② 전환 트래픽 뷰 (실시간 Worker 상태 · 실측 기록 재생) & 데모 주행 모드 */}
       <div className="mt-4 border-t border-ink/10 pt-4">
         <CutoverSimulationWidget
           run={run}
-          sequenceTrigger={sequenceTrigger}
           defaultOpen={true}
-          title="승인 ② 사전 리허설: 전환 순서 애니메이션 & 파이프라인 주행 데모 (실측 아님)"
+          title="승인 ② 전 트래픽 게이트: 실시간 Worker 상태 & 파이프라인 주행"
         />
       </div>
 

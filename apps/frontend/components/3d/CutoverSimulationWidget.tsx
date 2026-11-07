@@ -9,14 +9,13 @@ const PhysicsCanvasView = dynamic(() => import("./physics/PhysicsCanvasView"), {
   ssr: false,
   loading: () => (
     <div className="flex h-80 w-full items-center justify-center bg-paper font-mono text-xs text-ink/50">
-      물리 전환 시뮬레이터 & 주행 데모 불러오는 중…
+      전환 트래픽 뷰 & 주행 데모 불러오는 중…
     </div>
   ),
 });
 
 interface Props {
   run: RunStatus;
-  sequenceTrigger?: number;
   defaultOpen?: boolean;
   initialMode?: Step3Mode;
   title?: string;
@@ -24,10 +23,9 @@ interface Props {
 
 export function CutoverSimulationWidget({
   run,
-  sequenceTrigger = 0,
   defaultOpen = true,
   initialMode = "cutover_valve",
-  title = "전환 순서 리허설 애니메이션 & 파이프라인 주행 데모 (실측 아님)",
+  title = "전환 트래픽: 실시간 Worker 상태 · 실측 기록 재생 & 파이프라인 주행",
 }: Props) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -43,7 +41,7 @@ export function CutoverSimulationWidget({
           <span className="inline-block h-2 w-2 rounded-full bg-emerald-600" />
           <h4 className="text-xs font-semibold text-ink">{title}</h4>
           <span className="hidden font-mono text-[11px] text-ink/50 sm:inline">
-            (요청 보류 → 최종 반영 확인 → 경로 변경 → 보류 해제)
+            (게이트 상태는 Worker 보고값, 재생은 이 run 의 cutover_steps 경과 시간)
           </span>
         </div>
 
@@ -63,7 +61,7 @@ export function CutoverSimulationWidget({
               onClick={() => setIsOpen((prev) => !prev)}
               className="rounded border border-ink/20 bg-white px-2 py-0.5 text-[11px] font-medium text-ink/70 hover:border-ink hover:text-ink"
             >
-              {isOpen ? "시뮬레이터 접기" : "시뮬레이터 열기"}
+              {isOpen ? "뷰 접기" : "뷰 열기"}
             </button>
           )}
         </div>
@@ -71,11 +69,7 @@ export function CutoverSimulationWidget({
 
       {isOpen && (
         <div className={isFullscreen ? "flex-1 min-h-[480px] w-full" : "h-80 sm:h-96 w-full"}>
-          <PhysicsCanvasView
-            run={run}
-            initialMode={initialMode}
-            sequenceTrigger={sequenceTrigger}
-          />
+          <PhysicsCanvasView run={run} initialMode={initialMode} />
         </div>
       )}
     </div>

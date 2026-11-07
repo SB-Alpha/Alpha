@@ -1,26 +1,53 @@
 "use client";
 
-import { countTone, type CutoverOverlayFacts, type CutoverSecondsSource } from "@/lib/dashboard";
+import {
+  SERVING_LABEL,
+  countTone,
+  type CutoverOverlayFacts,
+  type CutoverSecondsSource,
+  type ServingSide,
+} from "@/lib/dashboard";
+import type { RequestRate, WorkerLive } from "@/lib/edgeLive";
 import type { StageReportCardData } from "@/lib/topology3d";
-import type { CutoverPhase, PhysicsMetrics } from "./CutoverPhysicsScene";
+import type { CutoverPhase } from "./CutoverPhysicsScene";
 import type { CameraMode, DrivingControlState } from "./PipelineDrivingScene";
 
 export type Step3Mode = "cutover_valve" | "driving_demo";
 
+/** 지금 그리는 게이트 상태와 그 출처. live 는 실시간 Worker, replay 는 실측 단계 기록 재생입니다. */
+export interface PhaseView {
+  phase: CutoverPhase;
+  source: "live" | "replay" | "replay_done";
+  stepLabel: string | null;
+}
+
+export interface ReplayControls {
+  canReplay: boolean;
+  note: string | null;
+  isActive: boolean;
+  onStart: () => void;
+  onExit: () => void;
+}
+
+export interface TrafficView {
+  worker: WorkerLive | null;
+  fetchError: string | null;
+  rate: RequestRate | null;
+  /** 실측 비율이 화면 한도를 넘을 때 구슬 1개가 뜻하는 요청 수. 넘지 않으면 null 입니다. */
+  requestsPerBall: number | null;
+  isReplay: boolean;
+}
+
 interface Props {
   mode: Step3Mode;
   onChangeMode: (mode: Step3Mode) => void;
-  // 이 run 의 보고값 (애니메이션과 별개)
+  // 이 run 의 보고값 (실시간 게이트 상태와 별개)
   measured: CutoverOverlayFacts;
+  reportedServing: ServingSide | null;
   // Cutover Valve Mode props
-  metrics: PhysicsMetrics;
-  phase: CutoverPhase;
-  isSequenceRunning: boolean;
-  onRunSequence: () => void;
-  onSelectPhase: (phase: CutoverPhase) => void;
-  trafficRps: number;
-  onChangeRps: (rps: number) => void;
-  onResetCounts: () => void;
+  phaseView: PhaseView;
+  replay: ReplayControls;
+  traffic: TrafficView;
   // Driving Demo Mode props
   drivingCheckpoint: StageReportCardData | null;
   speedKmh: number;
@@ -31,13 +58,25 @@ interface Props {
   onResetVehicle: () => void;
 }
 
-const PHASE_STEPS: { key: CutoverPhase; label: string }[] = [
-  { key: "aws_serving", label: "0. AWS 서빙" },
-  { key: "hold", label: "1. 요청 보류(Hold)" },
-  { key: "verify", label: "2. 최종 반영 확인" },
-  { key: "switch", label: "3. 경로 변경(GCP)" },
-  { key: "gcp_serving", label: "4. 보류 해제·완료" },
-];
+const MISSING = "미제공";
+
+const PHASE_LABEL: Record<CutoverPhase, string> = {
+  source: "원본 처리 (SOURCE)",
+  hold: "요청 보류 (HOLD)",
+  switch: "보류 중 · 목적지로 경로 변경됨",
+  target: "목적지 처리 (TARGET)",
+  failed: "전환 실패 기록",
+  unknown: `게이트 상태 ${MISSING}`,
+};
+
+const PHASE_TONE: Record<CutoverPhase, string> = {
+  source: "bg-indigo-100 text-indigo-900 border-indigo-300",
+  hold: "bg-amber-100 text-amber-900 border-amber-300",
+  switch: "bg-purple-100 text-purple-900 border-purple-300",
+  target: "bg-emerald-100 text-emerald-900 border-emerald-300",
+  failed: "bg-rose-100 text-rose-900 border-rose-300",
+  unknown: "bg-stone-100 text-stone-700 border-stone-300",
+};
 
 const SECONDS_SOURCE_LABEL: Record<CutoverSecondsSource, string> = {
   worker: "Worker 측정",
@@ -53,26 +92,27 @@ const COUNT_TONE_CLASS = {
 function FailureCount({ value }: { value: number | null }) {
   return (
     <span className={`font-semibold ${COUNT_TONE_CLASS[countTone(value)]}`}>
-      {value !== null ? `${value}건` : "미제공"}
+      {value !== null ? `${value}건` : MISSING}
     </span>
   );
 }
 
 function stepsText(steps: CutoverOverlayFacts["steps"]): string {
-  if (!steps || steps.length === 0) return "미제공";
+  if (!steps || steps.length === 0) return MISSING;
   return steps
-    .map((s) => `${s.step} ${s.elapsedMs !== null ? `${s.elapsedMs}ms` : "미제공"}`)
+    .map((s) => `${s.step} ${s.elapsedMs !== null ? `${s.elapsedMs}ms` : MISSING}`)
     .join(" · ");
 }
 
-// 이 run 이 실제로 보고한 값만 보여 줍니다. 위 애니메이션 단계와 대응시키지 않습니다.
-function MeasuredFacts({ measured }: { measured: CutoverOverlayFacts }) {
+// 이 run 이 실제로 보고한 값만 보여 줍니다.
+function MeasuredFacts({ measured, reportedServing }: { measured: CutoverOverlayFacts; reportedServing: ServingSide | null }) {
   const { cutoverSeconds, cutoverSecondsSource } = measured;
   return (
     <div className="pointer-events-auto rounded-md border border-ink/20 bg-white/95 px-3 py-1 font-mono text-[10px] text-ink/75 shadow-xs">
       <p className="flex flex-wrap items-center gap-x-1">
         <span>
-          이 run 보고값: 전환 소요 {cutoverSeconds !== null ? `${cutoverSeconds.toFixed(1)}초` : "미제공"} (
+          이 run 보고값: 처리 측 {reportedServing ? SERVING_LABEL[reportedServing] : MISSING} · 전환 소요{" "}
+          {cutoverSeconds !== null ? `${cutoverSeconds.toFixed(1)}초` : MISSING} (
           {cutoverSecondsSource ? SECONDS_SOURCE_LABEL[cutoverSecondsSource] : "출처 미제공"}) · 읽기 실패{" "}
           <FailureCount value={measured.failedRequests} /> (프로버) · 쓰기 실패{" "}
           <FailureCount value={measured.writeFailedRequests} /> (Worker)
@@ -83,18 +123,101 @@ function MeasuredFacts({ measured }: { measured: CutoverOverlayFacts }) {
   );
 }
 
+const PHASE_SOURCE_LABEL: Record<PhaseView["source"], string> = {
+  live: "실시간 Worker 상태",
+  replay: "실측 기록 재생 중 (1배속)",
+  replay_done: "실측 기록 재생 종료",
+};
+
+function workerStatusText(traffic: TrafficView): string | null {
+  if (traffic.fetchError) return `실시간 조회 실패: ${traffic.fetchError}`;
+  const worker = traffic.worker;
+  if (!worker) return "실시간 상태 불러오는 중…";
+  if (worker.status === "not_configured") return "Worker 미설정 (WORKER_URL 없음)";
+  if (worker.status === "error") return `Worker 조회 실패: ${worker.error ?? MISSING}`;
+  return null;
+}
+
+function PhaseBar({ phaseView, traffic }: { phaseView: PhaseView; traffic: TrafficView }) {
+  const statusText = phaseView.source === "live" ? workerStatusText(traffic) : null;
+  return (
+    <div className="pointer-events-auto flex flex-wrap items-center justify-between gap-1 rounded-md border border-ink/20 bg-white/95 px-3 py-1.5 text-[11px] font-mono shadow-xs">
+      <span className="flex items-center gap-1.5 font-semibold text-ink">
+        <span className={`inline-block h-2 w-2 rounded-full ${phaseView.source === "live" ? "bg-emerald-600" : "bg-ink/40"}`} />
+        {PHASE_SOURCE_LABEL[phaseView.source]}
+        {phaseView.stepLabel && (
+          <span className="rounded border border-ink/25 bg-paper px-1.5 py-0.5 text-[10px] font-medium text-ink/70">
+            {phaseView.stepLabel}
+          </span>
+        )}
+      </span>
+      <span className="flex flex-wrap items-center gap-1.5">
+        {statusText && <span className="text-[10px] text-ink/60">{statusText}</span>}
+        <span className={`rounded border px-1.5 py-0.5 font-bold ${PHASE_TONE[phaseView.phase]}`}>
+          {PHASE_LABEL[phaseView.phase]}
+        </span>
+      </span>
+    </div>
+  );
+}
+
+const countText = (value: number | null | undefined) =>
+  typeof value === "number" ? value.toLocaleString("ko-KR") : MISSING;
+const rateText = (value: number | null | undefined) =>
+  typeof value === "number" ? `${value.toFixed(1)}/s` : MISSING;
+
+// Worker 가 보고한 누적 요청 수입니다. 구슬 수를 세지 않습니다.
+function WorkerCounters({ traffic }: { traffic: TrafficView }) {
+  const worker = traffic.worker?.status === "ok" ? traffic.worker : null;
+  const counts = worker?.request_counts ?? null;
+  return (
+    <div className="grid grid-cols-3 gap-2">
+      <div className="pointer-events-auto rounded-md border border-ink/20 bg-white/95 px-3 py-1.5 shadow-xs">
+        <span className="block text-[10px] text-ink/55">쓰기 (실시간 · Worker 누적)</span>
+        <span className="font-mono text-sm font-bold tabular-nums">
+          {countText(counts?.write_total)}
+          <span className="ml-1 text-[10px] font-normal text-ink/55">실패 {countText(counts?.write_failed)}</span>
+        </span>
+        <span className="block font-mono text-[10px] text-ink/55">비율 {rateText(traffic.rate?.writePerSec)}</span>
+      </div>
+      <div className="pointer-events-auto rounded-md border border-amber-400 bg-amber-50/95 px-3 py-1.5 text-center shadow-xs">
+        <span className="block text-[10px] font-medium text-amber-900">보류 중 요청 (실시간 · Worker)</span>
+        <span className="font-mono text-sm font-bold tabular-nums text-amber-900">{countText(worker?.held_count)}</span>
+        <span className="block font-mono text-[10px] text-amber-900/70">원본 처리 중 {countText(worker?.inflight_source)}</span>
+      </div>
+      <div className="pointer-events-auto rounded-md border border-ink/20 bg-white/95 px-3 py-1.5 text-right shadow-xs">
+        <span className="block text-[10px] text-ink/55">읽기 (실시간 · Worker 누적)</span>
+        <span className="font-mono text-sm font-bold tabular-nums">
+          {countText(counts?.read_total)}
+          <span className="ml-1 text-[10px] font-normal text-ink/55">실패 {countText(counts?.read_failed)}</span>
+        </span>
+        <span className="block font-mono text-[10px] text-ink/55">비율 {rateText(traffic.rate?.readPerSec)}</span>
+      </div>
+    </div>
+  );
+}
+
+function trafficNote(traffic: TrafficView, phase: CutoverPhase): string {
+  if (traffic.isReplay) return "재생 중에는 그때의 트래픽 기록이 없어 구슬을 그리지 않습니다.";
+  if (phase === "unknown") return "게이트 상태를 몰라 경로를 그릴 수 없습니다. 트래픽 미제공";
+  if (!traffic.rate || (traffic.rate.writePerSec === null && traffic.rate.readPerSec === null)) {
+    return "트래픽 미제공 (요청 비율은 두 번째 관측부터 계산합니다)";
+  }
+  const base =
+    "구슬은 Worker 누적 요청 수(쓰기+읽기)의 초당 증가량만큼만 떨어집니다. ALPHA_PROBE_URL 이 Worker 를 거치면 이 화면의 실시간 프로브 요청(백엔드 1초 캐시라 최대 1건/초)도 읽기에 들어갑니다.";
+  return traffic.requestsPerBall !== null
+    ? `${base} 구슬 1개 ≈ 요청 ${traffic.requestsPerBall.toFixed(1)}건`
+    : base;
+}
+
 export function PhysicsControlsOverlay({
   mode,
   onChangeMode,
   measured,
-  metrics,
-  phase,
-  isSequenceRunning,
-  onRunSequence,
-  onSelectPhase,
-  trafficRps,
-  onChangeRps,
-  onResetCounts,
+  reportedServing,
+  phaseView,
+  replay,
+  traffic,
   drivingCheckpoint,
   speedKmh,
   gear = "P",
@@ -116,7 +239,7 @@ export function PhysicsControlsOverlay({
               mode === "cutover_valve" ? "bg-ink text-paper" : "text-ink/70 hover:text-ink"
             }`}
           >
-            물리 트래픽 전환 (Hold → Switch)
+            전환 트래픽 (실시간 · 재생)
           </button>
           <button
             type="button"
@@ -131,34 +254,27 @@ export function PhysicsControlsOverlay({
 
         {/* 우측: 현재 모드별 액션 컨트롤 */}
         {mode === "cutover_valve" ? (
-          <div className="pointer-events-auto flex flex-wrap items-center gap-2 rounded-md border border-ink/25 bg-white/95 px-2.5 py-1 text-xs shadow-xs">
-            <button
-              type="button"
-              disabled={isSequenceRunning}
-              onClick={onRunSequence}
-              className="rounded bg-ink px-2.5 py-1 text-xs font-semibold text-paper transition-transform hover:-translate-y-px disabled:opacity-50"
-            >
-              {isSequenceRunning ? "4단계 전환 시퀀스 진행 중…" : "▶ 4단계 무중단 전환 리허설 실행"}
-            </button>
-            <label className="flex items-center gap-1.5 font-mono text-[11px] text-ink/70">
-              <span>유입</span>
-              <input
-                type="range"
-                min={5}
-                max={24}
-                value={trafficRps}
-                onChange={(e) => onChangeRps(Number(e.target.value))}
-                className="h-1.5 w-16 cursor-pointer accent-ink"
-              />
-              <span className="w-12 text-right font-semibold text-ink">{trafficRps} req/s</span>
-            </label>
-            <button
-              type="button"
-              onClick={onResetCounts}
-              className="rounded border border-ink/20 bg-paper px-2 py-0.5 text-[11px] font-medium hover:border-ink"
-            >
-              초기화
-            </button>
+          <div className="pointer-events-auto flex max-w-sm flex-wrap items-center gap-2 rounded-md border border-ink/25 bg-white/95 px-2.5 py-1 text-xs shadow-xs">
+            {replay.isActive ? (
+              <button
+                type="button"
+                onClick={replay.onExit}
+                className="rounded border border-ink bg-white px-2.5 py-1 text-xs font-semibold text-ink transition-transform hover:-translate-y-px"
+              >
+                실시간 보기로 돌아가기
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={!replay.canReplay}
+                onClick={replay.onStart}
+                title="이 run 의 cutover_steps 경과 시간(elapsed_ms)을 실제 시간 그대로 다시 보여 줍니다"
+                className="rounded bg-ink px-2.5 py-1 text-xs font-semibold text-paper transition-transform hover:-translate-y-px disabled:opacity-50"
+              >
+                ▶ 실측 기록 재생
+              </button>
+            )}
+            {replay.note && <span className="font-mono text-[10px] text-ink/60">{replay.note}</span>}
           </div>
         ) : (
           <div className="pointer-events-auto flex flex-wrap items-center gap-2 rounded-md border border-ink/25 bg-white/95 px-2.5 py-1 text-xs shadow-xs">
@@ -235,85 +351,12 @@ export function PhysicsControlsOverlay({
       {/* 하단 바 */}
       {mode === "cutover_valve" ? (
         <div className="flex flex-col gap-2">
-          {/* 전환 순서 막대: 애니메이션 단계만 표시 (실측 아님) */}
-          <div className="pointer-events-auto flex flex-wrap items-center justify-between gap-1 rounded-md border border-ink/20 bg-white/95 px-3 py-1.5 text-[11px] font-mono shadow-xs">
-            <span className="flex items-center gap-1.5 font-semibold text-ink">
-              <span className="inline-block h-2 w-2 rounded-full bg-ink/40" />
-              Cloudflare 4단계 전환 순서
-              <span className="rounded border border-ink/25 bg-paper px-1.5 py-0.5 text-[10px] font-medium text-ink/70">
-                리허설 애니메이션, 실측 아님
-              </span>
-            </span>
-            <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-ink/65">
-              <span className={`rounded px-1.5 py-0.5 transition-colors ${phase === "hold" ? "bg-amber-100 font-bold text-amber-900 border border-amber-300" : ""}`}>
-                ① 보류(Hold)
-              </span>
-              <span>→</span>
-              <span className={`rounded px-1.5 py-0.5 transition-colors ${phase === "verify" ? "bg-indigo-100 font-bold text-indigo-900 border border-indigo-300" : ""}`}>
-                ② 반영 확인
-              </span>
-              <span>→</span>
-              <span className={`rounded px-1.5 py-0.5 transition-colors ${phase === "switch" ? "bg-purple-100 font-bold text-purple-900 border border-purple-300" : ""}`}>
-                ③ 경로 변경
-              </span>
-              <span>→</span>
-              <span className={`rounded px-1.5 py-0.5 transition-colors ${phase === "gcp_serving" ? "bg-emerald-100 font-bold text-emerald-900 border border-emerald-300" : ""}`}>
-                ④ 보류 해제
-              </span>
-            </div>
-          </div>
-
-          <MeasuredFacts measured={measured} />
-
-          {/* 4단계 전환 시퀀스 스텝 버튼 */}
-          <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-1 rounded-md border border-ink/20 bg-white/95 p-1.5 shadow-xs">
-            {PHASE_STEPS.map((st) => {
-              const active = phase === st.key;
-              return (
-                <button
-                  key={st.key}
-                  type="button"
-                  onClick={() => onSelectPhase(st.key)}
-                  className={`rounded px-2 py-0.5 font-mono text-[11px] transition-all active:scale-[0.96] ${
-                    active
-                      ? "bg-ink font-semibold text-paper shadow-xs"
-                      : "bg-paper text-ink/65 hover:text-ink"
-                  }`}
-                >
-                  {st.label}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* 애니메이션 카운터 (실측 아님) */}
-          <div className="grid grid-cols-3 gap-2">
-            <div className="pointer-events-auto rounded-md border border-ink/20 bg-white/95 px-3 py-1.5 shadow-xs">
-              <span className="block text-[10px] text-ink/55">원본 AWS 처리 (애니메이션)</span>
-              <span className="font-mono text-base font-bold tabular-nums">
-                {metrics.awsCount.toLocaleString("ko-KR")}
-                <span className="ml-1 text-[10px] font-normal text-ink/50">건</span>
-              </span>
-            </div>
-
-            <div className="pointer-events-auto rounded-md border border-amber-400 bg-amber-50/95 px-3 py-1.5 text-center shadow-xs">
-              <span className="block text-[10px] font-medium text-amber-900">
-                Cloudflare 보류 버퍼 (애니메이션)
-              </span>
-              <span className="font-mono text-base font-bold tabular-nums text-amber-900">
-                {metrics.bufferedCount}
-                <span className="ml-1 text-[10px] font-normal">건 대기</span>
-              </span>
-            </div>
-
-            <div className="pointer-events-auto rounded-md border border-emerald-600/40 bg-white/95 px-3 py-1.5 text-right shadow-xs">
-              <span className="block text-[10px] text-emerald-800">목적지 GCP 처리 (애니메이션)</span>
-              <span className="font-mono text-base font-bold tabular-nums text-emerald-700">
-                {metrics.gcpCount.toLocaleString("ko-KR")}
-                <span className="ml-1 text-[10px] font-normal text-ink/50">건</span>
-              </span>
-            </div>
-          </div>
+          <PhaseBar phaseView={phaseView} traffic={traffic} />
+          <MeasuredFacts measured={measured} reportedServing={reportedServing} />
+          <p className="pointer-events-auto rounded-md border border-ink/15 bg-white/90 px-3 py-1 font-mono text-[10px] text-ink/65 shadow-xs">
+            {trafficNote(traffic, phaseView.phase)}
+          </p>
+          <WorkerCounters traffic={traffic} />
         </div>
       ) : (
         /* 주행 데모 모드 하단 HUD: 현재 통과 중인 스테이지 실측 정보 + 마우스/터치 페달 */

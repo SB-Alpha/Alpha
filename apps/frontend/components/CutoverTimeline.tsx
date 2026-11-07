@@ -153,7 +153,7 @@ export function CutoverTimeline({ run }: Props) {
         <CutoverSimulationWidget
           run={run}
           defaultOpen={true}
-          title="전환 순서 리허설 애니메이션 & 파이프라인 주행 데모 (실측 아님)"
+          title="전환 트래픽: 실시간 Worker 상태 · 실측 기록 재생 & 파이프라인 주행"
         />
       )}
     </section>

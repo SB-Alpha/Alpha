@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRef, useState } from "react";
+import { useEdgeLive, useRunTopology } from "@/lib/edgeLive";
 import { extractCdcArcData, extractSourceNodeData, extractTargetNodeData } from "@/lib/topology3d";
 import type { RunStatus } from "@/lib/workflows";
 import type { OrbitControlsHandle } from "./CloudMorphScene";
@@ -23,16 +24,28 @@ const CanvasView = dynamic(() => import("./CanvasView"), {
 
 import { securityApi } from "@/lib/securityApi";
 
+// 영향 범위 조회는 보안 모듈의 고정 노드 id 로 부릅니다. 이 run 의 원본에서 나온 값이 아니므로 화면에 id 를 그대로 밝힙니다.
+// 토폴로지에서 노드를 고르는 연동은 PR-6(보안)에서 합니다.
+const BLAST_RADIUS_NODE_ID = "aws-ecs-workitems";
+
 export function DynamicCanvas({ run, onNavigateSection }: Props) {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [selectedNode, setSelectedNode] = useState<"source" | "cdc" | "target" | null>(null);
   const [isCompromised, setIsCompromised] = useState(false);
   const [isQuarantined, setIsQuarantined] = useState(false);
   const [isRerouting, setIsRerouting] = useState(false);
-  const [riskScore, setRiskScore] = useState<number>(0.85);
+  const [isCheckingBlastRadius, setIsCheckingBlastRadius] = useState(false);
+  // 보안 API 가 돌려준 값만 씁니다. 응답 전이나 값이 없으면 null 입니다.
+  const [riskScore, setRiskScore] = useState<number | null>(null);
   const [showFullTopology, setShowFullTopology] = useState(false);
   const [rerouteNotice, setRerouteNotice] = useState<string | null>(null);
   const controlsRef = useRef<OrbitControlsHandle | null>(null);
+
+  // 실측 토폴로지는 그래프를 켰을 때만 조회합니다. 에지 상태는 Worker 노드가 있을 때만 폴링합니다
+  // (라이브 프로브 요청이 게이트를 실제로 지나가므로 필요할 때만 부릅니다).
+  const { topology, fetchError: topologyError } = useRunTopology(run.run_id, showFullTopology);
+  const hasEdgeWorker = Boolean(topology?.nodes.some((n) => n.id === "edge_worker"));
+  const { snapshot: edgeLive } = useEdgeLive(1500, showFullTopology && hasEdgeWorker);
 
   const source = extractSourceNodeData(run);
   const cdc = extractCdcArcData(run);
@@ -43,26 +56,33 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
     controlsRef.current?.reset();
   };
 
-  const handleToggleCompromised = () => {
-    setIsCompromised((prev) => {
-      const next = !prev;
-      if (!next) {
-        setIsQuarantined(false);
-        setRerouteNotice(null);
-      } else {
-        // 실제 백엔드 blast radius 계산 API 연동
-        securityApi.computeBlastRadius("aws-ecs-workitems")
-          .then((res) => {
-            if (res?.max_risk_score) {
-              setRiskScore(res.max_risk_score);
-            }
-          })
-          .catch(() => {
-            // 실패 시 기본 위험도 유지
-          });
-      }
-      return next;
-    });
+  // 영향 범위는 보안 API(/security/blast-radius) 응답이 숫자 위험도를 돌려줄 때만 3D 로 표시합니다.
+  // 로컬에서 침해 상태를 켜는 데모 토글은 없앴습니다. 보안 연동 정리는 PR-6 에서 합니다.
+  const handleToggleBlastRadius = () => {
+    if (isCheckingBlastRadius) return;
+    if (isCompromised) {
+      setIsCompromised(false);
+      setIsQuarantined(false);
+      setRiskScore(null);
+      setRerouteNotice(null);
+      return;
+    }
+    setIsCheckingBlastRadius(true);
+    securityApi.computeBlastRadius(BLAST_RADIUS_NODE_ID)
+      .then((res) => {
+        const score = typeof res?.max_risk_score === "number" && Number.isFinite(res.max_risk_score)
+          ? res.max_risk_score
+          : null;
+        setRiskScore(score);
+        setIsCompromised(score !== null);
+        if (score === null) setRerouteNotice("영향 범위 조회: 위험도 미제공");
+      })
+      .catch((cause) => {
+        setRiskScore(null);
+        setIsCompromised(false);
+        setRerouteNotice(`⚠️ 영향 범위 조회 실패: ${cause instanceof Error ? cause.message : "unknown"}`);
+      })
+      .finally(() => setIsCheckingBlastRadius(false));
   };
 
   const handleReroute = async () => {
@@ -75,7 +95,7 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
     }
 
     const confirmed = window.confirm(
-      "보안 위협 노드(CVE-2026-4192)를 즉시 격리(Quarantine)하고 안전 타깃(GCP Cloud Run)으로 트래픽을 우회하시겠습니까?\n\n※ 데이터 정합성 보호를 위해 원본 쓰기는 503 차단되며 읽기 트래픽만 우회됩니다."
+      "영향 범위 조회 대상 노드를 격리(Quarantine)하고 트래픽 우회를 요청하시겠습니까?\n\n※ 데이터 정합성 보호를 위해 원본 쓰기는 503 차단되며 읽기 트래픽만 우회됩니다."
     );
     if (!confirmed) return;
 
@@ -179,7 +199,7 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
                   [
                     { key: "source", label: `☁️ 원본 ${source.cloudName}` },
                     { key: "cdc", label: "⚡ CDC 아치" },
-                    { key: "target", label: "🚀 목적지 GCP" },
+                    { key: "target", label: `🚀 목적지 ${target.providerSummary}` },
                   ] as const
                 ).map((item) => (
                   <button
@@ -197,15 +217,16 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
                 ))}
                 <button
                   type="button"
-                  onClick={handleToggleCompromised}
-                  className={`rounded border px-2 py-0.5 font-mono text-[11px] transition-all active:scale-[0.96] ${
+                  onClick={handleToggleBlastRadius}
+                  disabled={isCheckingBlastRadius}
+                  className={`rounded border px-2 py-0.5 font-mono text-[11px] transition-all active:scale-[0.96] disabled:opacity-50 ${
                     isCompromised
-                      ? "border-red-600 bg-red-600 text-white shadow-xs animate-pulse"
+                      ? "border-red-600 bg-red-600 text-white shadow-xs"
                       : "border-ink/20 bg-paper text-ink/75 hover:border-red-500 hover:text-red-600"
                   }`}
-                  title="AWS GuardDuty 침해 알림 (시뮬레이션 데모 데이터) 및 3D Blast Radius 활성화"
+                  title={`보안 API(/security/blast-radius)에 고정 노드 ${BLAST_RADIUS_NODE_ID} 의 영향 범위를 조회하고, 숫자 위험도가 오면 3D 로 표시합니다. 이 run 의 원본과 별개인 값입니다`}
                 >
-                  {isCompromised ? "🚨 GuardDuty 시뮬레이션 활성" : "🛡️ 보안 위협 시뮬레이션"}
+                  {isCheckingBlastRadius ? "조회 중…" : isCompromised ? "🛡️ 영향 범위 표시 끄기" : "🛡️ 영향 범위 조회"}
                 </button>
                 {isQuarantined && (
                   <button
@@ -226,9 +247,9 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
                       ? "border-sky-700 bg-sky-700 text-white shadow-xs"
                       : "border-ink/20 bg-paper text-ink/75 hover:border-sky-600 hover:text-sky-700"
                   }`}
-                  title="AWS · GCP · Azure · On-Prem 4대 인프라 및 Cloudflare 에지 라우팅 전체 조감도"
+                  title="이 run 의 실측 토폴로지(앱·DB·CDC·VPN·Worker)를 그래프로 그립니다"
                 >
-                  {showFullTopology ? "🌐 4대 클라우드 켜짐" : "🌐 4대 클라우드 전체"}
+                  {showFullTopology ? "🧭 실측 토폴로지 켜짐" : "🧭 실측 토폴로지"}
                 </button>
               </div>
             </>
@@ -275,9 +296,12 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
             onNavigateSection={onNavigateSection}
             isCompromised={isCompromised}
             isQuarantined={isQuarantined}
-            riskScore={isCompromised ? riskScore : 0.0}
+            riskScore={isCompromised ? riskScore : null}
             onReroute={handleReroute}
             showFullTopology={showFullTopology}
+            topology={topology}
+            topologyError={topologyError}
+            edgeLive={edgeLive}
           />
 
           {/* 하단 실측 데이터 요약 바 */}

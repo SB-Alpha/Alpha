@@ -181,3 +181,32 @@ def test_env_unset_gives_no_prober(monkeypatch):
 def test_env_url_gives_prober(monkeypatch):
     monkeypatch.setenv("ALPHA_PROBE_URL", "https://gate.example.com/health")
     assert prober_from_env() is not None
+
+
+def test_probe_once_sends_one_request_and_does_not_touch_snapshot(upstream):
+    upstream.origin = "TARGET"
+    prober = TrafficProber(upstream.url, timeout_s=2.0)
+
+    result = prober.probe_once()
+
+    assert result["ok"] is True
+    assert result["origin"] == "TARGET"
+    assert isinstance(result["latency_ms"], float) and result["latency_ms"] >= 0
+    assert prober.snapshot() == {}  # 누적 측정값에는 더하지 않습니다
+
+
+def test_probe_once_reports_failure_with_measured_latency(upstream):
+    upstream.status = 503
+    upstream.origin = None
+    result = TrafficProber(upstream.url, timeout_s=2.0).probe_once()
+    assert result["ok"] is False
+    assert result["origin"] is None
+    assert result["latency_ms"] is not None
+
+
+def test_probe_once_honours_short_timeout(upstream):
+    upstream.delay_s = 1.0
+    started = time.monotonic()
+    result = TrafficProber(upstream.url, timeout_s=10.0).probe_once(timeout_s=0.2)
+    assert result["ok"] is False
+    assert time.monotonic() - started < 0.9

@@ -17,7 +17,7 @@ interface Props {
   targetRef?: React.RefObject<THREE.Group | null>;
   isCompromised?: boolean;
   isQuarantined?: boolean;
-  riskScore?: number;
+  riskScore?: number | null;
   onReroute?: () => void;
 }
 
@@ -135,7 +135,7 @@ export function SourceTargetNodes({
               className="pointer-events-auto w-52 rounded-lg border border-ink bg-white/98 p-2 text-left text-ink shadow-[2px_2px_0_0_var(--color-ink)] backdrop-blur-xs"
             >
               <div className="flex items-center justify-between border-b border-ink/15 pb-1">
-                <span className="font-mono text-[11px] font-semibold">원본 인프라 (AWS)</span>
+                <span className="font-mono text-[11px] font-semibold">원본 인프라 ({source.cloudName})</span>
                 <span
                   className={`rounded px-1 py-0.2 font-mono text-[9px] font-bold ${
                     source.isServing ? "bg-indigo-100 text-indigo-900" : "bg-stone-100 text-ink/60"
@@ -326,7 +326,7 @@ export function SourceTargetNodes({
         position={[-3.1, 0.45, 0]}
         isCompromised={Boolean(isCompromised)}
         isQuarantined={Boolean(isQuarantined)}
-        riskScore={riskScore ?? 0.85}
+        riskScore={riskScore ?? null}
         onReroute={onReroute ?? (() => {})}
       />
     </group>

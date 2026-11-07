@@ -134,12 +134,12 @@ export function RunView() {
             onApprove={(comment) => act(() => workflows.approve(run.run_id, "plan", comment))}
           />
 
-          {/* Step 3 포함: 전환 기록 및 물리 전환 시뮬레이션 / 데모 주행 */}
+          {/* Step 3 포함: 전환 기록 및 전환 트래픽 뷰(실시간 · 실측 재생) / 데모 주행 */}
           <CutoverTimeline run={run} />
 
           <SelfHealingCard run={run} isBusy={isBusy} />
 
-          {/* Step 3 포함: 승인 ② 대기 시 CutoverApprovalPanel 내부에 물리 전환 시뮬레이션 렌더링 */}
+          {/* Step 3 포함: 승인 ② 대기 시 CutoverApprovalPanel 내부에 전환 트래픽 뷰 렌더링 */}
           <RunActions
             run={run}
             isBusy={isBusy}

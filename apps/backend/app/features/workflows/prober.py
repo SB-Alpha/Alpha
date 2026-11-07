@@ -81,12 +81,21 @@ class TrafficProber:
             self._probe_once()
             self._stop.wait(self._interval_s)
 
-    def _probe_once(self) -> None:
+    def probe_once(self, timeout_s: float | None = None) -> dict[str, Any]:
+        """요청을 정확히 한 번 보내고 결과만 돌려줍니다. 누적 측정값(snapshot)에는 더하지 않습니다.
+
+        ok 는 응답이 2xx·3xx 였는지, latency_ms 는 실패한 요청도 포함한 대기 시간, origin 은 Worker 가 붙인
+        X-Gate-Origin 헤더입니다. 헤더가 없으면 None 입니다.
+        """
+        is_failure, elapsed_ms, origin = self._request_once(self._timeout_s if timeout_s is None else timeout_s)
+        return {"ok": not is_failure, "latency_ms": round(elapsed_ms, 1), "origin": origin}
+
+    def _request_once(self, timeout_s: float) -> tuple[bool, float, str | None]:
         started = time.perf_counter()
         origin: str | None = None
         try:
             request = urllib.request.Request(self._url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(request, timeout=self._timeout_s) as response:
+            with urllib.request.urlopen(request, timeout=timeout_s) as response:
                 response.read()
                 origin = response.headers.get(ORIGIN_HEADER)
             is_failure = False
@@ -96,7 +105,10 @@ class TrafficProber:
         except (OSError, ValueError):
             # 연결 실패·시간 초과. URLError 와 socket.timeout 은 OSError 입니다.
             is_failure = True
-        elapsed_ms = (time.perf_counter() - started) * 1000
+        return is_failure, (time.perf_counter() - started) * 1000, origin
+
+    def _probe_once(self) -> None:
+        is_failure, elapsed_ms, origin = self._request_once(self._timeout_s)
         with self._lock:
             self._latencies_ms.append(elapsed_ms)
             self._failed += int(is_failure)

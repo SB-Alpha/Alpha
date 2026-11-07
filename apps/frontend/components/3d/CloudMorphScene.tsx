@@ -3,10 +3,11 @@
 import { Bounds, ContactShadows, OrbitControls, PerspectiveCamera, useBounds } from "@react-three/drei";
 import { useEffect, useRef, type ComponentRef } from "react";
 import * as THREE from "three";
+import type { EdgeSnapshot, Topology } from "@/lib/edgeLive";
 import type { RunStatus } from "@/lib/workflows";
 import { CdcPipelineArc } from "./CdcPipelineArc";
-import { MultiCloudTopologyNodes } from "./MultiCloudTopologyNodes";
 import { SourceTargetNodes } from "./SourceTargetNodes";
+import { TopologyGraphNodes } from "./TopologyGraphNodes";
 
 export type OrbitControlsHandle = ComponentRef<typeof OrbitControls>;
 
@@ -18,9 +19,13 @@ interface Props {
   onNavigateSection?: (sectionId: string) => void;
   isCompromised?: boolean;
   isQuarantined?: boolean;
-  riskScore?: number;
+  riskScore?: number | null;
   onReroute?: () => void;
+  /** 켜면 실측 토폴로지 그래프(GET /runs/{id}/topology)를 함께 그립니다. */
   showFullTopology?: boolean;
+  topology?: Topology | null;
+  topologyError?: string | null;
+  edgeLive?: EdgeSnapshot | null;
 }
 
 function FocusController({
@@ -62,6 +67,9 @@ export function CloudMorphScene({
   riskScore,
   onReroute,
   showFullTopology,
+  topology = null,
+  topologyError = null,
+  edgeLive = null,
 }: Props) {
   const localControlsRef = useRef<OrbitControlsHandle | null>(null);
   const sourceRef = useRef<THREE.Group | null>(null);
@@ -147,7 +155,9 @@ export function CloudMorphScene({
             onSelectNode={onSelectNode}
             onNavigateSection={onNavigateSection}
           />
-          <MultiCloudTopologyNodes showFullTopology={Boolean(showFullTopology)} />
+          {showFullTopology && (
+            <TopologyGraphNodes topology={topology} edge={edgeLive} fetchError={topologyError} />
+          )}
         </group>
       </Bounds>
     </>

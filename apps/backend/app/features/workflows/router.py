@@ -31,6 +31,7 @@ from .schemas import (
 from .runners import RUNNERS, clean_up_cdc, decommission_cdc
 from .store import RunNotFound, RunStore
 from .timings import RunTimings, TimingBaseline, run_timings, timing_baseline
+from .topology import Topology, build_topology
 from .target_adapters import UnsupportedTarget, adapter_for, describe_targets
 from app.core.local_access import require_local_access
 
@@ -121,6 +122,15 @@ def get_run_timings(run_id: str, engine: Engine = Depends(get_engine)) -> RunTim
     """이 run 의 단계별 실제 소요 시간. 재지 못한 단계는 값 없이 이유(note)만 돌려줍니다."""
     try:
         return run_timings(engine.get(run_id))
+    except RunNotFound:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"run {run_id} 이(가) 없습니다") from None
+
+
+@router.get("/{run_id}/topology", response_model=Topology, dependencies=[Depends(require_local_access)])
+def get_run_topology(run_id: str, engine: Engine = Depends(get_engine)) -> dict:
+    """이 run 의 실제 구성도. 요청·단계 출력·단계 상태에서만 만들고 모르는 값은 null 입니다."""
+    try:
+        return build_topology(engine.get(run_id))
     except RunNotFound:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"run {run_id} 이(가) 없습니다") from None
 

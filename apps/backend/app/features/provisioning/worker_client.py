@@ -34,7 +34,14 @@ class WorkerClient:
             raise ProvisioningError("WORKER_URL 은 있는데 토큰이 없습니다. WORKER_TOKEN_FILE 이나 WORKER_TOKEN 을 지정하세요")
         return cls(base_url, token)
 
-    def _send(self, method: str, body: dict[str, Any] | None = None, *, command: str = "target") -> dict[str, Any]:
+    def _send(
+        self,
+        method: str,
+        body: dict[str, Any] | None = None,
+        *,
+        command: str = "target",
+        timeout_s: float = TIMEOUT_S,
+    ) -> dict[str, Any]:
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(
             f"{self.base_url}/control/{command}",
@@ -47,7 +54,7 @@ class WorkerClient:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:  # noqa: S310  (운영자가 정한 Worker 주소)
+            with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310  (운영자가 정한 Worker 주소)
                 return json.loads(response.read())
         except urllib.error.HTTPError as exc:
             detail = ""
@@ -59,8 +66,9 @@ class WorkerClient:
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             raise ProvisioningError(f"Worker 에 연결하지 못했습니다: {type(exc).__name__}") from None
 
-    def status(self) -> dict[str, Any]:
-        return self._send("GET", command="status")
+    def status(self, *, timeout_s: float = TIMEOUT_S) -> dict[str, Any]:
+        # 화면 실시간 조회(/live/edge)는 짧은 timeout 을 넘깁니다. 전환 중 호출은 기본값 그대로입니다.
+        return self._send("GET", command="status", timeout_s=timeout_s)
 
     def get_target(self) -> str | None:
         return self._send("GET").get("url")

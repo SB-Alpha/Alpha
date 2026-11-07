@@ -5,11 +5,15 @@ import { useFrame } from "@react-three/fiber";
 import { useRef } from "react";
 import * as THREE from "three";
 
+// DynamicCanvas 가 조회하는 보안 모듈의 고정 노드 id. 이 run 의 원본 노드 값이 아님을 화면에 밝힙니다.
+const QUERIED_NODE_ID = "aws-ecs-workitems";
+
 interface Props {
   position: [number, number, number];
   isCompromised: boolean;
   isQuarantined: boolean;
-  riskScore: number;
+  /** 보안 API 가 돌려준 값만 받습니다. 모르면 null 이고 "미제공"으로 보입니다. */
+  riskScore: number | null;
   onReroute: () => void;
 }
 
@@ -74,7 +78,7 @@ export function BlastRadiusMesh({
         />
       </mesh>
 
-      {/* 3D HTML 툴팁 오버레이: 실시간 GuardDuty 경고 및 즉각 우회 제어 */}
+      {/* 3D HTML 툴팁 오버레이: 보안 API 영향 범위 결과 및 우회 요청 */}
       <Html position={[0, 1.45, 0]} center zIndexRange={[120, 80]}>
         <div className="pointer-events-auto flex flex-col items-center gap-1 rounded-md border border-ink bg-white/95 p-2 shadow-[2px_2px_0_0_var(--color-ink)] backdrop-blur-xs">
           <div className="flex items-center gap-1.5 font-mono text-[10px]">
@@ -93,17 +97,17 @@ export function BlastRadiusMesh({
                   : "bg-red-100 text-red-900"
               }`}
             >
-              위험도 {(riskScore * 100).toFixed(0)}%
+              위험도 {riskScore !== null ? `${(riskScore * 100).toFixed(0)}%` : "미제공"}
             </span>
           </div>
 
           <div className="text-center font-sans text-[10px] text-ink/75">
             {isQuarantined ? (
               <span className="text-emerald-700 font-medium">
-                GCP Cloud Run 격리 우회 활성 (원본 쓰기 차단됨)
+                격리 우회 요청 완료 (보안 API 응답 기준)
               </span>
             ) : (
-              <span>AWS ECS 태스크 침해 탐지 (GuardDuty CVE-2026-4192 시뮬레이션)</span>
+              <span>보안 API 영향 범위 · 조회 노드 {QUERIED_NODE_ID} (이 run 원본과 별개)</span>
             )}
           </div>
 
@@ -113,7 +117,7 @@ export function BlastRadiusMesh({
               onClick={onReroute}
               className="mt-0.5 inline-flex items-center gap-1 rounded border border-ink bg-red-600 px-2 py-0.5 font-mono text-[10px] font-bold text-white shadow-[1px_1px_0_0_var(--color-ink)] transition-transform hover:-translate-y-0.5 hover:bg-red-700 active:translate-y-0"
             >
-              <span>🚨 목표 0.4초 내 GCP 즉각 우회 (Drag/Click)</span>
+              <span>🚨 격리·우회 요청</span>
             </button>
           )}
         </div>

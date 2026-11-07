@@ -8,34 +8,33 @@ import * as THREE from "three";
 import { extractSourceNodeData, extractTargetNodeData } from "@/lib/topology3d";
 import type { RunStatus } from "@/lib/workflows";
 
-export type CutoverPhase = "aws_serving" | "hold" | "verify" | "switch" | "gcp_serving";
-
-export interface PhysicsMetrics {
-  awsCount: number;
-  gcpCount: number;
-  bufferedCount: number;
-  droppedCount: number;
-  phase: CutoverPhase;
-}
+/**
+ * 화면에 그리는 게이트 상태. 실시간 Worker mode/next_origin 이나 실측 cutover_steps 재생에서만 옵니다.
+ * - source: 원본 처리 · hold: 요청 보류 · switch: 보류 중 목적지로 경로 변경됨 · target: 목적지 처리
+ * - failed: 재생한 기록이 실패로 끝남 · unknown: 상태를 모름 (밸브 중립)
+ */
+export type CutoverPhase = "source" | "hold" | "switch" | "target" | "failed" | "unknown";
 
 interface Props {
   run: RunStatus;
   phase: CutoverPhase;
-  trafficRps: number;
-  resetToken: number;
-  onMetricsUpdate?: (metrics: PhysicsMetrics) => void;
+  /** 실측 요청 비율에서 나온 초당 구슬 수. null 이거나 0 이면 구슬을 만들지 않습니다. */
+  ballsPerSec: number | null;
 }
 
 const POOL_SIZE = 48;
 const SPHERE_RADIUS = 0.11;
+// 난수 대신 정해진 자리를 차례로 씁니다. 구슬 위치는 의미 없는 배치일 뿐입니다.
+const SPAWN_OFFSETS: [number, number][] = [
+  [-0.18, -0.12],
+  [0.12, 0.1],
+  [-0.05, 0.14],
+  [0.2, -0.08],
+  [-0.2, 0.05],
+  [0.04, -0.15],
+];
 
-export function CutoverPhysicsScene({
-  run,
-  phase,
-  trafficRps,
-  resetToken,
-  onMetricsUpdate,
-}: Props) {
+export function CutoverPhysicsScene({ run, phase, ballsPerSec }: Props) {
   const source = extractSourceNodeData(run);
   const target = extractTargetNodeData(run);
 
@@ -45,28 +44,15 @@ export function CutoverPhysicsScene({
   const holdGateBodyRef = useRef<CANNON.Body | null>(null);
   const holdGateMeshRef = useRef<THREE.Mesh | null>(null);
 
-  const countsRef = useRef({ aws: 0, gcp: 0, dropped: 0 });
-  const lastReportTimeRef = useRef(0);
-
   interface SphereItem {
     body: CANNON.Body;
     mesh: THREE.Mesh | null;
     active: boolean;
     bornAt: number;
-    counted: boolean;
   }
   const spheresRef = useRef<SphereItem[]>([]);
   const spawnTimerRef = useRef(0);
-
-  useEffect(() => {
-    countsRef.current = { aws: 0, gcp: 0, dropped: 0 };
-    spheresRef.current.forEach((s) => {
-      s.active = false;
-      s.counted = false;
-      s.body.position.set(0, -100, 0);
-      s.body.velocity.set(0, 0, 0);
-    });
-  }, [resetToken]);
+  const spawnIndexRef = useRef(0);
 
   useEffect(() => {
     const world = new CANNON.World();
@@ -130,7 +116,7 @@ export function CutoverPhysicsScene({
     world.addBody(valveBody);
     valveBodyRef.current = valveBody;
 
-    // 6. 좌측 AWS 수집통 (Static)
+    // 6. 좌측 원본 수집통 (Static)
     const awsBottom = new CANNON.Body({
       type: CANNON.Body.STATIC,
       shape: new CANNON.Box(new CANNON.Vec3(0.95, 0.08, 0.75)),
@@ -150,7 +136,7 @@ export function CutoverPhysicsScene({
     world.addBody(awsLeft);
     world.addBody(awsRight);
 
-    // 7. 우측 GCP 수집통 (Static)
+    // 7. 우측 목적지 수집통 (Static)
     const gcpBottom = new CANNON.Body({
       type: CANNON.Body.STATIC,
       shape: new CANNON.Box(new CANNON.Vec3(0.95, 0.08, 0.75)),
@@ -185,7 +171,6 @@ export function CutoverPhysicsScene({
         mesh: null,
         active: false,
         bornAt: 0,
-        counted: false,
       });
     }
     spheresRef.current = pool;
@@ -196,14 +181,17 @@ export function CutoverPhysicsScene({
     };
   }, []);
 
-  const isHolding = phase === "hold" || phase === "verify" || phase === "switch";
-  const isGcpTarget = phase === "switch" || phase === "gcp_serving";
+  const isHolding = phase === "hold" || phase === "switch";
+  const isTargetRoute = phase === "switch" || phase === "target";
+  const isKnownRoute = phase === "source" || isHolding || phase === "target";
 
-  const targetValveAngle = isGcpTarget ? -0.42 : 0.42;
+  // 모르는 상태와 실패 기록은 밸브를 수평(중립)으로 둡니다.
+  const targetValveAngle = !isKnownRoute ? 0 : isTargetRoute ? -0.42 : 0.42;
   const currentValveAngleRef = useRef(targetValveAngle);
   const currentHoldXRef = useRef(isHolding ? 0 : -1.25);
 
   useFrame(({ clock }, delta) => {
+    const now = clock.getElapsedTime();
     const world = worldRef.current;
     if (!world) return;
 
@@ -221,7 +209,7 @@ export function CutoverPhysicsScene({
       holdGateMeshRef.current.position.x = currentHoldXRef.current;
     }
 
-    // 2. 라우팅 전환 밸브 회전 제어 (AWS +24도 왼쪽 낙하 ↔ GCP -24도 오른쪽 낙하)
+    // 2. 라우팅 전환 밸브 회전 제어 (원본 +24도 왼쪽 낙하 ↔ 목적지 -24도 오른쪽 낙하, 모름은 수평)
     currentValveAngleRef.current = THREE.MathUtils.lerp(
       currentValveAngleRef.current,
       targetValveAngle,
@@ -237,27 +225,34 @@ export function CutoverPhysicsScene({
       valveMeshRef.current.rotation.z = currentValveAngleRef.current;
     }
 
-    // 3. 상단 요청 스폰
-    spawnTimerRef.current += delta;
-    const interval = 1.0 / Math.max(3, trafficRps);
-    if (spawnTimerRef.current >= interval) {
-      spawnTimerRef.current = 0;
-      const candidate = spheresRef.current.find((s) => !s.active);
-      if (candidate) {
+    // 3. 상단 요청 스폰: 실측 비율만큼만 만듭니다. 상태를 모르면 경로를 알 수 없으므로 만들지 않습니다.
+    const rate = isKnownRoute && ballsPerSec !== null && ballsPerSec > 0 ? ballsPerSec : 0;
+    if (rate > 0) {
+      // 탭이 숨겨졌다 돌아온 첫 프레임의 긴 delta 로 구슬이 한꺼번에 쏟아지지 않게 자릅니다.
+      spawnTimerRef.current += Math.min(delta, 0.1);
+      const interval = 1.0 / rate;
+      while (spawnTimerRef.current >= interval) {
+        spawnTimerRef.current -= interval;
+        const candidate = spheresRef.current.find((s) => !s.active);
+        if (!candidate) {
+          // 풀이 차면 밀린 몫을 쌓아 두지 않습니다 (나중에 없던 급증처럼 보이지 않게).
+          spawnTimerRef.current = 0;
+          break;
+        }
+        const [ox, oz] = SPAWN_OFFSETS[spawnIndexRef.current % SPAWN_OFFSETS.length];
+        spawnIndexRef.current += 1;
         candidate.active = true;
-        candidate.bornAt = Date.now();
-        candidate.counted = false;
-        const jx = (Math.random() - 0.5) * 0.45;
-        const jz = (Math.random() - 0.5) * 0.35;
-        candidate.body.position.set(jx, 2.85, jz);
+        candidate.bornAt = now;
+        candidate.body.position.set(ox, 2.85, oz);
         candidate.body.velocity.set(0, -0.4, 0);
         candidate.body.angularVelocity.set(0, 0, 0);
       }
+    } else {
+      spawnTimerRef.current = 0;
     }
 
     world.step(1 / 60, Math.min(delta, 0.1));
 
-    let bufferedCount = 0;
     spheresRef.current.forEach((item) => {
       if (!item.active) {
         if (item.mesh) item.mesh.visible = false;
@@ -278,23 +273,9 @@ export function CutoverPhysicsScene({
         );
       }
 
-      if (item.body.position.y > 1.65) {
-        bufferedCount++;
-      }
-
-      if (!item.counted && item.body.position.y < -0.55) {
-        if (item.body.position.x < -1.0) {
-          item.counted = true;
-          countsRef.current.aws += 1;
-        } else if (item.body.position.x > 1.0) {
-          item.counted = true;
-          countsRef.current.gcp += 1;
-        }
-      }
-
-      const age = Date.now() - item.bornAt;
+      const age = now - item.bornAt;
       // 보류 중일 때는 버퍼 내부 구슬이 사라지지 않도록 유지
-      const maxAge = isHolding && item.body.position.y > 1.6 ? 15000 : 4800;
+      const maxAge = isHolding && item.body.position.y > 1.6 ? 15 : 4.8;
       if (age > maxAge || item.body.position.y < -2.1) {
         item.active = false;
         item.body.position.set(0, -100, 0);
@@ -302,17 +283,6 @@ export function CutoverPhysicsScene({
       }
     });
 
-    const now = clock.getElapsedTime();
-    if (now - lastReportTimeRef.current > 0.12 && onMetricsUpdate) {
-      lastReportTimeRef.current = now;
-      onMetricsUpdate({
-        awsCount: countsRef.current.aws,
-        gcpCount: countsRef.current.gcp,
-        bufferedCount,
-        droppedCount: countsRef.current.dropped,
-        phase,
-      });
-    }
   });
 
   return (
@@ -339,7 +309,7 @@ export function CutoverPhysicsScene({
 
         <Html position={[1.65, 0.15, 0]} center distanceFactor={9} zIndexRange={[10, 0]}>
           <div className="whitespace-nowrap rounded border border-ink/30 bg-white px-2 py-0.5 font-mono text-[10px] font-medium text-ink shadow-[1px_1px_0_0_var(--color-ink)]">
-            Cloudflare Worker · {isHolding ? "요청 보류(HOLD) 활성" : "통과(PASS)"}
+            트래픽 게이트 (Worker) · {isHolding ? "요청 보류(HOLD)" : isKnownRoute ? "통과" : "상태 미제공"}
           </div>
         </Html>
       </group>
@@ -349,7 +319,7 @@ export function CutoverPhysicsScene({
         <mesh ref={valveMeshRef} castShadow receiveShadow>
           <boxGeometry args={[2.5, 0.15, 1.35]} />
           <meshStandardMaterial
-            color={isGcpTarget ? "#047857" : "#3730a3"}
+            color={!isKnownRoute ? (phase === "failed" ? "#be123c" : "#a8a29e") : isTargetRoute ? "#047857" : "#3730a3"}
             roughness={0.5}
           />
           <Edges color="#1c1917" threshold={15} />
@@ -360,7 +330,7 @@ export function CutoverPhysicsScene({
         </mesh>
       </group>
 
-      {/* 3. 좌측 원본 AWS 수집통 (Static) */}
+      {/* 3. 좌측 원본 수집통 (Static) */}
       <group position={[-2.35, -0.95, 0]}>
         <mesh position={[0, -0.3, 0]} receiveShadow>
           <boxGeometry args={[1.9, 0.12, 1.35]} />
@@ -384,11 +354,11 @@ export function CutoverPhysicsScene({
         </Html>
       </group>
 
-      {/* 4. 우측 목적지 GCP 수집통 (Static) */}
+      {/* 4. 우측 목적지 수집통 (Static) */}
       <group position={[2.35, -0.95, 0]}>
         <mesh position={[0, -0.3, 0]} receiveShadow>
           <boxGeometry args={[1.9, 0.12, 1.35]} />
-          <meshStandardMaterial color={isGcpTarget ? "#ecfdf5" : "#ffffff"} />
+          <meshStandardMaterial color={phase === "target" ? "#ecfdf5" : "#ffffff"} />
           <Edges color="#1c1917" threshold={15} />
         </mesh>
         <mesh position={[-0.92, 0.12, 0]} castShadow>
@@ -408,7 +378,7 @@ export function CutoverPhysicsScene({
         </Html>
       </group>
 
-      {/* 5. 트래픽 구슬 (Dynamic Spheres) */}
+      {/* 5. 트래픽 구슬 (Dynamic Spheres): 실측 요청 비율을 눈에 보이게 옮긴 것이며 구슬 수가 요청 수는 아닙니다 */}
       {Array.from({ length: POOL_SIZE }).map((_, idx) => (
         <mesh
           key={idx}
@@ -422,7 +392,7 @@ export function CutoverPhysicsScene({
         >
           <sphereGeometry args={[SPHERE_RADIUS, 14, 14]} />
           <meshStandardMaterial
-            color={isGcpTarget ? "#047857" : "#3730a3"}
+            color={isTargetRoute ? "#047857" : "#3730a3"}
             roughness={0.35}
           />
           <Edges color="#1c1917" threshold={25} />
