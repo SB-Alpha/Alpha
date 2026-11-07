@@ -66,8 +66,12 @@ def test_other_clouds_are_blocked_even_when_everything_else_passes(cloud):
 @pytest.mark.parametrize("change,missing", [
     ({"network": SourceNetwork(vpc_id="v", cidr="10.0.0.0/16", route_table_ids=[])}, "라우트 테이블"),
     ({"network": SourceNetwork(vpc_id="v", cidr=None, route_table_ids=["r"])}, "VPC 대역"),
-    ({"db": SourceDb(database="app")}, "DB 주소"),
-    ({"db": SourceDb(host="h")}, "DB 이름"),
+    ({"network": SourceNetwork(cidr="10.0.0.0/16", route_table_ids=["r"])}, "VPC ID"),
+    ({"db": SourceDb(database="app", port=5432)}, "DB 주소"),
+    ({"db": SourceDb(host="h", port=5432)}, "DB 이름"),
+    ({"db": SourceDb(host="h", database="app")}, "DB 포트"),  # 비어 있으면 null 로 넘어가 기본값 5432 가 안 붙는다
+    ({"tables": []}, "이전할 테이블"),
+    ({"tables": ["alpha_cdc.cutover_marker"]}, "이전할 테이블"),  # workflows 가 빼고 넘기면 빈 목록
     ({"account_id": None}, "계정 ID"),
     ({"region": None}, "리전"),
     ({"app": SourceApp()}, "앱 DB 사용자"),
@@ -78,6 +82,14 @@ def test_aws_source_missing_a_required_fact_is_unknown_and_blocks(change, missin
     plan = plan_with(full_source(**change))
     assert check(plan).result == "unknown" and not plan.approvable
     assert missing in check(plan).detail
+    with pytest.raises(Exception):  # 이 검사가 막는 원본은 실제 입력 검증에서도 실패한다
+        src = full_source(**change).model_dump(mode="json")
+        src["tables"] = [t for t in src["tables"] if not t.startswith("alpha_cdc.")]
+        SourceInput.model_validate(src)
+
+
+def test_a_source_that_passes_the_check_also_passes_the_real_contract():
+    SourceInput.model_validate(full_source().model_dump(mode="json"))
 
 
 def test_no_source_given_means_no_check_for_direct_plan_inputs():

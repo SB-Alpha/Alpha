@@ -218,10 +218,13 @@ def source_executable_check(src: SourceInfo) -> PlanCheck:
             detail=(f"원본이 {src.cloud} 입니다. 지금은 조사·계획까지만 지원하고, 이전 실행(VPN·CDC)은 AWS 원본의 "
                     "VPC 대역·라우트 테이블을 요구해서 승인해도 시작 단계의 입력 검증에서 실패합니다."),
         )
+    # workflows 가 넘기기 전에 CDC 내부 테이블(alpha_cdc.*)을 빼므로 그걸 뺀 목록이 비면 안 된다
+    tables = [t for t in src.tables if not t.startswith("alpha_cdc.")]
     missing = [
         label for label, ok in (
-            ("계정 ID", src.account_id), ("리전", src.region), ("DB 주소", src.db.host), ("DB 이름", src.db.database),
-            ("VPC 대역", src.network.cidr), ("라우트 테이블", src.network.route_table_ids),
+            ("계정 ID", src.account_id), ("리전", src.region), ("DB 주소", src.db.host),
+            ("DB 포트", src.db.port is not None), ("DB 이름", src.db.database), ("이전할 테이블", tables),
+            ("VPC ID", src.network.vpc_id), ("VPC 대역", src.network.cidr), ("라우트 테이블", src.network.route_table_ids),
             ("앱 DB 사용자", src.app.db_user), ("AWS 자격 증명 참조", src.credentials_ref.cloud),
             ("DB 관리자 참조", src.credentials_ref.db_admin),
         ) if not ok
