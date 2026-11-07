@@ -35,18 +35,18 @@ export default function JourneyCanvasView({ run }: Props) {
     setFlyTrigger((prev) => prev + 1);
   }, []);
 
-  // 키보드 좌/우 방향키 탐색 지원 (페이지 상하 스크롤을 방해하지 않도록 ArrowLeft/ArrowRight 만 사용)
+  // 키보드 좌/우 방향키 탐색 지원 (버튼 포커스나 Space 스크롤을 방해하지 않도록 화살표 좌우키만 처리)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement ||
-        e.target instanceof HTMLSelectElement
+        e.target instanceof HTMLSelectElement ||
+        e.target instanceof HTMLButtonElement
       ) {
         return;
       }
-      if (e.key === "ArrowRight" || e.key === " ") {
-        e.preventDefault();
+      if (e.key === "ArrowRight") {
         setIsOverview(false);
         setActiveStageIdx((prev) => {
           const next = Math.min(5, prev + 1);
@@ -54,7 +54,6 @@ export default function JourneyCanvasView({ run }: Props) {
           return next;
         });
       } else if (e.key === "ArrowLeft") {
-        e.preventDefault();
         setIsOverview(false);
         setActiveStageIdx((prev) => {
           const next = Math.max(0, prev - 1);

@@ -21,7 +21,12 @@ type Props = {
   readiness: CutoverReadiness | null;
   isBusy: boolean;
   isTrafficUncertain: boolean;
-  onApprove: (comment: string, approver: string, preflight: DisplayedPreflight, acknowledgeUnknown: boolean) => void;
+  onApprove: (
+    comment: string,
+    approver: string,
+    preflight: DisplayedPreflight,
+    acknowledgeUnknown: boolean,
+  ) => Promise<unknown> | void;
 };
 
 /** 어느 요청의 응답인지 key 로 남깁니다. key 가 다르면 지난 점검이므로 보여주지 않습니다. */
@@ -90,9 +95,13 @@ export function CutoverApprovalPanel({ run, runId, readiness, isBusy, isTrafficU
   const isUnknownAcknowledged = decision === "needs_confirmation" && isUnknownConfirmed;
   const canApprove = hasApprover && (decision === "go" || isUnknownAcknowledged);
 
-  const handleApproveClick = () => {
-    setSequenceTrigger((n) => n + 1);
-    onApprove(comment, approver, displayed, isUnknownAcknowledged);
+  const handleApproveClick = async () => {
+    try {
+      await onApprove(comment, approver, displayed, isUnknownAcknowledged);
+      setSequenceTrigger((n) => n + 1);
+    } catch {
+      // 승인이 거절되거나 실패하면 전환 시뮬레이션 애니메이션을 시작하지 않습니다.
+    }
   };
 
   return (

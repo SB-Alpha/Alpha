@@ -67,7 +67,14 @@ export function PipelineDrivingScene({
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement ||
+        e.target instanceof HTMLButtonElement
+      ) {
+        return;
+      }
       switch (e.key.toLowerCase()) {
         case "w":
         case "arrowup":
