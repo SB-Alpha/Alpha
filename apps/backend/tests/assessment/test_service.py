@@ -2,7 +2,14 @@ from fastapi.testclient import TestClient
 
 from app.features.assessment import db as db_part
 from app.features.assessment import service
-from app.features.assessment.schemas import AssessmentInput, DbAssessment, DbInfo, SourceDb, TableInfo
+from app.features.assessment.schemas import (
+    AssessmentInput,
+    DbAssessment,
+    DbInfo,
+    SourceDb,
+    SourceNetwork,
+    TableInfo,
+)
 from app.main import app
 
 from .fakes import ACCOUNT, session
@@ -43,7 +50,10 @@ def test_db_part_filled_makes_plan_approvable(monkeypatch):
                          instance_class="db.t3.micro", allocated_storage_gb=20, logical_replication=True,
                          publicly_accessible=True,
                          tables=[TableInfo(name="work_items", has_primary_key=True)]),
-            source_db=SourceDb(instance_id="db-alpha-target", port=5432, version="16.15"),
+            # 실제 조사는 주소·이름·VPC 대역·라우트 테이블까지 채운다. 이전 실행이 이 값들을 요구해서 판정도 이를 본다
+            source_db=SourceDb(instance_id="db-alpha-target", host="db-alpha.example.internal", port=5432,
+                               database="postgres", version="16.15"),
+            network=SourceNetwork(vpc_id="vpc-1", cidr="172.31.0.0/16", route_table_ids=["rtb-1"]),
         )
 
     monkeypatch.setattr(db_part, "collect", fake_db)

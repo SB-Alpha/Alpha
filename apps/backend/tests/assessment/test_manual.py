@@ -41,7 +41,9 @@ def _inp(**manual_overrides):
 def test_manual_source_gives_same_output_shape_without_aws():
     out = service.run(_inp())
     infra = out.plan.target_infra
-    assert out.plan.approvable  # 입력한 값으로 4개 조건 판정
+    # 입력한 값으로 판정하는 조건은 모두 통과하고, 막는 것은 "이전 실행 입력" 하나뿐이다 (azure 원본은 아직 조사·계획까지)
+    assert [c.id for c in out.plan.checks if c.result != "pass"] == ["source_executable"]
+    assert not out.plan.approvable and out.source.cloud == "azure"
     assert infra.cpu == 1 and infra.memory == 1024 and infra.container_port == 8080
     assert infra.source_service_name == "target-app"  # 이미지 저장소 이름 우선 (AWS 와 같은 규칙)
     assert (infra.db_memory_gib, infra.db_vcpu, infra.db_tier) == (1, 2, "db-g1-small")

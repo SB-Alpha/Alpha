@@ -7,6 +7,7 @@ discovery + planning 통합 (11/4). 담당: 김준석(DB·네트워크·원본 �
 provisioning 이 쓸 `plan.target_infra` 와 db_migration 이 쓸 `source` 를 함께 돌려줍니다.
 
 - 필수 조건은 코드로 검사합니다 (`rules.py`). AI 판단으로 통과시키지 않습니다.
+- "승인 가능"은 이전 실행을 실제로 시작할 수 있다는 뜻이어야 합니다. 검사 `source_executable` 이 원본 정보가 이전 실행(db_migration `SourceInput`)의 입력 계약을 채우는지 봅니다. 지금 workflows → db_migration 은 AWS 원본(VPC 대역·라우트 테이블 필요)만 받으므로, GCP·Azure·온프레미스 원본은 조사·계획까지 되고 이 검사에서 승인 불가가 됩니다. 새 다클라우드 입력(`db_migration/run_input.py`)이 workflows 에 연결되면 `rules.EXECUTABLE_SOURCE_CLOUDS` 를 넓힙니다.
 - 조회하지 못한 값은 지어내지 않고 `None` + `gaps` 로 남깁니다 → 해당 check 는 `unknown` → 승인 불가.
 - 키·비밀번호 원문은 받지 않습니다. 이름표(`secret://...`)만 받고, 조회할 때만 꺼냅니다.
   이름은 db_migration #31 저장 API 규칙을 따릅니다: AWS 키 `secret://<run_id>/source-cloud`, DB 관리자 `secret://<run_id>/source-db-admin`.

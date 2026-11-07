@@ -65,7 +65,17 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
     if db_facts.username is None and app_res.db_user:
         # 목적지 DB 사용자는 앱이 실제로 쓰는 PGUSER 를 따릅니다
         db_facts = db_facts.model_copy(update={"username": app_res.db_user})
-    inventory = InventoryForPlanning(app=app_res.facts, db=db_facts, gaps=gaps)
+    source = SourceInfo(
+        cloud=_source_cloud(inp),
+        account_id=app_res.account_id,
+        region=region,
+        db=db_res.source_db,
+        network=db_res.network,
+        app=SourceApp(db_user=app_res.db_user),
+        tables=[f"{t.schema_name}.{t.name}" for t in db_facts.tables],
+        credentials_ref=SourceCredentials(cloud=_cloud_ref(inp, gaps), db_admin=_ref_or_none(inp.db_admin_ref, "db_admin_ref", gaps)),
+    )
+    inventory = InventoryForPlanning(app=app_res.facts, db=db_facts, gaps=gaps, source=source)
     plan = plan_part.build(PlanningInput(
         inventory=inventory, target=TargetSelection(cloud=inp.target_cloud, region=inp.target_region)
     ))
@@ -74,20 +84,17 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
         plan = ai_part.enhance(plan)  # 실패하면 규칙 결과 그대로
         plan = ai_mapping_part.attach(plan, inventory)  # 환경 변수 대응·빠진 의존성 제안. 판정은 안 바꿈
 
-    source = SourceInfo(
-        account_id=app_res.account_id,
-        region=region,
-        db=db_res.source_db,
-        network=db_res.network,
-        app=SourceApp(db_user=app_res.db_user),
-        tables=[f"{t.schema_name}.{t.name}" for t in db_facts.tables],
-        credentials_ref=SourceCredentials(cloud=_cloud_ref(inp, gaps),
-                                          db_admin=_ref_or_none(inp.db_admin_ref, "db_admin_ref", gaps)),
-    )
 
     # 단계 성공은 run() 반환으로 workflows 가 정합니다. report 는 진행 중 상태만 (PR #22 RunContext)
     report(100, "계획 생성 완료")
     return AssessmentOutput(source=source, plan=plan, gaps=gaps)
+
+
+def _source_cloud(inp: AssessmentInput) -> str:
+    """원본이 있는 클라우드. db_migration 의 SourceInput.cloud 로 넘어갑니다."""
+    if inp.source_kind == "manual":
+        return (inp.manual.cloud if inp.manual else "manual").strip().lower() or "manual"
+    return "aws" if inp.source_kind == "aws" else inp.source_kind
 
 
 def _collect_aws(inp: AssessmentInput, session: AwsSession | None, report, gaps: list[str]):

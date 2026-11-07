@@ -75,6 +75,9 @@ class InventoryForPlanning(BaseModel):
     app: AppInfo
     db: DbInfo
     gaps: list[str] = Field(default_factory=list)  # 조회하지 못한 항목
+    # 이전 실행(db_migration)에 넘길 원본 정보. 주면 "이 정보로 실제 이전을 시작할 수 있는가"도 판정합니다.
+    # 직접 사실을 넣는 /assessment/plan 처럼 모르면 None 이고, 그때는 이 검사를 하지 않습니다.
+    source: "SourceInfo | None" = None
 
 
 # 목적지 클라우드. workflows 의 TargetInfraType 과 같은 값. 호환 규칙이 없는 목적지(ncp)는 호환 검사가 unknown
@@ -111,6 +114,7 @@ class PlanCheck(BaseModel):
         "replication_slot_available",
         "target_platform_compatible",
         "image_available",
+        "source_executable",
     ]
     title: str
     result: CheckResult
@@ -343,6 +347,7 @@ class SourceCredentials(BaseModel):
 class SourceInfo(BaseModel):
     """db_migration 입력. 칸 이름 = cdc 명세 2절 (안재현). 모르는 값은 None 으로 둡니다."""
 
+    cloud: str = "aws"  # 원본이 있는 클라우드. db_migration 의 SourceInput.cloud 와 같은 값 (aws · gcp · azure · onprem)
     account_id: str | None = None
     region: str | None = None
     db: SourceDb = Field(default_factory=SourceDb)

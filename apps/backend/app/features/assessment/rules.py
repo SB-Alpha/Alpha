@@ -8,6 +8,7 @@ import re
 from . import targets
 from .app import PROVISIONING_INJECTED_ENV, has_secret_value, looks_secret
 from .schemas import (
+    SourceInfo,
     AppInfo,
     InventoryForPlanning,
     PlanCheck,
@@ -197,7 +198,41 @@ def run_checks(inv: InventoryForPlanning, target: TargetSelection | None = None)
             detail="원본 이미지 주소 미제공",
         ))
 
+    if inv.source is not None:
+        checks.append(source_executable_check(inv.source))
+
     return checks
+
+
+# 지금 workflows → db_migration.execute(기존 입력 계약, SourceInput)이 받는 원본은 AWS 뿐입니다. VPC 대역과 라우트 테이블이
+# 필수라서 GCP·Azure·온프레미스 원본은 조사·계획까지만 되고, 승인해도 이전 시작에서 입력 검증이 실패합니다.
+# 새 다클라우드 입력(db_migration/run_input.py)이 workflows 에 연결되면 이 목록을 넓힙니다.
+EXECUTABLE_SOURCE_CLOUDS = ("aws",)
+
+
+def source_executable_check(src: SourceInfo) -> PlanCheck:
+    title = "이전 실행 입력"
+    if src.cloud not in EXECUTABLE_SOURCE_CLOUDS:
+        return PlanCheck(
+            id="source_executable", title=title, result="fail",
+            detail=(f"원본이 {src.cloud} 입니다. 지금은 조사·계획까지만 지원하고, 이전 실행(VPN·CDC)은 AWS 원본의 "
+                    "VPC 대역·라우트 테이블을 요구해서 승인해도 시작 단계의 입력 검증에서 실패합니다."),
+        )
+    missing = [
+        label for label, ok in (
+            ("계정 ID", src.account_id), ("리전", src.region), ("DB 주소", src.db.host), ("DB 이름", src.db.database),
+            ("VPC 대역", src.network.cidr), ("라우트 테이블", src.network.route_table_ids),
+            ("앱 DB 사용자", src.app.db_user), ("AWS 자격 증명 참조", src.credentials_ref.cloud),
+            ("DB 관리자 참조", src.credentials_ref.db_admin),
+        ) if not ok
+    ]
+    if missing:
+        return PlanCheck(
+            id="source_executable", title=title, result="unknown",
+            detail="이전 실행에 필요한 원본 정보를 못 받았습니다: " + ", ".join(missing),
+        )
+    return PlanCheck(id="source_executable", title=title, result="pass",
+                     detail="이전 실행(db_migration)이 요구하는 원본 정보가 모두 있음")
 
 
 def _platform_check(app: AppInfo, cloud: str) -> list[PlanCheck]:
