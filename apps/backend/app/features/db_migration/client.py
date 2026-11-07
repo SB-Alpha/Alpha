@@ -243,6 +243,17 @@ class CdcAgentClient:
         """TCP check from the CDC nodes: [{host, port}] -> [{host, port, ok, error}]."""
         return self._call("POST", "/probe", endpoints)
 
+    def catalog(self, query: dict) -> dict:
+        """Transient DB account for catalog reads only. Never echo a remote error containing the body."""
+        if self._is_simulated:
+            raise AgentError(409, "catalog discovery requires a real agent; simulation is not implemented")
+        try:
+            return self._call("POST", "/catalog", query)
+        except AgentError as exc:
+            raise AgentError(exc.status_code, "PostgreSQL catalog request failed") from None
+        except (httpx.HTTPError, ValueError):
+            raise AgentError(502, "PostgreSQL catalog request failed") from None
+
     def wait_for(self, job_id: str, phases: set[str], timeout_s: float, interval_s: float = 3) -> dict:
         """Poll until the job reaches one of the phases. A failed job raises."""
         deadline = time.monotonic() + timeout_s

@@ -13,6 +13,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from cdc_agent.catalog import router as catalog_router
 from cdc_agent.config import get_settings
 from cdc_agent.jobs import SETUP_PHASES, CloseRefused, JobBusy, Runner, WorkerNotReady
 from cdc_agent.models import JOB_ID_PATTERN, CutoverRequest, Job, JobRequest
@@ -49,6 +50,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="alpha-cdc-agent", version="0.1.0", lifespan=lifespan)
+app.include_router(catalog_router)
 
 
 def load(job_id: str) -> Job:
