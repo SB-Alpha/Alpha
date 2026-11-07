@@ -22,6 +22,8 @@ const LINE_COLORS: Record<string, string> = {
 
 const SECONDS_PER_MONTH = 730 * 3600;
 const CLOUD_RUN_REQ_PER_MILLION_USD = 0.4;
+// 읽기 우회를 허용하는 복제 지연 상한. 백엔드 finops/schemas.py MAX_SAFE_LAG_BYTES·전환 준비 점검과 같은 1 MiB
+const MAX_SAFE_LAG_BYTES = 1024 * 1024;
 const AVG_RESPONSE_KB = 4.0;
 
 /** 실제 RunStatus 에서 읽은 실시간 지표 (가상 생성값 없음) */
@@ -144,8 +146,10 @@ export function deriveLiveView(
 
   let liveArb: ArbitrageResult | null | undefined = baseArb;
   if (baseArb && crInstanceFull !== null) {
-    const lagFenced =
-      typeof replicationLagBytes === "number" && Number.isFinite(replicationLagBytes) && replicationLagBytes > 1024;
+    // 지연을 모르면 안전하다고 보지 않습니다 (백엔드 arbitrage.py 와 같은 판단)
+    const lagKnown =
+      typeof replicationLagBytes === "number" && Number.isFinite(replicationLagBytes) && replicationLagBytes >= 0;
+    const lagFenced = !lagKnown || replicationLagBytes > MAX_SAFE_LAG_BYTES;
     const baselineUsd = baseArb.baseline_monthly_cost ?? fargateApp;
     const egressPerGb = baseArb.egress_usd_per_gb;
     const readRatio = 0.8;
@@ -181,7 +185,9 @@ export function deriveLiveView(
           arbitrage_monthly_cost: baselineUsd,
           monthly_savings: 0,
           savings_percent: 0,
-          recommendation: "FENCED_PRIMARY: 복제 지연으로 인해 모든 트래픽이 원본 마스터에 고정되었습니다.",
+          recommendation: lagKnown
+            ? "FENCED_PRIMARY: 복제 지연으로 인해 모든 트래픽이 원본 마스터에 고정되었습니다."
+            : "미제공: 복제 지연을 받지 못해 읽기 우회를 하지 않고 원본 마스터에 고정했습니다.",
         };
       } else if (egressUsd !== null) {
         const arbTotalUsd = targetAppUsd + egressUsd;

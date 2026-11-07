@@ -161,8 +161,12 @@ def calculate_arbitrage(
     ) * HOURS_PER_MONTH
 
     # 2. 복제 지연(Replication Lag) 세이프가드 검사
-    lag_fenced = req.replication_lag_bytes is not None and req.replication_lag_bytes > req.max_safe_lag_bytes
-    if lag_fenced:
+    # 지연을 모르면(None) 안전하다고 보지 않고 읽기 우회를 하지 않습니다. 모르는 값을 0 으로 채우지 않는 원칙과 같습니다.
+    lag_unknown = req.replication_lag_bytes is None
+    lag_fenced = lag_unknown or req.replication_lag_bytes > req.max_safe_lag_bytes
+    if lag_unknown:
+        reasons.append("미제공: 복제 지연을 받지 못해 읽기 우회를 하지 않고 원본 마스터로 100% 펜싱했습니다.")
+    elif lag_fenced:
         reasons.append(
             f"복제 지연({req.replication_lag_bytes:,} B)이 안전 임계치({req.max_safe_lag_bytes:,} B)를 "
             f"초과하여 데이터 일관성 보호를 위해 읽기 우회를 차단하고 원본 마스터로 100% 펜싱했습니다."

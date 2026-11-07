@@ -26,6 +26,9 @@ MAX_APP_INSTANCES = 1000
 MAX_DB_VCPU = 128
 MAX_DB_MEMORY_GIB = 4096
 MAX_DB_STORAGE_GB = 64 * 1024
+# 읽기 우회를 허용하는 복제 지연 상한. 전환 준비 점검(workflows/readiness.py MAX_REPLICATION_LAG_BYTES)과 같은 값입니다.
+# 2026-11-07 실제 RDS→Cloud SQL 이전에서 평소 지연은 152 B~56 KB 였습니다. 다른 모듈은 import 하지 않는 규칙이라 값만 맞춥니다
+MAX_SAFE_LAG_BYTES = 1024 * 1024
 
 # 숫자 없이도 비용 판단·추천이 되는 표현. 이런 문장은 코드(service.rule_summary)만 씁니다.
 # AI 설명(ai.check_notes)과 크기 제안 문장(Rightsizing)이 같은 목록으로 검사받습니다.
@@ -161,8 +164,8 @@ class Traffic(BaseModel):
     rps: float = Field(default=0, ge=0, le=100_000, allow_inf_nan=False)  # 요청이 있는 시간의 초당 평균 요청 수
     # 요청 하나를 처리하는 평균 시간. RPS 교차점(필요한 Cloud Run 인스턴스 수)에만 씁니다. 모르면 None
     avg_latency_ms: float | None = Field(default=None, gt=0, le=60_000, allow_inf_nan=False)
-    replication_lag_bytes: int | None = Field(default=None, ge=0)
-    max_safe_lag_bytes: int = Field(default=1024, ge=0)
+    replication_lag_bytes: int | None = Field(default=None, ge=0)  # 실측 복제 지연. 모르면 None(읽기 우회 안 함)
+    max_safe_lag_bytes: int = Field(default=MAX_SAFE_LAG_BYTES, ge=0)
 
 
 class CostRequest(BaseModel):
@@ -219,8 +222,8 @@ class ArbitrageRequest(BaseModel):
     idle_percent: float = Field(default=40.0, ge=0.0, le=95.0, allow_inf_nan=False)
     avg_latency_ms: float = Field(default=150.0, gt=0, le=60_000, allow_inf_nan=False)
     avg_response_kb: float = Field(default=4.0, gt=0, le=10_000, allow_inf_nan=False)
-    replication_lag_bytes: int | None = Field(default=0, ge=0)
-    max_safe_lag_bytes: int = Field(default=1024, ge=0)
+    replication_lag_bytes: int | None = Field(default=None, ge=0)  # 실측 복제 지연. 모르면 None(읽기 우회 안 함)
+    max_safe_lag_bytes: int = Field(default=MAX_SAFE_LAG_BYTES, ge=0)
     read_after_write_fence_sec: float = Field(default=5.0, ge=0.0, le=300.0, allow_inf_nan=False)
     currency: str = Field(default="USD", pattern=r"^(USD|JPY|KRW)$")
     custom_fx_rate: float | None = Field(default=None, gt=0, le=10_000_000, allow_inf_nan=False)
