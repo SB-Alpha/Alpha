@@ -62,6 +62,13 @@ Cloud Run(요청 없는 시간 0대)과 Fargate(내내 켜짐)의 앱 컴퓨팅�
   None 이고 `reason` 에 이유를 적습니다. 한도 밖은 짐작하지 않습니다.
 - 동시 처리 80 은 Terraform 이 `max_instance_request_concurrency` 를 적지 않아 쓰는 Cloud Run 기본값입니다. 실측이 아닙니다.
 
+### 차익거래 환율·송신 (`arbitrage.py`, `POST /finops/arbitrage`, `/estimate` 의 `arbitrage`)
+
+- 환율은 표에 적어 두지 않습니다. USD 는 1.0, JPY·KRW 는 `custom_fx_rate` 를 받았을 때만 환산하고, 없으면 `fx_rate` 와 환산 금액이 None 입니다.
+- 송신(egress) 단가는 AWS Price List(`AWSDataTransfer`, 리전 → 인터넷)와 GCP Cloud Run 카탈로그(`PremiumInternetEgress`, 같은 대륙)에서 받고, 구간 요금 중 첫 유료 구간을 씁니다.
+  읽기 응답을 타깃이 내보내면 송신 요금을 원본 대신 타깃이 내므로 순 단가(GCP − AWS)만 셉니다. 음수면 송신 요금이 줄어든 것입니다.
+- 송신 단가를 못 받으면 읽기 가중치·절감액·교차점 RPS 를 내지 않고 "미제공" 으로 둡니다. RPS 0(IDLE)과 복제 지연 펜싱은 송신과 상관없이 그대로 판정합니다.
+
 ## 입력 / 출력
 
 | 계약 | 내용 |

@@ -349,6 +349,21 @@ _FARGATE_GB = re.compile(r"^[A-Z0-9]+-Fargate-GB-Hours$")
 # 같은 필터에 예약 용량용 'UnusedBox' 행이 하나 더 걸리므로 usagetype 으로 거릅니다
 _RDS_SINGLE_AZ = "-InstanceUsage:"
 AWS_RDS_GP3 = "General Purpose-GP3"
+# 인터넷 송신(AWSDataTransfer). 같은 transferType 에 'Global-DataTransfer-Out-Bytes'(전 세계 합산 무료 100GB) 행이
+# 있지만 fromRegionCode 가 비어 있어 리전 필터에서 빠집니다. 가속(…-ABytes)·피어링 행은 usagetype 으로 거릅니다
+AWS_EGRESS_TRANSFER = "AWS Outbound"
+_AWS_EGRESS = re.compile(r"^[A-Z0-9]+-DataTransfer-Out-Bytes$")
+
+
+def _aws_first_paid_tier(item: dict) -> tuple[float, str] | None:
+    """구간 요금(beginRange)에서 시작점이 가장 낮은 유료 구간의 (단가, 설명). 유료 구간이 없으면 None."""
+    dims = [dim for term in item.get("terms", {}).get("OnDemand", {}).values()
+            for dim in term.get("priceDimensions", {}).values()]
+    for dim in sorted(dims, key=lambda d: float(d.get("beginRange") or 0)):
+        usd = float(dim["pricePerUnit"]["USD"])
+        if usd > 0:
+            return usd, dim.get("description", "")
+    return None
 
 
 def _f(field: str, value: str) -> dict:
@@ -404,7 +419,8 @@ class AwsPrices:
 
     def _products(self, service_code: str, filters: list[dict]) -> list[dict]:
         if self._client is None:
-            region = next(f["Value"] for f in filters if f["Field"] == "regionCode")
+            # 데이터 송신(AWSDataTransfer) 행은 regionCode 가 없고 fromRegionCode 로 리전을 적습니다
+            region = next(f["Value"] for f in filters if f["Field"] in ("regionCode", "fromRegionCode"))
             return [item for item in self._bulk(service_code, region) if _matches(item["product"], filters)]
         items = []
         for page in self._client.get_paginator("get_products").paginate(
@@ -437,6 +453,18 @@ class AwsPrices:
             _f("regionCode", _region(region)), _f("productFamily", "Database Storage"),
             _f("databaseEngine", "PostgreSQL"), _f("volumeType", AWS_RDS_GP3), _f("deploymentOption", "Single-AZ")])
         return self._pick(items, lambda u: True, "GB-month", "rds gp3 storage")
+
+    def internet_egress(self, region: str) -> UnitPrice:
+        """리전에서 인터넷으로 나가는 송신 단가 (USD/GB). 구간 요금이라 첫 유료 구간을 씁니다."""
+        items = self._products("AWSDataTransfer", [
+            _f("fromRegionCode", _region(region)), _f("transferType", AWS_EGRESS_TRANSFER), _f("toLocation", "External")])
+        prices = []
+        for item in items:
+            usagetype = item["product"]["attributes"].get("usagetype", "")
+            tier = _aws_first_paid_tier(item) if _AWS_EGRESS.match(usagetype) else None
+            if tier is not None:
+                prices.append(UnitPrice(tier[0], "GB", f"{usagetype} ({tier[1]})"))
+        return _one(prices, "aws internet egress")
 
     def app_monthly(self, req: CostRequest) -> float:
         """Fargate 앱 월 비용. 서비스 태스크가 계속 떠 있어 트래픽과 상관없이 내내 켜진 값입니다."""
@@ -533,8 +561,27 @@ def _gcp_unit_price(sku: dict) -> float:
     # 무료 구간이 앞에 붙은 SKU 는 쓰지 않습니다 (CPU·메모리·DB 는 구간이 하나)
     if len(tiers) != 1:
         raise PriceUnavailable(f"{sku.get('description')}: 가격 구간 {len(tiers)}개")
-    price = tiers[0]["unitPrice"]
+    return _gcp_money(tiers[0]["unitPrice"])
+
+
+def _gcp_money(price: dict) -> float:
     return int(price.get("units") or 0) + int(price.get("nanos") or 0) / 1e9
+
+
+def _gcp_first_paid_tier(sku: dict) -> tuple[float, float]:
+    """구간 요금(startUsageAmount)에서 시작점이 가장 낮은 유료 구간의 (단가, 시작 사용량)."""
+    tiers = sku["pricingInfo"][-1]["pricingExpression"]["tieredRates"]
+    for tier in sorted(tiers, key=lambda t: float(t.get("startUsageAmount") or 0)):
+        usd = _gcp_money(tier["unitPrice"])
+        if usd > 0:
+            return usd, float(tier.get("startUsageAmount") or 0)
+    raise PriceUnavailable(f"{sku.get('description')}: 유료 구간 없음")
+
+
+# Cloud Run 카탈로그 안의 인터넷 송신 SKU. 대륙 간(serviceRegions = global) 행은 리전 필터에서 빠지고,
+# 리전마다 같은 대륙 안 송신 행 하나가 남습니다 (asia-northeast3 → "… AsiaPacific to AsiaPacific")
+GCP_EGRESS_GROUP = "PremiumInternetEgress"
+_RUN_EGRESS = re.compile(r"^Cloud Run Network Internet Data Transfer Out ")
 
 
 class GcpPrices:
@@ -555,6 +602,18 @@ class GcpPrices:
         if len(hits) != 1:
             raise PriceUnavailable(f"{pattern.pattern} @ {region}: {len(hits)}건")
         return UnitPrice(_gcp_unit_price(hits[0]), unit, hits[0].get("description", ""))
+
+    def internet_egress(self, region: str) -> UnitPrice:
+        """Cloud Run 에서 인터넷으로 나가는 송신 단가 (USD/GiB). 구간 요금이라 첫 유료 구간을 씁니다."""
+        region = _region(region)
+        hits = [s for s in self._skus(GCP_CLOUD_RUN)
+                if region in s.get("serviceRegions", []) and s.get("category", {}).get("usageType") == "OnDemand"
+                and s.get("category", {}).get("resourceGroup") == GCP_EGRESS_GROUP
+                and _RUN_EGRESS.search(s.get("description", ""))]
+        if len(hits) != 1:
+            raise PriceUnavailable(f"{_RUN_EGRESS.pattern} @ {region}: {len(hits)}건")
+        usd, start = _gcp_first_paid_tier(hits[0])
+        return UnitPrice(usd, "GiB", f"{hits[0].get('description', '')} ({start:g} GiB 부터 구간)")
 
     def app_instance_month(self, req: CostRequest, region: str) -> float:
         """Cloud Run 인스턴스 1대를 한 달 내내 켰을 때 (인스턴스 기반 과금)."""
@@ -603,6 +662,7 @@ _warm_guard = threading.Lock()
 
 def _warm_jobs(aws_region: str) -> list[Callable[[], object]]:
     return [lambda: aws_bulk_items("AmazonECS", aws_region), lambda: aws_bulk_items("AmazonRDS", aws_region),
+            lambda: aws_bulk_items("AWSDataTransfer", aws_region),
             lambda: gcp_list_skus(GCP_CLOUD_RUN), lambda: gcp_list_skus(GCP_CLOUD_SQL)]
 
 

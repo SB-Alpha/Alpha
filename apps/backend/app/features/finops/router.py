@@ -18,6 +18,16 @@ from .schemas import (
 router = APIRouter(prefix="/finops", tags=["finops"], on_startup=[estimate.warm_up])
 
 
+def _price_sources() -> tuple[estimate.AwsPrices, estimate.GcpPrices]:
+    """차익거래 egress 단가용 가격 객체. build_input 의 기본값과 같은 가격 API(가격표는 프로세스에 6시간 보관)."""
+    return estimate.AwsPrices(), estimate.GcpPrices()
+
+
+def _arbitrage(req: ArbitrageRequest) -> ArbitrageResult:
+    aws, gcp = _price_sources()
+    return arbitrage.calculate_arbitrage(req, aws=aws, gcp=gcp)
+
+
 @router.post("/estimate", response_model=FinopsEstimate)
 async def make_estimate(req: CostRequest) -> FinopsEstimate:
     """크기를 받아 AWS·GCP·Azure 가격 API 단가로 월 비용을 내고, 절감 비교와 설명 문장을 붙입니다.
@@ -28,11 +38,15 @@ async def make_estimate(req: CostRequest) -> FinopsEstimate:
     inp = await run_in_threadpool(estimate.build_input, req)
     rep = await run_in_threadpool(service.run, inp)
 
+    # 읽기 분산 대상은 GCP 후보입니다. GCP 후보가 없으면 리전을 짐작하지 않고 분석을 내지 않습니다
+    gcp_region = next((c.region for c in req.candidates if c.cloud == "gcp"), None)
     arb_result = None
-    if req.traffic is not None:
+    if req.traffic is not None and gcp_region is not None:
         arb_req = ArbitrageRequest(
             source_cloud=SOURCE_CLOUD,
             target_cloud="gcp",
+            source_region=req.source_region,
+            target_region=gcp_region,
             app_vcpu=req.app_vcpu or 0.5,
             app_memory_mib=req.app_memory_mib or 1024,
             app_instances=req.app_instances,
@@ -41,7 +55,7 @@ async def make_estimate(req: CostRequest) -> FinopsEstimate:
             idle_percent=req.traffic.idle_percent,
             avg_latency_ms=req.traffic.avg_latency_ms or 150.0,
         )
-        arb_result = await run_in_threadpool(arbitrage.calculate_arbitrage, arb_req)
+        arb_result = await run_in_threadpool(_arbitrage, arb_req)
 
     return FinopsEstimate(input=inp, report=rep, arbitrage=arb_result)
 
@@ -49,7 +63,7 @@ async def make_estimate(req: CostRequest) -> FinopsEstimate:
 @router.post("/arbitrage", response_model=ArbitrageResult)
 async def calculate_arbitrage_route(req: ArbitrageRequest) -> ArbitrageResult:
     """비용 변동성과 트래픽 패턴, 복제 지연을 종합하여 동적 차익거래 최적 라우팅을 계산합니다."""
-    return await run_in_threadpool(arbitrage.calculate_arbitrage, req)
+    return await run_in_threadpool(_arbitrage, req)
 
 
 @router.post("/report", response_model=FinopsReport)

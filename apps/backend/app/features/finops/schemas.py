@@ -197,12 +197,7 @@ class FinopsEstimate(BaseModel):
 
 # -- 비용 변동성 및 동적 차익거래 (Dynamic Cost-Arbitrage Routing) --------------------------
 # 소프트뱅크 인프라 비용 변동성 대응: 읽기/쓰기 분리 차익거래, 환율 반영, 복제 지연 펜싱
-
-DEFAULT_FX_RATES: dict[str, float] = {
-    "USD": 1.0,
-    "JPY": 154.5,
-    "KRW": 1420.0,
-}
+# 환율은 표에 적어 두지 않습니다. USD 가 아니면 custom_fx_rate 를 받았을 때만 환산하고, 없으면 금액은 None 입니다.
 
 
 class ArbitrageRequest(BaseModel):
@@ -210,6 +205,10 @@ class ArbitrageRequest(BaseModel):
 
     source_cloud: str = Field(default=SOURCE_CLOUD, pattern=CLOUD_SLUG)
     target_cloud: str = Field(default="gcp", pattern=CLOUD_SLUG)
+    # egress 단가를 조회할 리전. /estimate 는 CostRequest 의 원본 리전과 GCP 후보 리전을 넣습니다.
+    # 모양 검사는 조회할 때(estimate._region) 하고, 맞지 않으면 egress 가 "미제공" 입니다 (/estimate 가 500 이 되지 않게)
+    source_region: str = "ap-northeast-2"
+    target_region: str = "asia-northeast3"
     app_vcpu: float = Field(default=0.5, gt=0, le=MAX_APP_VCPU, allow_inf_nan=False)
     app_memory_mib: int = Field(default=1024, gt=0, le=MAX_APP_MEMORY_MIB)
     app_instances: int = Field(default=1, ge=1, le=MAX_APP_INSTANCES)
@@ -226,20 +225,23 @@ class ArbitrageRequest(BaseModel):
 
 
 class ArbitrageResult(BaseModel):
-    """동적 트래픽 차익거래 결과 및 추천 가중치."""
+    """동적 트래픽 차익거래 결과 및 추천 가중치. 금액은 요청 통화이고, 모르면 None("미제공") 입니다."""
 
-    read_weight_target: float  # 목적지로 보낼 읽기 트래픽 비율 (0.0 ~ 1.0)
-    read_weight_source: float  # 원본으로 유지할 읽기 트래픽 비율 (0.0 ~ 1.0)
+    read_weight_target: float | None  # 목적지로 보낼 읽기 트래픽 비율 (0.0 ~ 1.0). 판단할 수 없으면 None
+    read_weight_source: float | None  # 원본으로 유지할 읽기 트래픽 비율 (0.0 ~ 1.0). 판단할 수 없으면 None
     write_destination: str  # 쓰기 트래픽 처리 대상 ("SOURCE" - 항상 액티브 마스터)
     active_master: str  # 액티브 마스터 클라우드 ("SOURCE")
     lag_fenced: bool  # 복제 지연 초과로 읽기 우회가 차단되었는지 여부
-    baseline_monthly_cost: float  # 차익거래 없이 100% 원본 가동 시 월 비용
-    arbitrage_monthly_cost: float  # 동적 차익거래 적용 시 월 비용
-    monthly_savings: float  # 절감액
-    savings_percent: float  # 절감률 (%)
-    cross_cloud_egress_monthly_usd: float  # 크로스 클라우드 네트워크 Egress 요금 (USD)
+    baseline_monthly_cost: float | None  # 차익거래 없이 100% 원본 가동 시 월 비용. 환율이 없으면 None
+    arbitrage_monthly_cost: float | None  # 동적 차익거래 적용 시 월 비용
+    monthly_savings: float | None  # 절감액
+    savings_percent: float | None  # 절감률 (%)
+    # 읽기 응답을 타깃이 내보낼 때 늘거나 줄어드는 인터넷 송신 요금 (USD, 음수면 줄어듦). 단가를 모르면 None
+    cross_cloud_egress_monthly_usd: float | None
+    egress_usd_per_gb: float | None = None  # 순 송신 단가 (타깃 - 원본, USD/GB)
+    egress_source: str | None = None  # 송신 단가 출처: API 이름·조회 날짜·고른 항목 (CostLine.source 와 같은 식)
     currency: str  # 통화 코드
-    fx_rate: float  # 적용 환율
+    fx_rate: float | None  # 적용 환율. USD 는 1.0, JPY·KRW 는 custom_fx_rate 를 받았을 때만
     crossover_rps: float | None = None  # 전체 전환 변곡점 RPS
     recommendation: str  # 운영 권고
     reasons: list[str]  # 상세 근거 및 제약 사항

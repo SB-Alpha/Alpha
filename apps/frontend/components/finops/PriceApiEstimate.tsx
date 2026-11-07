@@ -2,7 +2,6 @@
 
 import { NOT_PROVIDED } from "@/lib/finops";
 import type { ArbitrageResult, CloudCost, Crossover, EstimateState, FinopsEstimate, Saving } from "@/lib/finopsApi";
-import { useState } from "react";
 
 // 백엔드 /finops/estimate 결과를 그대로 그립니다. 이 파일은 계산하지 않습니다 (금액·절감률·교차점 모두 백엔드 값).
 
@@ -87,101 +86,71 @@ function CrossoverTile({ x }: { x: Crossover }) {
   );
 }
 
-const FX_RATES: Record<string, { rate: number; symbol: string }> = {
-  USD: { rate: 1.0, symbol: "$" },
-  JPY: { rate: 154.5, symbol: "¥" },
-  KRW: { rate: 1420.0, symbol: "₩" },
-};
+/** 상태 칩 하나. 복제 지연 차단이 먼저이고, 비중을 못 정했으면 "미제공" 입니다 (0% 로 쓰지 않음). */
+function arbitrageStatus(arb: ArbitrageResult): string {
+  if (arb.lag_fenced) return "복제 지연으로 원본 고정";
+  if (arb.recommendation.startsWith(NOT_PROVIDED) || arb.read_weight_target === null || arb.read_weight_source === null) {
+    return NOT_PROVIDED;
+  }
+  return `GCP ${Math.round(arb.read_weight_target * 100)}% · AWS ${Math.round(arb.read_weight_source * 100)}%`;
+}
 
+/** egress 단가는 소수 셋째 자리 이하도 있어 usd() 의 두 자리 반올림을 쓰지 않습니다. 순차이라 음수일 수 있습니다. */
+const usdPerGb = (v: number) => `${v < 0 ? "-" : ""}$${Math.abs(v).toLocaleString("en-US", { maximumFractionDigits: 4 })}/GB`;
+
+/** egress 는 비용이 아니라 원본(AWS) 대비 순차이입니다. 음수면 목적지 송신이 더 쌉니다. */
+const signedUsd = (v: number | null) => (v === null ? NOT_PROVIDED : `${v > 0 ? "+" : v < 0 ? "-" : ""}${usd(Math.abs(v))}`);
+
+// 금액은 백엔드가 낸 USD 그대로입니다. 화면에서 환율을 곱하지 않습니다. 배치는 CrossoverTile 과 같습니다.
 function ArbitrageTile({ arb }: { arb: ArbitrageResult }) {
-  const [curr, setCurr] = useState<"USD" | "JPY" | "KRW">("USD");
-  const { rate, symbol } = FX_RATES[curr];
-
-  const formatCost = (usdVal: number) => {
-    const val = usdVal * rate;
-    if (curr === "JPY" || curr === "KRW") return `${symbol}${Math.round(val).toLocaleString()}`;
-    return `${symbol}${val.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  };
-
+  const savings =
+    arb.monthly_savings === null
+      ? NOT_PROVIDED
+      : `${usd(arb.monthly_savings)}${arb.savings_percent === null ? "" : ` (${arb.savings_percent}%)`}`;
   return (
-    <div className="rounded-lg border-2 border-emerald-600/30 bg-emerald-50/40 p-3.5 text-xs">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span className="font-semibold text-emerald-950">비용 변동성 대응 동적 차익거래 (Dynamic Routing)</span>
-          <span className="rounded bg-emerald-200/80 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-900">
-            소프트뱅크 아키텍처
-          </span>
-        </div>
-        <div className="flex items-center gap-1 rounded border border-ink/20 bg-white p-0.5 text-[11px]">
-          {(["USD", "JPY", "KRW"] as const).map((c) => (
-            <button
-              key={c}
-              type="button"
-              onClick={() => setCurr(c)}
-              className={`rounded px-1.5 py-0.5 font-mono text-[10px] transition-colors ${
-                curr === c ? "bg-ink font-bold text-white" : "text-ink/60 hover:text-ink"
-              }`}
-            >
-              {c}
-            </button>
-          ))}
-        </div>
+    <div className="rounded-lg border border-ink/15 bg-paper/60 p-3 text-xs">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="font-semibold text-ink">읽기 분산 (차익거래)</p>
+        <span className="rounded border border-ink/20 bg-white px-1.5 py-0.5 font-mono text-[10px] text-ink/70">
+          {arbitrageStatus(arb)}
+        </span>
       </div>
-
-      <div className="mt-2.5 flex flex-wrap gap-2 text-[11px]">
-        <div className="inline-flex items-center gap-1.5 rounded-md border border-ink/15 bg-white px-2 py-1 font-mono">
-          <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
-          <span className="font-semibold">쓰기 펜싱:</span>
-          <span className="text-ink/80">Active Master (SOURCE 100%)</span>
+      <dl className="mt-1.5 grid gap-x-4 gap-y-1 font-mono text-[11px] sm:grid-cols-2">
+        <div className="flex justify-between gap-2">
+          <dt className="text-ink/60">분산 적용 월 비용</dt>
+          <dd>{usd(arb.arbitrage_monthly_cost)}</dd>
         </div>
-        <div
-          className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono ${
-            arb.lag_fenced
-              ? "border-amber-300 bg-amber-50 text-amber-900"
-              : "border-emerald-200 bg-emerald-100/50 text-emerald-900"
-          }`}
-        >
-          <span className={`inline-block h-2 w-2 rounded-full ${arb.lag_fenced ? "bg-amber-500" : "bg-emerald-600"}`} />
-          <span className="font-semibold">복제 세이프가드:</span>
-          <span>{arb.lag_fenced ? "지연 초과로 차익거래 차단 (100% 원본 펜싱)" : "지연 임계치 세이프가드 (< 1KB 연동)"}</span>
+        <div className="flex justify-between gap-2">
+          <dt className="text-ink/60">원본만 (Fargate)</dt>
+          <dd>{usd(arb.baseline_monthly_cost)}</dd>
         </div>
-      </div>
-
-      <div className="mt-3 grid gap-2 sm:grid-cols-3">
-        <div className="rounded border border-ink/10 bg-white p-2">
-          <p className="font-mono text-[10px] text-ink/60">읽기 트래픽 분산 (Read Split)</p>
-          <p className="mt-1 font-mono text-xs font-bold text-ink">
-            GCP {Math.round(arb.read_weight_target * 100)}% · AWS {Math.round(arb.read_weight_source * 100)}%
-          </p>
+        <div className="flex justify-between gap-2">
+          <dt className="text-ink/60">순절감</dt>
+          <dd>{savings}</dd>
         </div>
-        <div className="rounded border border-ink/10 bg-white p-2">
-          <p className="font-mono text-[10px] text-ink/60">차익거래 적용 월 비용</p>
-          <p className="mt-1 font-mono text-xs font-bold text-ink">
-            {formatCost(arb.arbitrage_monthly_cost)}
-            <span className="ml-1 text-[10px] font-normal text-ink/50">(기준 {formatCost(arb.baseline_monthly_cost)})</span>
-          </p>
+        <div className="flex justify-between gap-2">
+          <dt className="text-ink/60">egress 차이 (원본 대비)</dt>
+          <dd>{signedUsd(arb.cross_cloud_egress_monthly_usd)}/월</dd>
         </div>
-        <div className="rounded border border-emerald-600/30 bg-emerald-100/30 p-2">
-          <p className="font-mono text-[10px] text-emerald-800">예상 월 순절감액 (Egress 반영)</p>
-          <p className="mt-1 font-mono text-xs font-bold text-emerald-800">
-            {formatCost(arb.monthly_savings)} ({arb.savings_percent}%)
-          </p>
-        </div>
-      </div>
-
-      <p className="mt-2.5 text-[11px] font-medium text-emerald-950">{arb.recommendation}</p>
-
-      <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-[10px] text-ink/70">
-        {arb.reasons.map((r) => (
-          <li key={r}>{r}</li>
-        ))}
-        {arb.cross_cloud_egress_monthly_usd > 0 && (
+      </dl>
+      <p className="mt-1.5 text-[11px] text-ink/80">{arb.recommendation}</p>
+      <details className="mt-1.5 text-[11px] text-ink/70">
+        <summary className="cursor-pointer font-semibold text-ink">근거</summary>
+        <ul className="mt-1 list-disc space-y-0.5 pl-4">
           <li>
-            크로스 클라우드 네트워크 Egress 비용(월 {formatCost(arb.cross_cloud_egress_monthly_usd)}, $0.09/GB 기준)이 공제된
-            순절감액입니다.
+            쓰기는 {arb.write_destination} 100% (액티브 마스터 {arb.active_master}).
           </li>
-        )}
-      </ul>
+          <li>
+            egress 단가{" "}
+            {arb.egress_usd_per_gb === null
+              ? NOT_PROVIDED
+              : `${usdPerGb(arb.egress_usd_per_gb)} (출처: ${arb.egress_source ?? NOT_PROVIDED})`}
+          </li>
+          {arb.reasons.map((r) => (
+            <li key={r}>{r}</li>
+          ))}
+        </ul>
+      </details>
     </div>
   );
 }
