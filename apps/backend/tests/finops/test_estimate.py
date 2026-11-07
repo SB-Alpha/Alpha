@@ -87,6 +87,8 @@ def fake_azure_query(odata_filter: str) -> list[dict]:
         return [_az("Standard vCPU Active Usage", 0.000024)]
     if "Standard Memory Active Usage" in odata_filter:
         return [_az("Standard Memory Active Usage", 0.000003)]
+    if "armSkuName eq 'B1MS'" in odata_filter:
+        return [_az("B1MS", 0.026)]
     if "armSkuName eq 'B2S'" in odata_filter:
         return [_az("B2S", 0.104), _az("B2S", 1240.0, kind="Reservation")]  # 예약 행은 기간 전체 금액
     if "Flex Server Storage" in odata_filter:
@@ -95,12 +97,31 @@ def fake_azure_query(odata_filter: str) -> list[dict]:
 
 
 def test_azure_prices_use_consumption_rows_only():
-    cost = AzurePrices(fake_azure_query).cost(_req(), "koreacentral", "azure-retail-prices-api 2026-11-07")
+    req = _req(db_instance_class="db.m6g.large")  # 전용 vCPU 원본 → vCPU·메모리로 등급 선택
+    cost = AzurePrices(fake_azure_query).cost(req, "koreacentral", "azure-retail-prices-api 2026-11-07")
     app, db, storage = (line.monthly_usd for line in cost.lines)
     assert app == round(730 * 3600 * (1 * 0.000024 + 2 * 0.000003), 2)
     assert db == round(730 * 0.104, 2)
     assert storage == round(20 * 0.131, 2)
     assert "B2S" in cost.lines[1].source
+
+
+def test_burstable_source_db_is_compared_with_burstable_targets():
+    req = _req()  # db.t3.micro: 2 vCPU 를 나눠 쓰는 1 GiB 저가형
+    assert estimate.is_burstable(req)
+    azure = AzurePrices(fake_azure_query).cost(req, "koreacentral", "azure").lines[1]
+    assert azure.monthly_usd == round(730 * 0.026, 2) and "B1MS" in azure.source
+    gcp = estimate.GcpPrices(GCP_SKUS.__getitem__).cost(req, "asia-northeast3", "gcp").lines[1]
+    assert gcp.monthly_usd == round(730 * 0.0455, 2) and "db-g1-small" in gcp.source
+
+
+@pytest.mark.parametrize(("mem", "azure", "gcp"), [
+    (0.5, "B1MS", ("Micro instance", "db-f1-micro")), (1, "B1MS", ("Small instance", "db-g1-small")),
+    (4, "B2S", None), (16, None, None),
+])
+def test_burstable_sizes_follow_memory(mem, azure, gcp):
+    assert estimate.azure_pg_sku(2, mem, burstable=True) == azure
+    assert estimate.gcp_sql_shared(mem) == gcp
 
 
 @pytest.mark.parametrize(("vcpu", "mem", "sku"), [
@@ -170,6 +191,8 @@ GCP_SKUS = {
         _sku("Cloud SQL for PostgreSQL: Zonal - Standard storage in Seoul", "asia-northeast3", "0", 221000000),
         _sku("Cloud SQL for PostgreSQL: Regional - vCPU in Seoul", "asia-northeast3", "0", 107400000),  # HA
         _sku("FDC Trial in Seoul: Cloud SQL for PostgreSQL: Zonal - vCPU", "asia-northeast3", "0", 53700000),
+        _sku("Cloud SQL for PostgreSQL: Zonal - Small instance in Seoul", "asia-northeast3", "0", 45500000),
+        _sku("FDC Trial in Cloud SQL for PostgreSQL: Zonal - Small instance in Seoul", "asia-northeast3", "0", 45500000),
     ],
 }
 

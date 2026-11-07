@@ -41,6 +41,12 @@ class PriceUnavailable(Exception):
     """가격 API 에서 단가를 확정하지 못함 (0건이거나 여러 건이 애매하게 걸림)."""
 
 
+def is_burstable(req: CostRequest) -> bool:
+    """원본 DB 가 CPU 를 나눠 쓰는 저가형(RDS db.t*)인지. 그렇다면 목적지도 저가형끼리 비교합니다.
+    전용 vCPU 등급과 비교하면 같은 일을 하는데도 목적지가 몇 배 비싸게 나옵니다."""
+    return bool(req.db_instance_class) and req.db_instance_class.startswith("db.t")
+
+
 def _line(item: str, source: str, compute: Callable[[], float | None]) -> CostLine:
     """한 항목을 계산합니다. 크기를 모르거나 단가 조회가 실패하면 금액은 None 입니다."""
     try:
@@ -133,7 +139,13 @@ def _azure_prices(rows: list[dict], unit: str) -> list[UnitPrice]:
             for r in rows if r.get("type") == "Consumption"]
 
 
-def azure_pg_sku(vcpu: int | None, memory_gib: float | None) -> str | None:
+# 버스터블 원본용: (메모리 GiB, armSkuName). 저가형은 vCPU 를 나눠 쓰므로 메모리로 맞춥니다.
+AZURE_PG_BURSTABLE = [(2, "B1MS"), (4, "B2S"), (8, "Standard_B2ms")]
+
+
+def azure_pg_sku(vcpu: int | None, memory_gib: float | None, burstable: bool = False) -> str | None:
+    if burstable and memory_gib is not None:
+        return next((name for mem, name in AZURE_PG_BURSTABLE if mem >= memory_gib), None)
     if vcpu is None or memory_gib is None:
         return None
     for sku_vcpu, sku_mem, name in AZURE_PG_SKUS:
@@ -164,7 +176,7 @@ class AzurePrices:
             return seconds * (req.app_vcpu * vcpu.usd + req.app_memory_mib / 1024 * mem.usd)
 
         def db() -> float | None:
-            sku = azure_pg_sku(req.db_vcpu, req.db_memory_gib)
+            sku = azure_pg_sku(req.db_vcpu, req.db_memory_gib, is_burstable(req))
             if sku is None:
                 return None
             hourly = self._meter(region, "Azure Database for PostgreSQL", f"armSkuName eq '{sku}'", "hour")
@@ -177,7 +189,7 @@ class AzurePrices:
                                  f"productName eq '{AZURE_PG_STORAGE_PRODUCT}' and skuName eq 'Storage'", "GB-month")
             return req.db_storage_gb * per_gb.usd
 
-        sku = azure_pg_sku(req.db_vcpu, req.db_memory_gib)
+        sku = azure_pg_sku(req.db_vcpu, req.db_memory_gib, is_burstable(req))
         return CloudCost(cloud="azure", region=region, lines=[
             _line(APP, f"{source} Container Apps", app),
             _line(DB, f"{source} PostgreSQL Flexible {sku or '등급 미정'}", db),
@@ -330,6 +342,14 @@ _SQL = r"^Cloud SQL for Postgre(?:SQL|s): Zonal\s*-\s*{what} in "
 _SQL_VCPU = re.compile(_SQL.format(what="vCPU"))
 _SQL_RAM = re.compile(_SQL.format(what="RAM"))
 _SQL_SSD = re.compile(_SQL.format(what="Standard storage"))
+# 공유 코어 등급 (버스터블 원본용): (메모리 GiB, 가격표 이름, 등급 이름). db-f1-micro 0.6GB, db-g1-small 1.7GB
+GCP_SQL_SHARED = [(0.6, "Micro instance", "db-f1-micro"), (1.7, "Small instance", "db-g1-small")]
+
+
+def gcp_sql_shared(memory_gib: float | None) -> tuple[str, str] | None:
+    if memory_gib is None:
+        return None
+    return next(((label, tier) for mem, label, tier in GCP_SQL_SHARED if mem >= memory_gib), None)
 
 
 def _gcp_auth_header() -> tuple[dict[str, str], dict[str, str]]:
@@ -395,7 +415,12 @@ class GcpPrices:
             seconds = HOURS_PER_MONTH * 3600 * req.app_instances
             return seconds * (req.app_vcpu * cpu.usd + req.app_memory_mib / 1024 * mem.usd)
 
+        shared = gcp_sql_shared(req.db_memory_gib) if is_burstable(req) else None
+
         def db() -> float | None:
+            if shared is not None:
+                pattern = re.compile(_SQL.format(what=re.escape(shared[0])))
+                return HOURS_PER_MONTH * self._pick(GCP_CLOUD_SQL, region, pattern, "hour").usd
             if req.db_vcpu is None or req.db_memory_gib is None:
                 return None
             vcpu = self._pick(GCP_CLOUD_SQL, region, _SQL_VCPU, "vCPU-hour")
@@ -409,6 +434,7 @@ class GcpPrices:
 
         return CloudCost(cloud="gcp", region=region, lines=[
             _line(APP, f"{source} Cloud Run 인스턴스 기반", app),
-            _line(DB, f"{source} Cloud SQL PostgreSQL Enterprise 단일 영역 {req.db_vcpu} vCPU·{req.db_memory_gib} GiB", db),
+            _line(DB, f"{source} Cloud SQL PostgreSQL 단일 영역 "
+                      + (f"{shared[1]} (공유 코어)" if shared else f"{req.db_vcpu} vCPU·{req.db_memory_gib} GiB"), db),
             _line(STORAGE, f"{source} Cloud SQL SSD", storage),
         ])
