@@ -121,6 +121,9 @@ export default {
       destination.search = url.search;
       const upstream = new Request(destination, request);
       upstream.headers.set("X-Forwarded-Host", url.host);
+      if (env.WORKER_SECRET) {
+        upstream.headers.set("X-Alpha-Worker-Secret", env.WORKER_SECRET);
+      }
 
       const response = await fetch(upstream, { redirect: "manual" });
       isFailure = response.status >= 500;

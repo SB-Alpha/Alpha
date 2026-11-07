@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from app import db
 
 SERVED_BY = os.getenv("APP_ENV", "local")
+WORKER_SECRET = os.getenv("WORKER_SECRET")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 COLUMNS = "id, title, description, status, created_at, updated_at"
 
@@ -85,6 +86,21 @@ async def request_log(request: Request, call_next):
     response.headers["X-Request-Id"] = request_id
     response.headers["X-Served-By"] = SERVED_BY
     return response
+
+
+@app.middleware("http")
+async def verify_proxy_secret(request: Request, call_next):
+    """Enforce Cloudflare Worker proxy ingress when WORKER_SECRET is configured (Issue #34)."""
+    expected = os.getenv("WORKER_SECRET") or WORKER_SECRET
+    if expected and not request.url.path.startswith("/health/"):
+        token = request.headers.get("x-alpha-worker-secret") or request.headers.get("X-Alpha-Worker-Secret")
+        if token != expected:
+            return Response(
+                content=json.dumps({"detail": "Direct access forbidden. Requests must pass through Cloudflare Worker."}),
+                status_code=403,
+                media_type="application/json",
+            )
+    return await call_next(request)
 
 
 @app.get("/health/live", tags=["health"])

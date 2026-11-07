@@ -2,3 +2,4 @@
 CONTROL_TOKEN=dev-token
 UPSTREAM_SOURCE=http://127.0.0.1:9001
 UPSTREAM_TARGET=http://127.0.0.1:9002
+WORKER_SECRET=dev-worker-secret
