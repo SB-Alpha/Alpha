@@ -211,23 +211,17 @@ export function DashboardPanel({ run }: Props) {
 
       <div className="rounded-lg border border-ink/15 bg-stone-50/70 p-3 lg:col-span-2">
         <div className="flex items-center justify-between text-xs font-medium text-ink/70">
-          <div className="flex items-center gap-2">
-            <span>보안 & 거버넌스 (GuardDuty · SCC · Worker Edge)</span>
-            <span className="rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.2 font-mono text-[10px] text-indigo-700">
-              3D Blast Radius 연동
-            </span>
-          </div>
+          <span>보안 & 거버넌스</span>
           {security.isCompliant && (
             <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800">
               COMPLIANT
             </span>
           )}
         </div>
-        <div className="mt-2 grid grid-cols-1 gap-2 text-xs sm:grid-cols-4">
+        <div className="mt-2 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
           <SecurityCell label="IAM 최소 권한 감사" value={security.iamAudit} />
           <SecurityCell label="Cloud SQL 사설망" value={security.cloudSql} />
           <SecurityCell label="비밀번호·키 암호화" value={security.secretEncryption} />
-          <SecurityCell label="Worker 에지 격리 SLA" value="0.4초 무중단 우회" />
         </div>
       </div>
     </section>

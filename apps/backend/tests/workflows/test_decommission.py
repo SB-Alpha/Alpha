@@ -111,6 +111,8 @@ def test_decommission_is_refused_when_worker_is_not_target(http_with, monkeypatc
     res = http.post(f"/runs/{run_id}/decommission")
     assert res.status_code == 409
     assert "TARGET" in res.json()["detail"]
+
+
 # -- runners.decommission_cdc: db_workflow.finish 결과를 문장으로 --------------------------------------
 
 
