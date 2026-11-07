@@ -14,6 +14,7 @@ from contextlib import contextmanager
 
 from app.core.secrets import put_secret, resolve
 
+from .progress_log import ProgressLog
 from .settings import tunables
 from .vpn import OciSettings
 from .vpn_peers import PeerAdapter, TerraformPort, adapters_for
@@ -73,7 +74,7 @@ def _session(plan: VpnPlan, adapters: dict[str, PeerAdapter], settings: OciSetti
     roots["oci"] = "oci-vpn"
     credentials = {leg.role: (lambda leg=leg: adapters[leg.role].credentials(resolve(leg.credentials_ref))) for leg in plan.legs}
     credentials["oci"] = lambda: {}
-    tf = TerraformSession(settings, plan.job_id, roots, credentials)
+    tf = TerraformSession(settings, plan.job_id, roots, credentials, log=ProgressLog(plan.run_id, plan.job_id))
     if check:
         tf.check_credentials()
     return tf
@@ -107,9 +108,10 @@ def _oci_variables(plan: VpnPlan, settings: OciSettings, psk: dict, peers: list[
             "name": plan.name, "drg_id": settings.drg_id, "tunnels": tunnels, "shared_secrets": psk}
 
 
-def _up(tf: TerraformPort, values: dict) -> dict | None:
+def _up(tf: TerraformPort, values: dict, log: ProgressLog) -> dict | None:
     tf.refresh("oci", values)
     status = tf.output("oci", "tunnel_status")
+    log.event("vpn.tunnels", status=status)
     if isinstance(status, dict) and set(status) == set(TUNNEL_KEYS) and all(v == "UP" for v in status.values()):
         return status
     return None
@@ -119,6 +121,7 @@ def ensure_vpn(plan: VpnPlan, *, terraform: TerraformPort | None = None, setting
                registry: dict[str, PeerAdapter] | None = None, sleep: Callable[[float], None] = time.sleep) -> dict:
     plan.validate()
     adapters = adapters_for(plan.legs, registry)
+    log = ProgressLog(plan.run_id, plan.job_id)
     with _operation(plan.run_id):
         saved = _load(plan.run_id)
         if saved is not None and saved != plan:
@@ -132,7 +135,7 @@ def ensure_vpn(plan: VpnPlan, *, terraform: TerraformPort | None = None, setting
             peers = [peer for leg in plan.legs for peer in adapters[leg.role].peers(tf, leg)]
             if len(peers) == 4:
                 values = _oci_variables(plan, settings, psk, peers)
-                if status := _up(tf, values):
+                if status := _up(tf, values, log):
                     return {"name": plan.name, "tunnel_status": status, "skipped": True}
 
         # 어느 클라우드가 source인지에 따라 순서를 바꾸지 않는다.
@@ -155,7 +158,7 @@ def ensure_vpn(plan: VpnPlan, *, terraform: TerraformPort | None = None, setting
         operating = tunables()
         deadline = time.monotonic() + operating.tunnel_wait_s
         while True:
-            if status := _up(tf, values):
+            if status := _up(tf, values, log):
                 return {"name": plan.name, "tunnel_status": status, "skipped": False}
             if time.monotonic() >= deadline:
                 raise VpnError("tunnel_timeout", "VPN tunnels did not become ready; keep the saved context for retry or cleanup")

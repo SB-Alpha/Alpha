@@ -4,11 +4,13 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 
 from app.core.config import data_dir
 
+from .progress_log import ProgressLog
 from .settings import tunables
 from .vpn import OciSettings, TERRAFORM_ENV, TERRAFORM_ENV_PREFIXES
 from .vpn_plan import VpnError
@@ -16,9 +18,10 @@ from .vpn_plan import VpnError
 
 class TerraformSession:
     def __init__(self, settings: OciSettings, job_id: str, roots: dict[str, str],
-                 credentials: dict[str, Callable[[], dict[str, str]]], *, runner: Callable = subprocess.run):
+                 credentials: dict[str, Callable[[], dict[str, str]]], *, runner: Callable = subprocess.run,
+                 log: ProgressLog | None = None):
         self.settings, self.job_id, self.roots = settings, job_id, roots
-        self.credentials, self.runner = credentials, runner
+        self.credentials, self.runner, self.log = credentials, runner, log
         self.work_dir = data_dir() / "terraform" / job_id / "vpn-v2"
         self.work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._ready: set[str] = set()
@@ -69,12 +72,23 @@ class TerraformSession:
         self.init(role)
         fd, name = tempfile.mkstemp(prefix="vars-", suffix=".tfvars.json", dir=self.work_dir / role)
         path = Path(name)
+        started = time.monotonic()
+        self._event("terraform.start", role=role, action=" ".join(action))
         try:
             with os.fdopen(fd, "w") as stream:
                 json.dump(values, stream)
             self._run(role, *action, "-auto-approve", "-no-color", f"-var-file={path}")
+        except Exception:
+            self._event("terraform.failed", role=role, action=" ".join(action), seconds=round(time.monotonic() - started))
+            raise
+        else:
+            self._event("terraform.done", role=role, action=" ".join(action), seconds=round(time.monotonic() - started))
         finally:
             path.unlink(missing_ok=True)
+
+    def _event(self, event: str, **fields: str | int) -> None:
+        if self.log is not None:
+            self.log.event(event, **fields)
 
     def apply(self, role: str, values: dict) -> None:
         self._with_vars(role, ("apply",), values)
