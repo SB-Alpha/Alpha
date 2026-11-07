@@ -138,7 +138,7 @@ const DEBOUNCE_MS = 300;
 
 /**
  * 입력이 바뀌면 300ms 기다렸다가 한 번만 부릅니다. 이전 요청은 취소해서 늦게 온 옛 응답이 화면을 덮지 않게 합니다.
- * 새 값을 받는 동안에는 직전 결과를 흐리게 보여 줍니다 (첫 호출은 가격표를 받느라 수십 초 걸릴 수 있습니다).
+ * 새 값을 받는 동안에는 loading 으로 둡니다. 소비자는 이전 응답을 새 입력의 견적으로 표시하지 않습니다.
  */
 export function useFinopsEstimate(body: ReturnType<typeof estimateRequest>): EstimateState {
   // 원본 위치를 몰라 요청을 만들지 못하면 부르지 않습니다 (key 가 null).

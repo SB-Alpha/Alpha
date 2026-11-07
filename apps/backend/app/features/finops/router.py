@@ -37,6 +37,10 @@ def arbitrage_request(req: CostRequest) -> ArbitrageRequest | None:
     gcp_region = next((c.region for c in req.candidates if c.cloud == "gcp"), None)
     if req.source_cloud != SOURCE_CLOUD or gcp_region is None or t is None:
         return None
+    candidate = req.for_candidate()
+    # 기존 차익거래 모델은 양쪽에 같은 크기를 씁니다. 다른 크기를 지원하기 전에는 잘못된 금액을 내지 않습니다.
+    if (candidate.app_vcpu, candidate.app_memory_mib) != (req.app_vcpu, req.app_memory_mib):
+        return None
     needed = (req.app_vcpu, req.app_memory_mib, t.avg_latency_ms, t.read_ratio, t.avg_response_kb)
     if any(v is None for v in needed):
         return None

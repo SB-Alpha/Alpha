@@ -334,7 +334,7 @@ function FinOpsCardBody({ run }: Props) {
             가격 API 공시가 · 청구액 아님
           </span>
         </div>
-        <CloudSelector selected={selected} onSelect={setSelected} data={estimate.data} />
+        <CloudSelector selected={selected} onSelect={setSelected} data={estimate.status === "ready" ? estimate.data : null} />
       </div>
 
       {facts.sourceCloud === null || facts.sourceRegion === null ? (
@@ -355,7 +355,7 @@ function FinOpsCardBody({ run }: Props) {
 
       <InputControls inputs={inputs} setInputs={setInputs} planDiskGb={facts.dbStorageGb} />
 
-      {estimate.data && estimate.data.input.assumptions.length > 0 && (
+      {estimate.status === "ready" && estimate.data.input.assumptions.length > 0 && (
         <details className="mt-3 rounded-lg border border-ink/15 bg-paper/30 p-3 text-xs">
           <summary className="cursor-pointer font-semibold text-ink/80 hover:text-ink">계산 가정 (백엔드)</summary>
           <ul className="mt-2 list-disc space-y-0.5 pl-4 text-[11px] text-ink/65">

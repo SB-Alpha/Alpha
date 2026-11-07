@@ -442,7 +442,7 @@ export function PriceApiEstimate({
   onChangeIdlePercent?: (idle: number) => void;
   realTelemetry?: RealRunTelemetry;
 }) {
-  const liveData = state.data;
+  const liveData = state.status === "ready" ? state.data : null;
 
   if (state.status === "error") {
     return (
