@@ -32,6 +32,8 @@ module "vpn" {
   oracle_bgp_ip  = each.value.oracle_bgp_ip
   peer_bgp_ip    = each.value.peer_bgp_ip
   shared_secret  = var.shared_secrets[each.key]
+  # 키 끝 번호(source-0, source-1)로 구간 안에서 IP를 나눈다.
+  tunnel_index = tonumber(regex("[01]$", each.key))
 
   phase_two_dh_group = each.value.phase_two_dh_group
 }
