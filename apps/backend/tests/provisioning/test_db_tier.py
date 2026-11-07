@@ -10,6 +10,7 @@ from app.features.provisioning.providers import (
     AZURE,
     AZURE_DB_TIERS,
     AZURE_DISK_SIZES_GB,
+    BURSTABLE_NOTE,
     aws_adapt,
     azure_adapt,
 )
@@ -237,3 +238,55 @@ def test_the_tier_does_not_change_between_the_infrastructure_step_and_the_app_st
     second, _ = azure_adapt(infra)
 
     assert first["db_tier"] == second["db_tier"] == "GP_Standard_D4ds_v5"
+
+
+# ---------------------------------------------------------------------------
+# 버스트 가능 등급 안내, HA 와의 충돌 방지
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("adapt", "key", "memory"),
+    [
+        (azure_adapt, "db_tier", 2),  # B_Standard_B1ms
+        (azure_adapt, "db_tier", 8),  # B_Standard_B2ms
+        (aws_adapt, "db_instance_class", 4),  # db.t4g.medium
+        (aws_adapt, "db_instance_class", 32),  # db.t4g.2xlarge
+    ],
+)
+def test_a_burstable_tier_is_flagged_in_the_note_so_the_approver_knows(adapt, key, memory):
+    tier, _, notes = tier_of(adapt, key, memory=memory)
+
+    assert tier is not None
+    assert any(tier in note and BURSTABLE_NOTE in note for note in notes)
+
+
+@pytest.mark.parametrize(
+    ("adapt", "key", "memory"),
+    [
+        (azure_adapt, "db_tier", 16),  # GP_Standard_D4ds_v5
+        (azure_adapt, "db_tier", 128),  # GP_Standard_D32ds_v5
+        (aws_adapt, "db_instance_class", 64),  # db.m6g.4xlarge
+        (aws_adapt, "db_instance_class", 128),  # db.m6g.8xlarge
+    ],
+)
+def test_a_fixed_performance_tier_is_not_flagged_as_burstable(adapt, key, memory):
+    tier, _, notes = tier_of(adapt, key, memory=memory)
+
+    assert tier is not None
+    assert not any(BURSTABLE_NOTE in note for note in notes)
+
+
+def test_every_azure_tier_whose_name_starts_with_b_is_the_burstable_edition():
+    # Azure 는 Burstable 등급이 HA 를 지원하지 않는다. 표의 B_ 이름이 모두 안내 대상인지 본다.
+    from app.features.provisioning.providers import _is_burstable
+
+    assert [name for name, _, _ in AZURE_DB_TIERS if _is_burstable(name)] == [name for name, _, _ in AZURE_DB_TIERS if name.startswith("B_")]
+
+
+def test_high_availability_is_not_sent_so_it_cannot_clash_with_a_burstable_tier():
+    # infra/azure 는 db_high_availability 가 켜지면 B_ 등급을 거부한다. 어댑터가 HA 를 넘기기 시작하면 이 테스트가 실패해서
+    # 변환 결과(B_)와 충돌하는지 먼저 따져 보게 한다.
+    assert "db_high_availability" not in AZURE.known_variables
+    infra, _ = azure_adapt({"db_memory_gib": 2})
+    assert "db_high_availability" not in infra

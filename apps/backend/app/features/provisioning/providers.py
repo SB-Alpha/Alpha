@@ -121,6 +121,16 @@ def _pick_db_tier(
     return sizes[-1][0], True
 
 
+def _is_burstable(tier: str) -> bool:
+    """CPU 크레딧을 쓰는 버스트 가능 등급인가. Azure Burstable(B_), AWS t3·t4g 계열."""
+    return tier.startswith("B_") or tier.startswith(("db.t3.", "db.t4g."))
+
+
+# 버스트 가능 등급은 평소 CPU 가 낮을 때 크레딧을 쌓아 쓰므로, 초기 복사처럼 CPU 를 오래 쓰면 크레딧이 떨어져 느려질 수 있다.
+# 원본이 고정 성능 등급(예: db.m5.large)이어도 같은 메모리면 이 등급이 선택되므로 승인자가 미리 알 수 있게 안내에 적는다.
+BURSTABLE_NOTE = " (버스트 가능 등급: CPU 크레딧 기반이라 초기 복사처럼 CPU 를 오래 쓰면 느려질 수 있습니다)"
+
+
 def _translate_db(
     infra: dict[str, Any],
     notes: list[str],
@@ -142,7 +152,10 @@ def _translate_db(
         if capped:
             notes.append(f"원본 DB({source})가 가장 큰 등급 {tier} 로도 모자라 그 등급으로 맞췄습니다. 확인이 필요합니다")
         else:
-            notes.append(f"DB 등급을 원본({source}) 이상인 가장 작은 등급 {tier} 로 정했습니다")
+            notes.append(
+                f"DB 등급을 원본({source}) 이상인 가장 작은 등급 {tier} 로 정했습니다"
+                + (BURSTABLE_NOTE if _is_burstable(tier) else "")
+            )
     disk = infra.get("db_disk_size_gb")
     if disk is not None:
         infra["db_disk_size_gb"] = pick_disk(_number(disk, "db_disk_size_gb"), notes)
