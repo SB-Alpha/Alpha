@@ -290,6 +290,13 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+def clean_health_path(path: str | None) -> str | None:
+    """헬스체크 경로에서 ?쿼리·#조각을 지웁니다. 토큰이 들어 있을 수 있어 결과·AI 프롬프트로 보내지 않습니다."""
+    if not path:
+        return None
+    return path.split("?", 1)[0].split("#", 1)[0] or None
+
+
 def _health_from_container(container: dict) -> str | None:
     command = " ".join((container.get("healthCheck") or {}).get("command") or [])
     m = URL_PATH.search(command)
@@ -302,7 +309,7 @@ def _health_from_target_group(service: dict, session: AwsSession, call) -> str |
         return None
     res = call("로드밸런서 대상 그룹 조회", session.client("elbv2").describe_target_groups, TargetGroupArns=arns[:1])
     groups = (res or {}).get("TargetGroups") or []
-    return groups[0].get("HealthCheckPath") if groups else None
+    return clean_health_path(groups[0].get("HealthCheckPath")) if groups else None
 
 
 def _image_digest(image: str | None, session: AwsSession, call, gaps: list[str]) -> str | None:

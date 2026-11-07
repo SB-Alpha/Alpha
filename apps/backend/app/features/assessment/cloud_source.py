@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 
 from . import pg_connect, pg_tables, refs
-from .app import PROVISIONING_INJECTED_ENV, has_secret_value, looks_secret
+from .app import PROVISIONING_INJECTED_ENV, clean_health_path, has_secret_value, looks_secret
 from .schemas import (
     AppAssessment,
     AppInfo,
@@ -118,7 +118,8 @@ def _memory_mib(value: Any) -> int | None:
         return None
     n = float(m.group(1))
     unit = m.group(2) or "Mi"
-    return round(n * (1024 if unit.startswith("G") else 1))
+    # Mi·Gi 는 2의 거듭제곱, M·G 는 10의 거듭제곱 (쿠버네티스 수량 표기와 같다). "2G" 는 2048 MiB 가 아니라 약 1907 MiB 다.
+    return round(n * {"Mi": 1, "Gi": 1024, "M": 10**6 / 2**20, "G": 10**9 / 2**20}[unit])
 
 
 def _cpu_units(value: Any) -> int | None:
@@ -224,7 +225,7 @@ def _gcp_app(svc: dict, name: str, gaps: list[str]) -> tuple[AppInfo, str | None
         container_port=ports[0].get("containerPort") if ports else 8080,  # Cloud Run 기본 포트
         cpu_units=_cpu_units(limits.get("cpu")),
         memory_mib=_memory_mib(limits.get("memory")),
-        health_check_path=probe.get("path"),
+        health_check_path=clean_health_path(probe.get("path")),
         env_vars=env_vars,
         secret_refs=secret_refs,
         container_settings=[],  # 원본이 Cloud Run 이라 관리형 컨테이너가 막는 설정이 없음
@@ -341,7 +342,7 @@ def _azure_app(app: dict, name: str, gaps: list[str]) -> tuple[AppInfo, str | No
         container_port=ingress.get("targetPort"),
         cpu_units=_cpu_units(res.get("cpu")),
         memory_mib=_memory_mib(res.get("memory")),
-        health_check_path=probe.get("path"),
+        health_check_path=clean_health_path(probe.get("path")),
         env_vars=env_vars,
         secret_refs=secret_refs,
         container_settings=settings,

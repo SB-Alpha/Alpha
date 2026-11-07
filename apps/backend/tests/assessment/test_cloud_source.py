@@ -213,7 +213,7 @@ def test_cloud_source_requires_its_values(kind, src, missing):
         AssessmentInput(source_kind=kind, target_region="asia-northeast3")
 
 
-@pytest.mark.parametrize("value,mib", [("512Mi", 512), ("1Gi", 1024), ("1.5Gi", 1536), ("2G", 2048), ("x", None)])
+@pytest.mark.parametrize("value,mib", [("512Mi", 512), ("1Gi", 1024), ("1.5Gi", 1536), ("2G", 1907), ("x", None)])  # 2G 는 십진 단위: 약 1907 MiB
 def test_memory_units(value, mib):
     assert cloud_source._memory_mib(value) == mib
 

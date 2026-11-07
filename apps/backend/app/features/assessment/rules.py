@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 
@@ -248,7 +249,8 @@ def _db_tier(gib: float | None) -> str | None:
 def gcp_name(name: str) -> str:
     """GCP 자원 이름 규칙(소문자·숫자·하이픈, 문자로 시작, 49자 이하)에 맞춥니다. ECS 이름은 대문자·_ 를 허용함."""
     cleaned = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
-    if not cleaned or not cleaned[0].isalpha():
+    # 두 글자 미만이면 파생 이름이 GCP 한도에 못 미칩니다 (서비스 계정 ID "<이름>-run" 은 6자 이상이어야 함)
+    if len(cleaned) < 2 or not cleaned[0].isalpha():
         cleaned = "app-" + cleaned
     return cleaned[:49].rstrip("-")
 
@@ -271,8 +273,27 @@ def image_repo_name(uri: str | None) -> str | None:
     return name or None
 
 
+# 목적지 Terraform 이 직접 만드는 비밀의 이름 꼬리 (infra/terraform/gcp/modules/secrets). 원본 비밀 이름이 이와 겹치면 안 된다
+RESERVED_SECRET_SUFFIXES = ("db-password", "worker-secret")
+
+
 def _secret_name(service_name: str, env_name: str) -> str:
-    return f"{service_name}-{env_name.lower().replace('_', '-')}"
+    slug = re.sub(r"[^a-z0-9-]+", "-", env_name.lower().replace("_", "-")).strip("-") or "secret"
+    return f"{service_name}-{slug}"
+
+
+def secret_names(service_name: str, env_names) -> dict[str, str]:
+    """환경 변수 이름 → 목적지 비밀 이름. 서로 다른 원본 비밀이 같은 이름으로 합쳐지거나 Terraform 이 만드는 비밀과 겹치면
+    그 이름 뒤에 원본 환경 변수 이름의 짧은 해시를 붙여 구분합니다 (같은 입력이면 항상 같은 결과)."""
+    used = {f"{service_name}-{suffix}" for suffix in RESERVED_SECRET_SUFFIXES}
+    names: dict[str, str] = {}
+    for env in sorted(env_names):
+        name = _secret_name(service_name, env)
+        if name in used:
+            name = f"{name}-{hashlib.sha1(env.encode('utf-8')).hexdigest()[:6]}"
+        used.add(name)
+        names[env] = name
+    return names
 
 
 def build_target_infra(inv: InventoryForPlanning, target: TargetSelection) -> tuple[TargetInfra, list[Risk]]:
@@ -327,8 +348,7 @@ def build_target_infra(inv: InventoryForPlanning, target: TargetSelection) -> tu
         memory=fallback(_cloud_run_memory(app.memory_mib), DEFAULT_MEMORY, "메모리(MiB)"),
         health_check_path=fallback(app.health_check_path, DEFAULT_HEALTH_PATH, "상태 확인 경로"),
         env_vars=plain_env,
-        secret_refs={k: _secret_name(service_name, k)
-                     for k in app.secret_refs if k not in PROVISIONING_INJECTED_ENV},
+        secret_refs=secret_names(service_name, [k for k in app.secret_refs if k not in PROVISIONING_INJECTED_ENV]),
         db_version=str(TARGET_PG_MAJOR),
         db_name=db.database_name,
         db_user=db.username,
