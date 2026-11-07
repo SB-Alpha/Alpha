@@ -24,7 +24,7 @@ export function JourneyHtmlOverlay({ run }: Props) {
       {reports.map((card, i) => (
         <div
           key={card.stage}
-          style={{ top: `${i * 100 + 6}vh` }}
+          style={{ top: `calc(${i * 100}% + 20px)` }}
           className="pointer-events-auto absolute left-4 max-w-md select-none rounded-lg border border-ink bg-white p-4 text-ink shadow-[3px_3px_0_0_var(--color-ink)] sm:left-8"
         >
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-ink/15 pb-2">
