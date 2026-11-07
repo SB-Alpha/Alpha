@@ -81,7 +81,7 @@ def main() -> int:
             "db": {"host": "source-db", "database": "postgres"},
             "network": {"vpc_id": "local", "cidr": "172.16.0.0/12", "route_table_ids": ["local"]},
             "app": {"db_user": "alpha"},
-            "tables": ["public.work_items"],
+            "tables": ["public.work_items", "public.tickets"],
             "credentials_ref": {"cloud": "unused", "db_admin": "unused"},
         },
         "target": {
@@ -141,6 +141,10 @@ def main() -> int:
         check("전환 후 stop 거부", False)
     except db_workflow.NotAllowed:
         check("전환 후 stop 거부", True)
+
+    new_id = target("SET ROLE tgt_app; INSERT INTO public.tickets (title) VALUES ('after cutover') RETURNING id;")
+    # psql은 명령 태그도 함께 찍는다: SET, 21, INSERT 0 1
+    check("전환 후 자동 증가 ID INSERT", "21" in new_id.splitlines(), new_id)
 
     print("== finish")
     done = db_workflow.finish(RUN_ID)

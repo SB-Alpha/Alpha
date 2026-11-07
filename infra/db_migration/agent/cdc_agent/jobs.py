@@ -306,9 +306,11 @@ class Runner:
             with (db.job_lock(creds.source, job_id) as locked,
                   db.connect(creds.source_app) as app_conn,
                   db.connect(creds.source) as source_conn,
-                  db.connect(creds.target) as target_conn):
+                  db.connect(creds.target) as target_conn,
+                  db.connect(creds.target_ddl) as ddl_conn):
                 if not locked:
                     raise RuntimeError("another agent holds this job")
+                sequences = db.sequences_of(source_conn, job.request.source.tables)
                 hold = worker.hold(job_id, job.request.options.max_hold_ms)
                 t0 = time.monotonic()
                 ev["t0"] = hold.get("hold_started_at") or now()
@@ -327,6 +329,8 @@ class Runner:
                 self.connect.pause(job.sink_connector)
                 step("sink_paused")
                 # Writes are held and blocked, so both sides are frozen: this is the reference point.
+                synced = db.sync_sequences(app_conn, ddl_conn, sequences)
+                step("sequences_synced", sequences=synced)
                 check = db.compare_frozen(source_conn, target_conn, job.request.source.tables)
                 job.evidence["validation"] = {**check, "checked_at": now(), "at": "cutover_reference_point"}
                 step("validated", mismatch=check["mismatch"])

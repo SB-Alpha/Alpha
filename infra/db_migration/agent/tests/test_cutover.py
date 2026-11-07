@@ -92,7 +92,7 @@ def setup(monkeypatch, tmp_path: Path):
             return fn
 
         monkeypatch.setattr(jobs, "Credentials", lambda s, j: type("C", (), {
-            "source": None, "source_app": None, "target": None})())
+            "source": None, "source_app": None, "target": None, "target_ddl": None})())
         monkeypatch.setattr(jobs, "WorkerClient", lambda s: FakeWorker(calls, worker_fail_on))
         monkeypatch.setattr(jobs.db, "job_lock", lock)
 
@@ -106,6 +106,8 @@ def setup(monkeypatch, tmp_path: Path):
         monkeypatch.setattr(jobs.db, "unblock_app_writes", record("unblock"))
         monkeypatch.setattr(jobs.db, "insert_marker", record("insert_marker", "m1"))
         monkeypatch.setattr(jobs.db, "wait_marker", wait_marker)
+        monkeypatch.setattr(jobs.db, "sequences_of", lambda conn, tables: ["public.t_id_seq"])
+        monkeypatch.setattr(jobs.db, "sync_sequences", record("sync_sequences", {"public.t_id_seq": 5}))
         monkeypatch.setattr(jobs.db, "compare_frozen", record("compare", {"mismatch": mismatch, "rows_checked": 10}))
         return runner, calls
 
@@ -118,9 +120,9 @@ def test_success_runs_steps_in_order(setup):
     job = runner.store.get("job01")
 
     assert calls == [
-        ("db", "connect"), ("db", "connect"), ("db", "connect"),
+        ("db", "connect"), ("db", "connect"), ("db", "connect"), ("db", "connect"),
         ("worker", "hold"), ("worker", "inflight_zero"), ("db", "block"), ("db", "insert_marker"),
-        ("db", "wait_marker"), ("pause", "job01-sink"), ("db", "compare"),
+        ("db", "wait_marker"), ("pause", "job01-sink"), ("db", "sync_sequences"), ("db", "compare"),
         ("worker", "switch"), ("worker", "release"),
     ]
     assert (job.state, job.phase) == ("running", "stabilizing")
@@ -146,6 +148,21 @@ def test_mismatch_at_reference_point_does_not_switch(setup):
     assert ("worker", "switch") not in calls
     assert (job.state, job.phase) == ("waiting_approval", "cutover_ready")
     assert "mismatch" in job.message
+
+
+def test_failed_sequence_sync_returns_writes_to_source(setup, monkeypatch):
+    runner, calls = setup()
+
+    def broken(*args):
+        raise RuntimeError("must be owner of sequence")
+
+    monkeypatch.setattr(jobs.db, "sync_sequences", broken)
+    runner._cutover("job01")
+    job = runner.store.get("job01")
+
+    assert ("worker", "switch") not in calls
+    assert calls[-3:] == [("db", "unblock"), ("resume", "job01-sink"), ("worker", "release")]
+    assert (job.state, job.phase) == ("waiting_approval", "cutover_ready")
 
 
 def test_failure_after_switch_never_goes_back(setup):

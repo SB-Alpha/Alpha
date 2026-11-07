@@ -233,6 +233,8 @@ def copy_schema(source: Endpoint, target_ddl: Endpoint, target_sink_user: str, j
         if load.returncode != 0:
             raise RuntimeError(f"schema load failed: {load.stderr.strip()[:300]}")
         created = missing
+    with connect(source) as conn:
+        sequences = sequences_of(conn, job.request.source.tables)
     with connect(target_ddl) as conn:
         for schema in sorted({split(t)[0] for t in job.all_tables}):
             conn.execute(sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
@@ -248,7 +250,46 @@ def copy_schema(source: Endpoint, target_ddl: Endpoint, target_sink_user: str, j
             for table in job.request.source.tables:
                 conn.execute(sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON {} TO {}").format(
                     ident(table), sql.Identifier(app_role)))
+            # A serial column's default calls nextval as the app account.
+            for sequence in sequences:
+                conn.execute(sql.SQL("GRANT USAGE, SELECT ON SEQUENCE {} TO {}").format(
+                    sql.SQL(sequence), sql.Identifier(app_role)))
     return created
+
+
+def sequences_of(conn: psycopg.Connection, tables: list[str]) -> list[str]:
+    """Quoted schema.name of the sequences these tables own or use in a column default."""
+    rows = conn.execute(
+        """
+        WITH wanted AS (SELECT to_regclass(name)::oid AS oid FROM unnest(%s::text[]) AS name)
+        SELECT format('%%I.%%I', n.nspname, s.relname)
+        FROM pg_class s
+        JOIN pg_namespace n ON n.oid = s.relnamespace
+        WHERE s.relkind = 'S' AND s.oid IN (
+            SELECT d.objid FROM pg_depend d
+            WHERE d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass
+              AND d.deptype IN ('a', 'i') AND d.refobjid IN (SELECT oid FROM wanted)
+            UNION
+            SELECT d.refobjid FROM pg_depend d
+            JOIN pg_attrdef a ON d.classid = 'pg_attrdef'::regclass AND d.objid = a.oid
+            WHERE d.refclassid = 'pg_class'::regclass AND a.adrelid IN (SELECT oid FROM wanted)
+        )
+        ORDER BY 1
+        """,
+        (tables,),
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+def sync_sequences(source: psycopg.Connection, target: psycopg.Connection, sequences: list[str]) -> dict[str, int]:
+    """Replication writes ids as they are and never moves the target's sequences. Safe to run again."""
+    values = {}
+    for sequence in sequences:
+        last_value, is_called = source.execute(
+            sql.SQL("SELECT last_value, is_called FROM {}").format(sql.SQL(sequence))).fetchone()
+        target.execute("SELECT setval(%s::regclass, %s, %s)", (sequence, last_value, is_called))
+        values[sequence] = last_value
+    return values
 
 
 def table_digest(conn: psycopg.Connection, table: str) -> dict:
