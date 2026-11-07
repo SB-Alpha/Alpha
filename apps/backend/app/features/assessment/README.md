@@ -86,6 +86,7 @@ python -m app.features.assessment.cli --profile <읽기 전용 프로필> --aws-
 `ecr:DescribeImages`, `elasticloadbalancing:DescribeTargetGroups`
 
 - 이미지·포트·CPU·메모리·환경 변수·비밀 참조(ARN)는 태스크 정의, digest 는 ECR, 상태 확인 경로는 컨테이너 healthCheck → 없으면 로드밸런서 대상 그룹.
+- **Cloud Run 호환 검사**(`cloud_run_compatible`): 태스크 정의에 Cloud Run 으로 옮길 수 없는 설정이 있으면 fail 입니다 — `privileged`, 호스트 장치·capability 추가, UDP 포트, GPU, ARM64, `pidMode`·`ipcMode` 공유, 호스트 경로·Docker 볼륨 마운트, Cloud Run 최대 크기(8 vCPU · 32768 MiB) 초과. 시작 명령 재정의, 함께 도는 다른 컨테이너, EFS·임시 볼륨, App Mesh 는 승인을 막지 않고 risks 에 남깁니다. 값(명령어·경로)은 읽지 않고 설정 이름만 남기며, 직접 입력 원본은 태스크 정의가 없어 이 검사가 빠집니다.
 - 앱 DB 사용자는 태스크 정의의 `PGUSER` → `source.app.db_user`, `target_infra.db_user`.
 - 평문 환경 변수 중 이름이 비밀처럼 보이는 것(`PASSWORD`, `SECRET`, `TOKEN`, `API_KEY`, `…_KEY` …)은 **값을 버리고** gaps 에 남깁니다.
 - 이름이 평범해도 값에 비밀이 들어 있으면(`postgres://user:비밀번호@…` 같은 접속 주소, AWS 액세스 키, 개인키, JWT, 알려진 API 토큰 형식) 똑같이 값을 버립니다. gaps 에는 이름만 남깁니다.
