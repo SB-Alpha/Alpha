@@ -1,7 +1,8 @@
 "use client";
 
-import { Bounds, ContactShadows, OrbitControls, PerspectiveCamera } from "@react-three/drei";
-import { useRef, type ComponentRef } from "react";
+import { Bounds, ContactShadows, OrbitControls, PerspectiveCamera, useBounds } from "@react-three/drei";
+import { useEffect, useRef, type ComponentRef } from "react";
+import * as THREE from "three";
 import type { RunStatus } from "@/lib/workflows";
 import { CdcPipelineArc } from "./CdcPipelineArc";
 import { SourceTargetNodes } from "./SourceTargetNodes";
@@ -16,6 +17,34 @@ interface Props {
   onNavigateSection?: (sectionId: string) => void;
 }
 
+function FocusController({
+  selectedNode,
+  sourceRef,
+  targetRef,
+  cdcRef,
+}: {
+  selectedNode: "source" | "cdc" | "target" | null;
+  sourceRef: React.RefObject<THREE.Group | null>;
+  targetRef: React.RefObject<THREE.Group | null>;
+  cdcRef: React.RefObject<THREE.Group | null>;
+}) {
+  const bounds = useBounds();
+
+  useEffect(() => {
+    if (selectedNode === "source" && sourceRef.current) {
+      bounds.refresh(sourceRef.current).fit();
+    } else if (selectedNode === "target" && targetRef.current) {
+      bounds.refresh(targetRef.current).fit();
+    } else if (selectedNode === "cdc" && cdcRef.current) {
+      bounds.refresh(cdcRef.current).fit();
+    } else {
+      bounds.refresh().fit();
+    }
+  }, [selectedNode, bounds, sourceRef, targetRef, cdcRef]);
+
+  return null;
+}
+
 export function CloudMorphScene({
   run,
   controlsRef,
@@ -24,6 +53,9 @@ export function CloudMorphScene({
   onNavigateSection,
 }: Props) {
   const localControlsRef = useRef<OrbitControlsHandle | null>(null);
+  const sourceRef = useRef<THREE.Group | null>(null);
+  const targetRef = useRef<THREE.Group | null>(null);
+  const cdcRef = useRef<THREE.Group | null>(null);
 
   const setControls = (controls: OrbitControlsHandle | null) => {
     localControlsRef.current = controls;
@@ -72,19 +104,30 @@ export function CloudMorphScene({
 
       {/* 5. Bounds 기반 자동 카메라 포커스 & 토폴로지 씬 */}
       <Bounds clip observe margin={1.25}>
+        <FocusController
+          selectedNode={selectedNode}
+          sourceRef={sourceRef}
+          targetRef={targetRef}
+          cdcRef={cdcRef}
+        />
         <group
-          onPointerMissed={() => {
-            onSelectNode(null);
+          onPointerMissed={(e) => {
+            if ((e.target as HTMLElement)?.tagName === "CANVAS") {
+              onSelectNode(null);
+            }
           }}
         >
           <SourceTargetNodes
             run={run}
+            sourceRef={sourceRef}
+            targetRef={targetRef}
             selectedNode={selectedNode}
             onSelectNode={onSelectNode}
             onNavigateSection={onNavigateSection}
           />
           <CdcPipelineArc
             run={run}
+            groupRef={cdcRef}
             selectedNode={selectedNode}
             onSelectNode={onSelectNode}
             onNavigateSection={onNavigateSection}

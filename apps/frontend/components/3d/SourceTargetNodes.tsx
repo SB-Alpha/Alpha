@@ -12,12 +12,20 @@ interface Props {
   selectedNode: "source" | "cdc" | "target" | null;
   onSelectNode: (node: "source" | "cdc" | "target" | null) => void;
   onNavigateSection?: (sectionId: string) => void;
+  sourceRef?: React.RefObject<THREE.Group | null>;
+  targetRef?: React.RefObject<THREE.Group | null>;
 }
 
-export function SourceTargetNodes({ run, selectedNode, onSelectNode, onNavigateSection }: Props) {
+export function SourceTargetNodes({
+  run,
+  selectedNode,
+  onSelectNode,
+  onNavigateSection,
+  sourceRef,
+  targetRef,
+}: Props) {
   const source = extractSourceNodeData(run);
   const target = extractTargetNodeData(run);
-  const bounds = useBounds();
 
   const [hoveredNode, setHoveredNode] = useState<"source" | "target" | null>(null);
 
@@ -35,13 +43,7 @@ export function SourceTargetNodes({ run, selectedNode, onSelectNode, onNavigateS
 
   const handleClickNode = (e: ThreeEvent<MouseEvent>, node: "source" | "target") => {
     e.stopPropagation();
-    const next = selectedNode === node ? null : node;
-    onSelectNode(next);
-    if (next) {
-      bounds.refresh(e.object).fit();
-    } else {
-      bounds.refresh().fit();
-    }
+    onSelectNode(selectedNode === node ? null : node);
   };
 
   const showSourceTooltip = hoveredNode === "source" || selectedNode === "source";
@@ -51,6 +53,7 @@ export function SourceTargetNodes({ run, selectedNode, onSelectNode, onNavigateS
     <group>
       {/* ==================== 1. SOURCE NODE (AWS ECS · RDS) ==================== */}
       <group
+        ref={sourceRef}
         position={[-3.1, 0, 0]}
         onClick={(e) => handleClickNode(e, "source")}
         onPointerOver={(e) => {
@@ -99,29 +102,33 @@ export function SourceTargetNodes({ run, selectedNode, onSelectNode, onNavigateS
         )}
 
         {/* 상시 하단 라벨 */}
-        <Html position={[0, -0.72, 0]} center distanceFactor={9} zIndexRange={[20, 0]}>
+        <Html position={[0, -0.65, 0]} center zIndexRange={[20, 0]}>
           <button
             type="button"
             onClick={() => onSelectNode(selectedNode === "source" ? null : "source")}
-            className="pointer-events-auto whitespace-nowrap rounded border border-ink bg-white px-2.5 py-0.5 font-mono text-[11px] font-semibold text-ink shadow-[2px_2px_0_0_var(--color-ink)] transition-transform hover:-translate-y-0.5"
+            className="pointer-events-auto whitespace-nowrap rounded border border-ink bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-ink shadow-[1px_1px_0_0_var(--color-ink)] transition-transform hover:-translate-y-0.5"
           >
             원본 AWS ({source.region})
             {source.isServing && (
-              <span className="ml-1.5 rounded bg-indigo-100 px-1 py-0.2 text-[9px] font-bold text-indigo-900">
+              <span className="ml-1 rounded bg-indigo-100 px-1 text-[8px] font-bold text-indigo-900">
                 SERVING
               </span>
             )}
           </button>
         </Html>
 
-        {/* 호버/클릭 상세 툴팁 (실제 planning.source / request 값 연동) */}
+        {/* 호버/클릭 상세 실측 카드 (화면 크기에 맞춘 컴팩트 2열 레이아웃) */}
         {showSourceTooltip && (
-          <Html position={[0, 1.38, 0]} center distanceFactor={8.5} zIndexRange={[100, 50]}>
-            <div className="w-60 rounded-lg border border-ink bg-white p-3 text-left text-ink shadow-[3px_3px_0_0_var(--color-ink)]">
-              <div className="flex items-center justify-between border-b border-ink/15 pb-1.5">
-                <span className="text-xs font-semibold">원본 인프라 (AWS)</span>
+          <Html position={[0, 0.95, 0]} center zIndexRange={[100, 50]}>
+            <div
+              onMouseEnter={() => setHoveredNode("source")}
+              onMouseLeave={() => setHoveredNode(null)}
+              className="pointer-events-auto w-52 rounded-lg border border-ink bg-white/98 p-2 text-left text-ink shadow-[2px_2px_0_0_var(--color-ink)] backdrop-blur-xs"
+            >
+              <div className="flex items-center justify-between border-b border-ink/15 pb-1">
+                <span className="font-mono text-[11px] font-semibold">원본 인프라 (AWS)</span>
                 <span
-                  className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                  className={`rounded px-1 py-0.2 font-mono text-[9px] font-bold ${
                     source.isServing ? "bg-indigo-100 text-indigo-900" : "bg-stone-100 text-ink/60"
                   }`}
                 >
@@ -129,23 +136,27 @@ export function SourceTargetNodes({ run, selectedNode, onSelectNode, onNavigateS
                 </span>
               </div>
 
-              <dl className="mt-2 space-y-1 text-xs">
-                <div className="flex justify-between gap-2">
-                  <dt className="text-ink/60">리전</dt>
-                  <dd className="font-mono font-medium">{source.region}</dd>
+              <dl className="mt-1.5 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px]">
+                <div>
+                  <dt className="text-ink/55">리전</dt>
+                  <dd className="font-mono font-medium truncate">{source.region}</dd>
                 </div>
-                <div className="flex justify-between gap-2">
-                  <dt className="text-ink/60">ECS 서비스</dt>
-                  <dd className="truncate font-mono">{source.ecsService ?? "미제공"}</dd>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <dt className="text-ink/60">RDS 인스턴스</dt>
-                  <dd className="truncate font-mono">{source.rdsInstanceId ?? "미제공"}</dd>
-                </div>
-                <div className="flex justify-between gap-2 border-t border-ink/10 pt-1">
-                  <dt className="text-ink/60">원본 행 수</dt>
-                  <dd className="font-mono font-semibold">
+                <div>
+                  <dt className="text-ink/55">원본 행 수</dt>
+                  <dd className="font-mono font-semibold text-indigo-950">
                     {source.sourceRows !== null ? `${source.sourceRows.toLocaleString("ko-KR")}행` : "미제공"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-ink/55">ECS 서비스</dt>
+                  <dd className="truncate font-mono" title={source.ecsService ?? undefined}>
+                    {source.ecsService ?? "미제공"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-ink/55">RDS 인스턴스</dt>
+                  <dd className="truncate font-mono" title={source.rdsInstanceId ?? undefined}>
+                    {source.rdsInstanceId ?? "미제공"}
                   </dd>
                 </div>
               </dl>
@@ -157,9 +168,9 @@ export function SourceTargetNodes({ run, selectedNode, onSelectNode, onNavigateS
                     e.stopPropagation();
                     onNavigateSection("plan-heading");
                   }}
-                  className="pointer-events-auto mt-2.5 w-full rounded border border-ink/25 bg-paper px-2 py-1 text-center text-[11px] font-medium text-ink hover:border-ink"
+                  className="pointer-events-auto mt-1.5 w-full rounded border border-ink/20 bg-paper py-0.5 text-center font-mono text-[10px] font-medium text-ink hover:border-ink active:bg-ink/5"
                 >
-                  승인 ① 계획 상세로 이동 ↓
+                  승인 ① 계획 상세 ↓
                 </button>
               )}
             </div>
@@ -169,6 +180,7 @@ export function SourceTargetNodes({ run, selectedNode, onSelectNode, onNavigateS
 
       {/* ==================== 2. TARGET NODE (GCP Cloud Run · Cloud SQL) ==================== */}
       <group
+        ref={targetRef}
         position={[3.1, 0, 0]}
         onClick={(e) => handleClickNode(e, "target")}
         onPointerOver={(e) => {
@@ -217,29 +229,33 @@ export function SourceTargetNodes({ run, selectedNode, onSelectNode, onNavigateS
         )}
 
         {/* 상시 하단 라벨 */}
-        <Html position={[0, -0.72, 0]} center distanceFactor={9} zIndexRange={[20, 0]}>
+        <Html position={[0, -0.65, 0]} center zIndexRange={[20, 0]}>
           <button
             type="button"
             onClick={() => onSelectNode(selectedNode === "target" ? null : "target")}
-            className="pointer-events-auto whitespace-nowrap rounded border border-ink bg-white px-2.5 py-0.5 font-mono text-[11px] font-semibold text-ink shadow-[2px_2px_0_0_var(--color-ink)] transition-transform hover:-translate-y-0.5"
+            className="pointer-events-auto whitespace-nowrap rounded border border-ink bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-ink shadow-[1px_1px_0_0_var(--color-ink)] transition-transform hover:-translate-y-0.5"
           >
             목적지 {target.providerSummary}
             {target.isServing && (
-              <span className="ml-1.5 rounded bg-emerald-100 px-1 py-0.2 text-[9px] font-bold text-emerald-800">
+              <span className="ml-1 rounded bg-emerald-100 px-1 text-[8px] font-bold text-emerald-800">
                 SERVING
               </span>
             )}
           </button>
         </Html>
 
-        {/* 호버/클릭 상세 툴팁 (실제 outputs.provisioning & app_deploy 연동) */}
+        {/* 호버/클릭 상세 실측 카드 (화면 크기에 맞춘 컴팩트 2열 레이아웃) */}
         {showTargetTooltip && (
-          <Html position={[0, 1.42, 0]} center distanceFactor={8.5} zIndexRange={[100, 50]}>
-            <div className="w-64 rounded-lg border border-ink bg-white p-3 text-left text-ink shadow-[3px_3px_0_0_var(--color-ink)]">
-              <div className="flex items-center justify-between border-b border-ink/15 pb-1.5">
-                <span className="text-xs font-semibold">목적지 인프라 ({target.providerSummary})</span>
+          <Html position={[0, 0.95, 0]} center zIndexRange={[100, 50]}>
+            <div
+              onMouseEnter={() => setHoveredNode("target")}
+              onMouseLeave={() => setHoveredNode(null)}
+              className="pointer-events-auto w-52 rounded-lg border border-ink bg-white/98 p-2 text-left text-ink shadow-[2px_2px_0_0_var(--color-ink)] backdrop-blur-xs"
+            >
+              <div className="flex items-center justify-between border-b border-ink/15 pb-1">
+                <span className="font-mono text-[11px] font-semibold">목적지 ({target.providerSummary})</span>
                 <span
-                  className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                  className={`rounded px-1 py-0.2 font-mono text-[9px] font-bold ${
                     target.isServing ? "bg-emerald-100 text-emerald-800" : "bg-stone-100 text-ink/60"
                   }`}
                 >
@@ -247,28 +263,30 @@ export function SourceTargetNodes({ run, selectedNode, onSelectNode, onNavigateS
                 </span>
               </div>
 
-              <dl className="mt-2 space-y-1 text-xs">
-                <div className="flex justify-between gap-2">
-                  <dt className="text-ink/60">Cloud SQL</dt>
-                  <dd className="truncate font-mono">{target.dbInstanceId ?? "미제공"}</dd>
+              <dl className="mt-1.5 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px]">
+                <div>
+                  <dt className="text-ink/55">Cloud SQL</dt>
+                  <dd className="truncate font-mono" title={target.dbInstanceId ?? undefined}>
+                    {target.dbInstanceId ?? "미제공"}
+                  </dd>
                 </div>
-                <div className="flex justify-between gap-2">
-                  <dt className="text-ink/60">사설 IP</dt>
-                  <dd className="font-mono">{target.cloudSqlIp ?? "미제공"}</dd>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <dt className="text-ink/60">사양</dt>
-                  <dd className="font-mono">{target.cpuMemory ?? "미제공"}</dd>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <dt className="text-ink/60">상태 확인</dt>
-                  <dd className="font-mono text-emerald-700">{target.healthCheck ?? "미제공"}</dd>
-                </div>
-                <div className="flex justify-between gap-2 border-t border-ink/10 pt-1">
-                  <dt className="text-ink/60">목적지 행 수</dt>
-                  <dd className="font-mono font-semibold">
+                <div>
+                  <dt className="text-ink/55">목적지 행 수</dt>
+                  <dd className="font-mono font-semibold text-emerald-800">
                     {target.targetRows !== null ? `${target.targetRows.toLocaleString("ko-KR")}행` : "미제공"}
                   </dd>
+                </div>
+                <div>
+                  <dt className="text-ink/55">사설 IP</dt>
+                  <dd className="font-mono truncate">{target.cloudSqlIp ?? "미제공"}</dd>
+                </div>
+                <div>
+                  <dt className="text-ink/55">사양</dt>
+                  <dd className="font-mono truncate">{target.cpuMemory ?? "미제공"}</dd>
+                </div>
+                <div className="col-span-2 flex justify-between border-t border-ink/10 pt-0.5">
+                  <dt className="text-ink/55">상태 확인</dt>
+                  <dd className="font-mono text-emerald-700 truncate">{target.healthCheck ?? "미제공"}</dd>
                 </div>
               </dl>
 
@@ -279,9 +297,9 @@ export function SourceTargetNodes({ run, selectedNode, onSelectNode, onNavigateS
                     e.stopPropagation();
                     onNavigateSection("cutover-section");
                   }}
-                  className="pointer-events-auto mt-2.5 w-full rounded border border-ink/25 bg-paper px-2 py-1 text-center text-[11px] font-medium text-ink hover:border-ink"
+                  className="pointer-events-auto mt-1.5 w-full rounded border border-ink/20 bg-paper py-0.5 text-center font-mono text-[10px] font-medium text-ink hover:border-ink active:bg-ink/5"
                 >
-                  전환 승인 / 기록으로 이동 ↓
+                  전환 승인 / 기록 ↓
                 </button>
               )}
             </div>

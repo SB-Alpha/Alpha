@@ -36,24 +36,21 @@ export default function JourneyCanvasView({ run }: Props) {
     [getScrollContainer]
   );
 
-  // 마우스 휠 및 트랙패드 스크롤 이벤트 캡처: 외부 페이지 스크롤 차단 및 내부 3D 스크롤러 직결
+  // 트랙패드 및 휠 스크롤 비활성화: 오작동 방지를 위해 휠/트랙패드 입력을 완전히 차단
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    const onWheel = (e: WheelEvent) => {
-      const scrollEl = getScrollContainer();
-      if (!scrollEl) return;
+    const blockWheel = (e: WheelEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      scrollEl.scrollTop += e.deltaY;
     };
 
-    container.addEventListener("wheel", onWheel, { passive: false });
+    container.addEventListener("wheel", blockWheel, { passive: false });
     return () => {
-      container.removeEventListener("wheel", onWheel);
+      container.removeEventListener("wheel", blockWheel);
     };
-  }, [getScrollContainer]);
+  }, []);
 
   // 키보드 방향키(←, →, Space) 탐색 지원
   useEffect(() => {
@@ -136,9 +133,9 @@ export default function JourneyCanvasView({ run }: Props) {
         </button>
       </div>
 
-      {/* 하단 스크롤 & 키보드 & 단계 안내 */}
+      {/* 하단 키보드 & 단계 안내 */}
       <div className="absolute bottom-2.5 right-4 z-10 flex items-center gap-2 rounded border border-ink/15 bg-white/95 px-3 py-1 font-mono text-[11px] text-ink/75 shadow-sm">
-        <span>휠 · 트랙패드 · 방향키(←/→) · 단계 버튼 클릭</span>
+        <span>상단 단계 버튼(01~06) 클릭 또는 방향키(←/→/Space)로 이동</span>
         <span className="font-semibold text-ink">({activeIdx + 1}/6)</span>
       </div>
     </div>

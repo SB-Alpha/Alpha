@@ -12,13 +12,19 @@ interface Props {
   selectedNode: "source" | "cdc" | "target" | null;
   onSelectNode: (node: "source" | "cdc" | "target" | null) => void;
   onNavigateSection?: (sectionId: string) => void;
+  groupRef?: React.RefObject<THREE.Group | null>;
 }
 
 const PARTICLE_COUNT = 8;
 
-export function CdcPipelineArc({ run, selectedNode, onSelectNode, onNavigateSection }: Props) {
+export function CdcPipelineArc({
+  run,
+  selectedNode,
+  onSelectNode,
+  onNavigateSection,
+  groupRef,
+}: Props) {
   const cdc = extractCdcArcData(run);
-  const bounds = useBounds();
   const [hovered, setHovered] = useState(false);
 
   const isFailed = cdc.stageState === "failed" || (cdc.mismatchCount !== null && cdc.mismatchCount > 0);
@@ -76,19 +82,13 @@ export function CdcPipelineArc({ run, selectedNode, onSelectNode, onNavigateSect
 
   const handleRelayClick = (e: ThreeEvent<MouseEvent>) => {
     e.stopPropagation();
-    const next = selectedNode === "cdc" ? null : "cdc";
-    onSelectNode(next);
-    if (next === "cdc") {
-      bounds.refresh(e.object).fit();
-    } else {
-      bounds.refresh().fit();
-    }
+    onSelectNode(selectedNode === "cdc" ? null : "cdc");
   };
 
   const showTooltip = hovered || selectedNode === "cdc";
 
   return (
-    <group>
+    <group ref={groupRef}>
       {/* 1. 베지에 곡선 가이드 아치 */}
       <mesh geometry={tubeGeometry}>
         <meshStandardMaterial
@@ -147,7 +147,8 @@ export function CdcPipelineArc({ run, selectedNode, onSelectNode, onNavigateSect
         </mesh>
 
         {/* 상시 소형 라벨 */}
-        <Html position={[0, -0.42, 0]} center distanceFactor={9} zIndexRange={[20, 0]}>
+        {/* 상시 아치 중앙 라벨 */}
+        <Html position={[0, -0.42, 0]} center zIndexRange={[20, 0]}>
           <button
             type="button"
             onClick={() => onSelectNode(selectedNode === "cdc" ? null : "cdc")}
@@ -158,14 +159,18 @@ export function CdcPipelineArc({ run, selectedNode, onSelectNode, onNavigateSect
           </button>
         </Html>
 
-        {/* 호버/선택 시 실제 테이블 대조 및 CDC 상태 툴팁 */}
+        {/* 호버/선택 시 실제 테이블 대조 및 CDC 상태 컴팩트 실측 카드 */}
         {showTooltip && (
-          <Html position={[0, 0.55, 0]} center distanceFactor={8.5} zIndexRange={[100, 50]}>
-            <div className="w-64 rounded-lg border border-ink bg-white p-3 text-left text-ink shadow-[3px_3px_0_0_var(--color-ink)]">
-              <div className="flex items-center justify-between border-b border-ink/15 pb-1.5">
-                <span className="font-mono text-[11px] font-semibold">Debezium → Kafka → Sink</span>
+          <Html position={[0, 0.52, 0]} center zIndexRange={[100, 50]}>
+            <div
+              onMouseEnter={() => setHovered(true)}
+              onMouseLeave={() => setHovered(false)}
+              className="pointer-events-auto w-56 rounded-lg border border-ink bg-white/98 p-2 text-left text-ink shadow-[2px_2px_0_0_var(--color-ink)] backdrop-blur-xs"
+            >
+              <div className="flex items-center justify-between border-b border-ink/15 pb-1">
+                <span className="font-mono text-[10px] font-semibold">Debezium → Kafka → Sink</span>
                 <span
-                  className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                  className={`rounded px-1 py-0.2 font-mono text-[9px] font-bold ${
                     isFailed
                       ? "bg-rose-100 text-rose-800"
                       : isSucceeded
@@ -179,19 +184,19 @@ export function CdcPipelineArc({ run, selectedNode, onSelectNode, onNavigateSect
                 </span>
               </div>
 
-              <dl className="mt-2 space-y-1 text-xs">
-                <div className="flex justify-between">
-                  <dt className="text-ink/60">복사율</dt>
-                  <dd className="font-mono font-semibold">
+              <dl className="mt-1.5 grid grid-cols-2 gap-x-2 gap-y-0.5 text-[10px]">
+                <div>
+                  <dt className="text-ink/55">복사율</dt>
+                  <dd className="font-mono font-semibold text-emerald-700">
                     {cdc.copyPercent !== null ? `${cdc.copyPercent}%` : "미제공"}
                   </dd>
                 </div>
-                <div className="flex justify-between">
-                  <dt className="text-ink/60">복제 지연 (Lag)</dt>
-                  <dd className="font-mono font-semibold">{cdc.lagFormatted ?? "미제공"}</dd>
+                <div>
+                  <dt className="text-ink/55">복제 지연 (Lag)</dt>
+                  <dd className="font-mono font-semibold truncate">{cdc.lagFormatted ?? "미제공"}</dd>
                 </div>
-                <div className="flex justify-between">
-                  <dt className="text-ink/60">불일치 테이블</dt>
+                <div>
+                  <dt className="text-ink/55">불일치 테이블</dt>
                   <dd
                     className={`font-mono font-semibold ${
                       cdc.mismatchCount === 0
@@ -204,24 +209,22 @@ export function CdcPipelineArc({ run, selectedNode, onSelectNode, onNavigateSect
                     {cdc.mismatchCount !== null ? `${cdc.mismatchCount}개` : "미제공"}
                   </dd>
                 </div>
-                {cdc.replicationSlot && (
-                  <div className="flex justify-between">
-                    <dt className="text-ink/60">슬롯</dt>
-                    <dd className="font-mono text-[11px]">{cdc.replicationSlot}</dd>
-                  </div>
-                )}
+                <div>
+                  <dt className="text-ink/55">슬롯</dt>
+                  <dd className="font-mono truncate">{cdc.replicationSlot ?? "미제공"}</dd>
+                </div>
               </dl>
 
-              {/* 실제 테이블별 행 수 대조 목록 */}
+              {/* 실제 테이블별 행 수 대조 목록 (최대 2개 컴팩트 스크롤) */}
               {cdc.tables.length > 0 && (
-                <div className="mt-2 border-t border-ink/10 pt-2">
-                  <p className="text-[10px] font-semibold text-ink/50">테이블 행 수 대조 (원본 → 목적지)</p>
-                  <ul className="mt-1 space-y-1 font-mono text-[11px]">
+                <div className="mt-1 border-t border-ink/10 pt-1">
+                  <p className="text-[9px] font-semibold text-ink/50">테이블 행 수 대조</p>
+                  <ul className="mt-0.5 max-h-12 overflow-y-auto space-y-0.5 font-mono text-[9px]">
                     {cdc.tables.map((t) => (
                       <li key={t.name} className="flex items-center justify-between">
                         <span className="truncate font-medium">{t.name}</span>
                         <span className={t.match ? "text-emerald-700" : "text-amber-800"}>
-                          {t.sourceRows.toLocaleString("ko-KR")} → {t.targetRows.toLocaleString("ko-KR")} ({t.percent !== null ? `${t.percent}%` : "미제공"})
+                          {t.sourceRows.toLocaleString("ko-KR")} → {t.targetRows.toLocaleString("ko-KR")}
                         </span>
                       </li>
                     ))}
@@ -236,7 +239,7 @@ export function CdcPipelineArc({ run, selectedNode, onSelectNode, onNavigateSect
                     e.stopPropagation();
                     onNavigateSection("stage-stepper-section");
                   }}
-                  className="pointer-events-auto mt-2.5 w-full rounded border border-ink/25 bg-paper px-2 py-1 text-center text-[11px] font-medium text-ink hover:border-ink"
+                  className="pointer-events-auto mt-1.5 w-full rounded border border-ink/20 bg-paper py-0.5 text-center font-mono text-[10px] font-medium text-ink hover:border-ink active:bg-ink/5"
                 >
                   하단 단계 상세 보기 ↓
                 </button>
