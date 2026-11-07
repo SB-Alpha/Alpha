@@ -1,6 +1,5 @@
 # 로컬 시험용 CDC 전체 구성 (클라우드 없이 복제·전환을 확인한다).
 #   ./run.sh up      띄우기 (비밀번호는 매번 새로 만들어 .local/ 에 둔다)
-#   ./run.sh e2e     작업 생성 → 동기화 → 부하 중 전환 → 검증
 #   ./run.sh down    내리기
 # 원본 = AWS RDS 역할, 목적지 = Cloud SQL 역할, fake-worker = Cloudflare Worker 역할.
 
