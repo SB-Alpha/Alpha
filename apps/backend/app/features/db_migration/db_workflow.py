@@ -1,6 +1,7 @@
 """DB 이전 모듈의 입구이자 전체 절차. 호출하는 쪽은 이 파일의 다섯 함수만 알면 된다.
 
-    run(입력)                 run_id를 바로 돌려주고, 아래를 백그라운드로 진행한다.
+    run(입력)                 입력을 검사·주입하고 run_id를 돌려준다 (run_input.py).
+                              지금은 1번까지만 연결돼 있고 이후 단계는 다시 붙이는 중이다.
       1. 입력 검사, 비밀값 저장     입력 비밀값은 이 시점 이후 이름표로만 다룬다.
       2. 에이전트 확인             Kafka, Connect, 플러그인
       3. 원본 확인                source를 받았으면 그대로, 없으면 넘겨받은 조회 함수로
@@ -44,6 +45,7 @@ from . import preflight, redact, vpn
 from .client import AgentError, AgentSettings, CdcAgentClient
 from .input_secrets import INPUT_SECRETS
 from .progress_log import ProgressLog
+from .run_input import InvalidInput, inject, parse
 from .schemas import (
     CutoverResult,
     DbMigrationInput,
@@ -51,13 +53,8 @@ from .schemas import (
     FinishResult,
     JobOptions,
     JobRequest,
-    MigrationOptions,
     RunStatus,
-    SourceInput,
-    SourceLookup,
     SourceSpec,
-    StartInput,
-    TargetInput,
     TargetSpec,
 )
 from .settings import MissingSetting, tunables
@@ -92,15 +89,10 @@ BUSY_MESSAGE = "run {run_id} is already running or being cleaned up"
 # 이 run 밖에 저장된 입력의 이름표. 값은 담지 않는다.
 OTHER_REFS = "other-refs"
 
-Discover = Callable[[SourceLookup], Any]
+NEXT_STEP_NOT_BUILT = "입력 주입까지만 구현되어 있습니다. 다음 단계(원본·목적지 조회)는 아직 연결되지 않았습니다."
 
-
-class InvalidInput(ValueError):
-    """필드 이름만 담는다. pydantic 원문은 입력값을 인용할 수 있다."""
-
-    def __init__(self, fields: list[str]):
-        super().__init__(f"invalid input: {', '.join(fields)}")
-        self.fields = fields
+# [이전 입력 앞단] run_input.py로 대체했다. 조회 단계 연결이 끝나면 지운다.
+# Discover = Callable[[SourceLookup], Any]
 
 
 class NotAllowed(RuntimeError):
@@ -150,36 +142,59 @@ _active_lock = threading.Lock()
 # ---- 공개 함수 ----
 
 
-def run(inp: StartInput | dict, *, discover: Discover | None = None, agent: CdcAgentClient | None = None,
-        ctx: Reporter | None = None) -> str:
-    """입력을 검사·저장하고 run_id를 바로 돌려준다. 이후 실패는 status에 나온다."""
-    try:
-        start = StartInput.model_validate(inp)
-    except ValidationError as exc:
-        raise InvalidInput(_input_problems(exc)) from None
-    if start.source is None and discover is None:
-        raise InvalidInput(["source"])
-    if start.source is not None and start.source.region != start.region:
-        raise InvalidInput(["source.region"])
-
-    if start.run_id:
-        _refuse_ended_run(start.run_id, agent)
-    run_id = start.run_id or _new_run_id()
+def run(inp: Any, *, agent: CdcAgentClient | None = None, ctx: Reporter | None = None) -> str:
+    """입력을 검사하고 권한과 DB 계정을 이름표로 바꾼다. 다음 단계가 없으므로 status에는 failed로 남는다."""
+    parsed = parse(inp)
+    if parsed.run_id:
+        _refuse_ended_run(parsed.run_id, agent)
+    run_id = parsed.run_id or _new_run_id()
     if not _reserve(run_id):
         raise NotAllowed(BUSY_MESSAGE.format(run_id=run_id))
     try:
-        cloud_ref, admin_ref = _save_inputs(run_id, start)
+        inject(run_id, parsed)
     except BaseException:
-        _release(run_id)
+        with _active_lock:
+            _runs.pop(run_id, None)
         raise
-    # 스레드에는 비밀값 없이 이름표만 넘긴다.
-    threading.Thread(
-        target=_run_in_background,
-        args=(run_id, start.region, start.target, start.source, start.options, cloud_ref, admin_ref),
-        kwargs={"discover": discover, "agent": agent, "ctx": ctx},
-        name=f"cdc-run-{run_id}", daemon=True,
-    ).start()
+    else:
+        _set_progress(run_id, state="failed", message=NEXT_STEP_NOT_BUILT)
+        _end(ctx, "failed", 0, NEXT_STEP_NOT_BUILT)
+    finally:
+        _release(run_id)
     return run_id
+
+
+# [이전 입력 앞단] run_input.py로 대체했다. 조회 단계 연결이 끝나면 지운다.
+# def run(inp: StartInput | dict, *, discover: Discover | None = None, agent: CdcAgentClient | None = None,
+#         ctx: Reporter | None = None) -> str:
+#     """입력을 검사·저장하고 run_id를 바로 돌려준다. 이후 실패는 status에 나온다."""
+#     try:
+#         start = StartInput.model_validate(inp)
+#     except ValidationError as exc:
+#         raise InvalidInput(_input_problems(exc)) from None
+#     if start.source is None and discover is None:
+#         raise InvalidInput(["source"])
+#     if start.source is not None and start.source.region != start.region:
+#         raise InvalidInput(["source.region"])
+#
+#     if start.run_id:
+#         _refuse_ended_run(start.run_id, agent)
+#     run_id = start.run_id or _new_run_id()
+#     if not _reserve(run_id):
+#         raise NotAllowed(BUSY_MESSAGE.format(run_id=run_id))
+#     try:
+#         cloud_ref, admin_ref = _save_inputs(run_id, start)
+#     except BaseException:
+#         _release(run_id)
+#         raise
+#     # 스레드에는 비밀값 없이 이름표만 넘긴다.
+#     threading.Thread(
+#         target=_run_in_background,
+#         args=(run_id, start.region, start.target, start.source, start.options, cloud_ref, admin_ref),
+#         kwargs={"discover": discover, "agent": agent, "ctx": ctx},
+#         name=f"cdc-run-{run_id}", daemon=True,
+#     ).start()
+#     return run_id
 
 
 def status(run_id: str, *, agent: CdcAgentClient | None = None) -> RunStatus:
@@ -255,69 +270,71 @@ def stop(run_id: str, *, agent: CdcAgentClient | None = None) -> FinishResult:
 # ---- run의 백그라운드 절차 ----
 
 
-def _run_in_background(run_id: str, region: str, target: TargetInput, source: SourceInput | None,
-                       options: MigrationOptions, cloud_ref: str, admin_ref: str, *,
-                       discover: Discover | None, agent: CdcAgentClient | None, ctx: Reporter | None) -> None:
-    job_id = to_job_id(run_id)
-    log = ProgressLog(run_id, job_id)
+# [이전 입력 앞단] run_input.py로 대체했다. 조회 단계 연결이 끝나면 지운다.
+# def _run_in_background(run_id: str, region: str, target: TargetInput, source: SourceInput | None,
+#                        options: MigrationOptions, cloud_ref: str, admin_ref: str, *,
+#                        discover: Discover | None, agent: CdcAgentClient | None, ctx: Reporter | None) -> None:
+#     job_id = to_job_id(run_id)
+#     log = ProgressLog(run_id, job_id)
+#
+#     def stage(name: str) -> None:
+#         _set_progress(run_id, stage=name)
+#         log.event("stage", stage=name)
+#
+#     try:
+#         client = agent or _default_agent()
+#
+#         stage("agent_check")
+#         preflight.check_agent(client)
+#
+#         stage("source_lookup")
+#         mig = _load_migration(run_id, region, target, source, options, cloud_ref, admin_ref, discover)
+#
+#         stage("preflight")
+#         creds = resolve_inputs(mig)
+#         preflight.check_source(mig, creds.source_admin["user"])
+#         if not mig.options.skip_vpn:
+#             preflight.check_networks(mig, vpn.OciSettings.from_env())
+#         _claim_source(run_id, mig)
+#         preflight.check_not_running(mig, job_id, client)
+#
+#         repl = ensure_repl_account(run_id)
+#         preflight.check_job_secrets(job_secrets(creds, repl))
+#         result = run_migration(
+#             run_id, mig.source.model_dump(), mig.target.model_dump(),
+#             agent=client, steps=_build_steps(mig, creds, repl, client, log), ctx=ctx,
+#             log_interval_s=mig.options.log_interval_s, max_hold_ms=mig.options.max_hold_ms, log=log,
+#             stop_requested=lambda: run_id in _stop_requested,
+#             on_stage=lambda name: _on_run_stage(run_id, name, stage),
+#         )
+#         _set_progress(run_id, state=result["state"])
+#     except Exception as exc:  # 스레드 밖으로 나갈 곳이 없으므로 status에 남긴다
+#         message = _clean(run_id, str(exc))
+#         logger.warning("run %s failed", run_id)
+#         log.event("run.ended", state="failed", error=message)
+#         _set_progress(run_id, state="failed", message=message)
+#         _end(ctx, "failed", 0, message)
+#     finally:
+#         _release(run_id)
 
-    def stage(name: str) -> None:
-        _set_progress(run_id, stage=name)
-        log.event("stage", stage=name)
 
-    try:
-        client = agent or _default_agent()
-
-        stage("agent_check")
-        preflight.check_agent(client)
-
-        stage("source_lookup")
-        mig = _load_migration(run_id, region, target, source, options, cloud_ref, admin_ref, discover)
-
-        stage("preflight")
-        creds = resolve_inputs(mig)
-        preflight.check_source(mig, creds.source_admin["user"])
-        if not mig.options.skip_vpn:
-            preflight.check_networks(mig, vpn.OciSettings.from_env())
-        _claim_source(run_id, mig)
-        preflight.check_not_running(mig, job_id, client)
-
-        repl = ensure_repl_account(run_id)
-        preflight.check_job_secrets(job_secrets(creds, repl))
-        result = run_migration(
-            run_id, mig.source.model_dump(), mig.target.model_dump(),
-            agent=client, steps=_build_steps(mig, creds, repl, client, log), ctx=ctx,
-            log_interval_s=mig.options.log_interval_s, max_hold_ms=mig.options.max_hold_ms, log=log,
-            stop_requested=lambda: run_id in _stop_requested,
-            on_stage=lambda name: _on_run_stage(run_id, name, stage),
-        )
-        _set_progress(run_id, state=result["state"])
-    except Exception as exc:  # noqa: BLE001 - 스레드 밖으로 나갈 곳이 없으므로 status에 남긴다
-        message = _clean(run_id, str(exc))
-        logger.warning("run %s failed", run_id)
-        log.event("run.ended", state="failed", error=message)
-        _set_progress(run_id, state="failed", message=message)
-        _end(ctx, "failed", 0, message)
-    finally:
-        _release(run_id)
-
-
-def _load_migration(run_id: str, region: str, target: TargetInput, source: SourceInput | None,
-                    options: MigrationOptions, cloud_ref: str, admin_ref: str,
-                    discover: Discover | None) -> DbMigrationInput:
-    if source is not None:
-        data = source.model_dump()
-    else:
-        found = discover(SourceLookup(run_id=run_id, region=region, target_region=target.region,
-                                      cloud_ref=cloud_ref, db_admin_ref=admin_ref))
-        data = found.model_dump() if hasattr(found, "model_dump") else dict(found)
-    tables = [t for t in data.get("tables") or [] if not t.startswith(INTERNAL_SCHEMA_PREFIX)]
-    data = {**data, "region": region, "tables": tables,
-            "credentials_ref": {"cloud": cloud_ref, "db_admin": admin_ref}}
-    try:
-        return DbMigrationInput(run_id=run_id, source=data, target=target, options=options)
-    except ValidationError as exc:
-        raise InvalidInput(_input_problems(exc)) from None
+# [이전 입력 앞단] run_input.py로 대체했다. 조회 단계 연결이 끝나면 지운다.
+# def _load_migration(run_id: str, region: str, target: TargetInput, source: SourceInput | None,
+#                     options: MigrationOptions, cloud_ref: str, admin_ref: str,
+#                     discover: Discover | None) -> DbMigrationInput:
+#     if source is not None:
+#         data = source.model_dump()
+#     else:
+#         found = discover(SourceLookup(run_id=run_id, region=region, target_region=target.region,
+#                                       cloud_ref=cloud_ref, db_admin_ref=admin_ref))
+#         data = found.model_dump() if hasattr(found, "model_dump") else dict(found)
+#     tables = [t for t in data.get("tables") or [] if not t.startswith(INTERNAL_SCHEMA_PREFIX)]
+#     data = {**data, "region": region, "tables": tables,
+#             "credentials_ref": {"cloud": cloud_ref, "db_admin": admin_ref}}
+#     try:
+#         return DbMigrationInput(run_id=run_id, source=data, target=target, options=options)
+#     except ValidationError as exc:
+#         raise InvalidInput(_input_problems(exc)) from None
 
 
 def _on_run_stage(run_id: str, name: str, stage: Callable[[str], None]) -> None:
@@ -772,20 +789,21 @@ class Resolved:
     target_sink: dict[str, str]
 
 
-def _save_inputs(run_id: str, start: StartInput) -> tuple[str, str]:
-    cloud = {"aws_access_key_id": start.aws_access_key_id.get_secret_value(),
-             "aws_secret_access_key": start.aws_secret_access_key.get_secret_value()}
-    if start.aws_session_token:
-        cloud["aws_session_token"] = start.aws_session_token.get_secret_value()
-    cloud_ref = put_secret(f"{run_id}/source-cloud", cloud)
-    admin_ref = put_secret(f"{run_id}/source-db-admin", {"user": start.db_user.get_secret_value(),
-                                                         "password": start.db_password.get_secret_value()})
-    given = start.target.credentials_ref
-    others = [ref for ref in (given.cloud, given.admin, given.ddl_user, given.sink_user)
-              if ref and not ref.startswith(f"secret://{run_id}/")]
-    if others:
-        put_secret(f"{run_id}/{OTHER_REFS}", {"refs": json.dumps(others)})
-    return cloud_ref, admin_ref
+# [이전 입력 앞단] run_input.py로 대체했다. 조회 단계 연결이 끝나면 지운다.
+# def _save_inputs(run_id: str, start: StartInput) -> tuple[str, str]:
+#     cloud = {"aws_access_key_id": start.aws_access_key_id.get_secret_value(),
+#              "aws_secret_access_key": start.aws_secret_access_key.get_secret_value()}
+#     if start.aws_session_token:
+#         cloud["aws_session_token"] = start.aws_session_token.get_secret_value()
+#     cloud_ref = put_secret(f"{run_id}/source-cloud", cloud)
+#     admin_ref = put_secret(f"{run_id}/source-db-admin", {"user": start.db_user.get_secret_value(),
+#                                                          "password": start.db_password.get_secret_value()})
+#     given = start.target.credentials_ref
+#     others = [ref for ref in (given.cloud, given.admin, given.ddl_user, given.sink_user)
+#               if ref and not ref.startswith(f"secret://{run_id}/")]
+#     if others:
+#         put_secret(f"{run_id}/{OTHER_REFS}", {"refs": json.dumps(others)})
+#     return cloud_ref, admin_ref
 
 
 def _ensure_account(ref: str, user: str) -> dict[str, str]:

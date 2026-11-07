@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from .settings import tunables
 
@@ -169,32 +169,33 @@ class DbMigrationInput(BaseModel):
         return self
 
 
-class StartInput(BaseModel):
-    """What the user gives. The four secret-like values are kept out of repr and logs."""
-
-    region: str = Field(pattern=r"^[a-z]{2}(-[a-z]+)+-\d+$", description="AWS region of the source")
-    aws_access_key_id: SecretStr = Field(min_length=1)
-    aws_secret_access_key: SecretStr = Field(min_length=1)
-    aws_session_token: SecretStr | None = None
-    db_user: SecretStr = Field(min_length=1)
-    db_password: SecretStr = Field(min_length=1)
-    target: TargetInput
-    run_id: str | None = Field(default=None, pattern=RUN_ID_PATTERN)
-    source: SourceInput | None = Field(default=None, description="Left out: found with the lookup the caller passes")
-    options: MigrationOptions = Field(default_factory=MigrationOptions)
-
-    @model_validator(mode="after")
-    def _gcp_fields(self) -> "StartInput":
-        require_gcp_fields(self.target, self.options)
-        return self
-
-    @field_validator("db_user", "db_password")
-    @classmethod
-    def check_single_line(cls, value: SecretStr) -> SecretStr:
-        # The message must not quote the value.
-        if not single_line(value.get_secret_value()):
-            raise ValueError("must be a single line of text without surrounding spaces")
-        return value
+# [이전 입력 앞단] run_input.py로 대체했다. 조회 단계 연결이 끝나면 지운다.
+# class StartInput(BaseModel):
+#     """What the user gives. The four secret-like values are kept out of repr and logs."""
+#
+#     region: str = Field(pattern=r"^[a-z]{2}(-[a-z]+)+-\d+$", description="AWS region of the source")
+#     aws_access_key_id: SecretStr = Field(min_length=1)
+#     aws_secret_access_key: SecretStr = Field(min_length=1)
+#     aws_session_token: SecretStr | None = None
+#     db_user: SecretStr = Field(min_length=1)
+#     db_password: SecretStr = Field(min_length=1)
+#     target: TargetInput
+#     run_id: str | None = Field(default=None, pattern=RUN_ID_PATTERN)
+#     source: SourceInput | None = Field(default=None, description="Left out: found with the lookup the caller passes")
+#     options: MigrationOptions = Field(default_factory=MigrationOptions)
+#
+#     @model_validator(mode="after")
+#     def _gcp_fields(self) -> "StartInput":
+#         require_gcp_fields(self.target, self.options)
+#         return self
+#
+#     @field_validator("db_user", "db_password")
+#     @classmethod
+#     def check_single_line(cls, value: SecretStr) -> SecretStr:
+#         # The message must not quote the value.
+#         if not single_line(value.get_secret_value()):
+#             raise ValueError("must be a single line of text without surrounding spaces")
+#         return value
 
 
 class SourceLookup(BaseModel):

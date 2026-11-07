@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Request
 from fastapi.responses import JSONResponse
 
 from app.core.local_access import require_local_access
-from app.features.db_migration import db_workflow, input_secrets
+from app.features.db_migration import db_workflow, input_secrets, run_input
 from app.features.db_migration.client import AgentError, AgentSettings, CdcAgentClient
 from app.features.db_migration.schemas import (
     RUN_ID_PATTERN,
@@ -67,6 +67,10 @@ def add_exception_handlers(app: FastAPI) -> None:
     def invalid_input(_: Request, exc: db_workflow.InvalidInput) -> JSONResponse:
         return JSONResponse({"detail": str(exc), "fields": exc.fields}, status_code=422)
 
+    @app.exception_handler(run_input.MissingCredentials)
+    def missing_credentials(_: Request, exc: run_input.MissingCredentials) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=409)
+
     @app.exception_handler(db_workflow.NotAllowed)
     def not_allowed(_: Request, exc: db_workflow.NotAllowed) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=409)
@@ -77,10 +81,9 @@ def add_exception_handlers(app: FastAPI) -> None:
 
 
 @router.post("/runs", status_code=202)
-def start_run(request: Request, body: Annotated[Any, Depends(_json_body)], client: Agent) -> dict:
-    """Save the inputs and start in the background. Follow it with GET /runs/{run_id}."""
-    discover = getattr(request.app.state, "discover_source", None)
-    return {"run_id": db_workflow.run(body, discover=discover, agent=client)}
+def start_run(body: Annotated[Any, Depends(_json_body)], client: Agent) -> dict:
+    """Check and save the inputs. Only this step is connected for now; see GET /runs/{run_id}."""
+    return {"run_id": db_workflow.run(body, agent=client)}
 
 
 @router.get("/runs/{run_id}")
