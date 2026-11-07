@@ -432,6 +432,17 @@ def test_missing_admin_reference_is_refused_by_field_name(vpn_calls):
     assert vpn_calls == []
 
 
+def test_an_admin_that_is_not_the_app_account_is_refused_before_anything_is_built(vpn_calls):
+    put_secret(f"{RUN_ID}/source-db-admin", {"user": "separate_admin", "password": ADMIN_PASSWORD})
+    agent = FakeAgent()
+
+    result = service.run(INPUT, agent=agent.client())
+
+    assert result.state == "failed" and "not supported yet" in result.message
+    assert "separate_admin" not in result.message
+    assert vpn_calls == [] and agent.calls == []
+
+
 def test_target_admin_password_stays_out_of_the_logs(vpn_calls, caplog):
     with caplog.at_level(logging.INFO, logger="app.features.db_migration"):
         run_until_stopped(FakeAgent())

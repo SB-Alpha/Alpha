@@ -1080,6 +1080,7 @@ def execute(inp: DbMigrationInput | dict, ctx: Reporter | None = None, *,
         log.event("inputs.loaded", source_host=mig.source.db.host, target_host=mig.target.db.private_ip,
                   tables=len(mig.source.tables), skip_vpn=mig.options.skip_vpn)
         creds = resolve_inputs(mig)
+        preflight.check_app_account(mig, creds.source_admin["user"])
         repl = ensure_repl_account(mig.run_id)
         preflight.check_job_secrets(job_secrets(creds, repl))
         client = agent or _default_agent()

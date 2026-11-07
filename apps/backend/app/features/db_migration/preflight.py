@@ -26,10 +26,18 @@ def check_agent(agent: CdcAgentClient) -> None:
         raise PreflightError(f"CDC cluster not ready: {', '.join(problems)}")
 
 
-def check_source(mig: DbMigrationInput, db_user: str) -> None:
-    # Cutover blocks writes with ALTER ROLE CURRENT_USER, so the given account must be the app's own.
+def check_app_account(mig: DbMigrationInput, db_user: str) -> None:
+    """Cutover blocks writes with ALTER ROLE CURRENT_USER, so another account would leave the app writing."""
     if mig.source.app.db_user != db_user:
-        raise PreflightError("the given DB user is not the account the source app uses")
+        raise PreflightError(
+            "the given DB user is not the account the source app uses. Cutover makes the given account read-only "
+            "to stop app writes, so give the app's account with admin rights. "
+            "Separate admin and app accounts are not supported yet"
+        )
+
+
+def check_source(mig: DbMigrationInput, db_user: str) -> None:
+    check_app_account(mig, db_user)
     if mig.options.skip_vpn:
         return
     # DB connections go through the VPN only; a public DB would resolve to a public address.
