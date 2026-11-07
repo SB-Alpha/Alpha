@@ -108,6 +108,42 @@ def test_missing_credentials_ref_stops_without_calling_assessment(engine, fake_a
     assert fake_assessment.calls == []
 
 
+MANUAL_REQUEST = MigrationRequest(
+    source_kind="manual",
+    manual={
+        "cloud": "onprem",
+        "region": "seoul-idc",
+        "app": {"service_name": "work-items", "container_port": 8080},
+        "db": {"engine_version": "16.4", "database_name": "workitems"},
+    },
+    target_region="asia-northeast3",
+)
+
+
+def test_manual_source_runs_assessment_without_aws_values(engine, fake_assessment):
+    run = engine.advance(engine.create_run(MANUAL_REQUEST).run_id)
+
+    assert run.stage(StageName.PLANNING).state == WorkflowState.SUCCEEDED
+    inp = fake_assessment.calls[0]
+    assert inp.source_kind == "manual"
+    assert inp.manual.cloud == "onprem"
+    assert not hasattr(inp, "aws_credentials_ref")  # AWS 값은 넘기지 않음
+
+
+def test_request_needs_values_for_its_source_kind():
+    with pytest.raises(ValueError, match="aws_region"):
+        MigrationRequest(target_region="asia-northeast3", aws_credentials_ref="secret://x/source-cloud")
+    with pytest.raises(ValueError, match="manual"):
+        MigrationRequest(source_kind="manual", target_region="asia-northeast3")
+
+
+def test_manual_request_reaches_the_real_assessment_contract():
+    from app.features.assessment.schemas import AssessmentInput
+
+    inp = AssessmentInput(source_kind="manual", manual=MANUAL_REQUEST.manual, target_region="asia-northeast3")
+    assert inp.manual.region == "seoul-idc"
+
+
 def test_import_error_inside_assessment_run_is_not_hidden(engine, fake_assessment):
     def broken(inp, ctx):
         raise ImportError("boto3")

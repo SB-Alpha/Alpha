@@ -20,6 +20,8 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.features.assessment.schemas import ManualSource
+
 # ---------------------------------------------------------------------------
 # 상태·단계
 # ---------------------------------------------------------------------------
@@ -114,7 +116,10 @@ class MigrationRequest(BaseModel):
 
     github_repo_url: str | None = None  # 선택. 이미지는 provisioning 이 원본 ECR 에서 복사합니다 (PR #40)
     service_name: str | None = None  # 원본 서비스 이름. ecs_service 를 비우면 이 값을 씁니다
-    aws_region: str
+    # 원본을 읽는 방법. "aws"(기본)는 AWS 계정을 조회하고, "manual" 은 사람이 넣은 manual 값을 씁니다 (assessment #56).
+    source_kind: Literal["aws", "manual"] = "aws"
+    manual: ManualSource | None = None  # source_kind="manual" 이면 필수. 비밀 원문은 넣지 않습니다
+    aws_region: str | None = None  # source_kind="aws" 면 필수
     aws_role_ref: str | None = None  # 원본 조회용 IAM 역할 ARN
     aws_credentials_ref: str | None = None  # 원본 AWS 자격증명 참조 (secret://... 등)
     ecs_service: str | None = None
@@ -140,6 +145,14 @@ class MigrationRequest(BaseModel):
         if region and not values.get("target_region"):
             values["target_region"] = region
         return values
+
+    @model_validator(mode="after")
+    def _needs_values_for_source(self) -> MigrationRequest:
+        if self.source_kind == "aws" and not self.aws_region:
+            raise ValueError("source_kind=aws 에는 aws_region 이 필요합니다")
+        if self.source_kind == "manual" and self.manual is None:
+            raise ValueError("source_kind=manual 에는 manual 이 필요합니다")
+        return self
 
     @model_validator(mode="after")
     def _target_regions_agree(self) -> MigrationRequest:

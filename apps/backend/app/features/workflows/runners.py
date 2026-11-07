@@ -379,7 +379,8 @@ def run_discovery(run: RunStatus, ctx: RunContext) -> dict[str, Any]:
 def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
     # assessment 가 discovery·planning 을 합친 모듈입니다 (PR #27). 출력은 {source, plan, gaps}.
     req = run.request
-    if not req.aws_credentials_ref:
+    manual = req.source_kind == "manual"
+    if not manual and not req.aws_credentials_ref:
         raise MissingStageOutput("원본 AWS 키 이름표가 없습니다")
 
     try:
@@ -388,16 +389,26 @@ def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
     except ImportError as exc:
         raise RuntimeError("assessment 모듈을 찾을 수 없습니다") from exc
 
-    inp = AssessmentInput(
-        run_id=run.run_id,
-        github_repo_url=req.github_repo_url,
-        aws_credentials_ref=req.aws_credentials_ref,
-        db_admin_ref=req.db_admin_ref or req.db_credentials_ref,
-        aws_region=req.aws_region,
-        target_region=req.target_region,
-        ecs_service=req.ecs_service,
-        rds_instance_id=req.rds_instance_id,
-    )
+    if manual:
+        # 직접 입력한 원본은 AWS 를 조회하지 않습니다. 원본에서 확인하지 않은 값이라는 표시는 assessment 가 gaps 에 남깁니다.
+        inp = AssessmentInput(
+            run_id=run.run_id,
+            source_kind="manual",
+            manual=req.manual,
+            github_repo_url=req.github_repo_url,
+            target_region=req.target_region,
+        )
+    else:
+        inp = AssessmentInput(
+            run_id=run.run_id,
+            github_repo_url=req.github_repo_url,
+            aws_credentials_ref=req.aws_credentials_ref,
+            db_admin_ref=req.db_admin_ref or req.db_credentials_ref,
+            aws_region=req.aws_region,
+            target_region=req.target_region,
+            ecs_service=req.ecs_service,
+            rds_instance_id=req.rds_instance_id,
+        )
     res = assessment_service.run(inp, ctx)
     # IAM 감사를 하는 모듈이 아직 없어 iam_audit_status 는 보고하지 않습니다 (화면: 미제공).
     metrics = _secret_encryption_metric(run)
