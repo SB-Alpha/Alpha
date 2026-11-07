@@ -19,8 +19,12 @@ from .schemas import FinopsInput, FinopsReport
 
 log = logging.getLogger(__name__)
 
-MODEL = "claude-opus-5-5"
-TIMEOUT_SECONDS = 30.0
+MODEL = "claude-sonnet-5-5"
+# 설명 문장만 쓰는 일이라 생각을 짧게 합니다. Sonnet 5.5 는 thinking 을 끌 수 없고, thinking 도
+# max_tokens 에 포함되므로 답보다 넉넉하게 잡습니다 (작으면 stop_reason=max_tokens 로 규칙 문장으로 돌아감).
+EFFORT = "low"
+MAX_TOKENS = 16000
+TIMEOUT_SECONDS = 60.0
 MAX_SENTENCES = 5
 
 SYSTEM = (
@@ -110,9 +114,10 @@ def _ask_claude(facts: str) -> AiNotes | None:
     try:
         response = client.messages.parse(
             model=MODEL,
-            max_tokens=4000,
+            max_tokens=MAX_TOKENS,
             system=SYSTEM,
             messages=[{"role": "user", "content": facts}],
+            output_config={"effort": EFFORT},
             output_format=AiNotes,
         )
     except anthropic.RateLimitError:
