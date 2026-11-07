@@ -2,7 +2,7 @@
 
 - ALPHA_AI_ENABLED=1 + `pip install -e ".[ai]"` 일 때 Claude 를 호출하고, 실패하면 규칙 기반 진단으로 넘어갑니다.
 - 어떤 진단이었는지는 diagnosed_by 로 구분합니다.
-- 수동 입력 추천값은 AI 가 만들지 않습니다. 시뮬레이션 모드에서만, 규칙 기반으로 제공합니다.
+- 수동 입력 추천값은 만들지 않습니다(None). 실제 인프라 값은 운영자가 확인해 넣습니다.
 - ReasoningBank(#77): 전에 진단하고 실제로 풀린 장애는 기억해 두었다가, 같은 장애면 LLM 없이 같은 조치를 먼저 제안합니다
   (diagnosed_by="reasoning_bank"). 새 장애는 비슷한 과거 사례를 참고 데이터로 붙여 AI 에게 묻습니다.
   기억 저장소가 고장 나도 진단은 막히지 않고 규칙·AI 진단으로 넘어갑니다.
@@ -50,7 +50,7 @@ class AiDiagnosis(BaseModel):
 
 class SelfHealingDiagnosis(AiDiagnosis):
     suggested_manual_input: dict[str, Any] | None = Field(
-        default=None, description="시뮬레이션 모드에서 수동 입력에 쓸 수 있는 값"
+        default=None, description="수동 입력 추천값. 지어낸 값을 주지 않으므로 지금은 항상 None"
     )
     diagnosed_by: str = Field(default="rule", description="진단 주체 (ai | rule | reasoning_bank)")
     memory_hit: bool = Field(default=False, description="과거에 풀린 같은 장애의 기억으로 낸 진단인지")
@@ -128,12 +128,12 @@ def _safe_memory(what: str, bank: ReasoningBank | None, fn):
 
 
 def _from_memory(episode: Episode, stage: StageName) -> SelfHealingDiagnosis:
-    """기억에서 낸 진단. 수동 입력 추천값은 기억에서 만들지 않고 시뮬레이션에서만 규칙으로 줍니다."""
+    """기억에서 낸 진단. 수동 입력 추천값은 기억에서 만들지 않습니다."""
     return SelfHealingDiagnosis(
         category=episode.category,
         root_cause=episode.root_cause,
         action_plan=episode.action_plan,
-        suggested_manual_input=_simulation_fixture(stage),
+        suggested_manual_input=None,
         diagnosed_by="reasoning_bank",
         memory_hit=True,
         prior_success_rate=round(episode.prior_success_rate, 2),
@@ -169,50 +169,6 @@ def _remember_incident(
     )
 
 
-def _simulation_enabled() -> bool:
-    from app.features.db_migration.client import AgentSettings
-
-    try:
-        return AgentSettings.from_env().is_simulation
-    except KeyError:
-        return False
-
-
-def _simulation_fixture(stage: StageName) -> dict[str, Any] | None:
-    """시뮬레이션 전용 값. 실제 인프라가 아니므로 시뮬레이션이 아니면 제공하지 않습니다.
-
-    credentials_ref 는 scripts/register_secrets.py 의 기본 이름표입니다.
-    """
-    if stage not in (StageName.PROVISIONING, StageName.APP_DEPLOY) or not _simulation_enabled():
-        return None
-    target = {
-        "project_id": "simulation-project",
-        "region": "asia-northeast3",
-        "network": {
-            "vpc_name": "simulation-vpc",
-            "subnet_cidrs": ["10.30.0.0/24"],
-            "psa_range_cidr": "10.31.0.0/16",
-        },
-        "db": {
-            "instance": "simulation-cloudsql",
-            "private_ip": "10.31.0.5",
-            "port": 5432,
-            "database": "app_db",
-            "version": "POSTGRES_16",
-            "ssl_mode": "ENCRYPTED_ONLY",
-        },
-        "app": {"url": None, "db_user": "app_user"},
-        "credentials_ref": {
-            "cloud": "secret://default/target-cloud",
-            "admin": "secret://default/target-admin",
-        },
-    }
-    common = {"simulated": True, "target": target, "changes": {}, "applied": False}
-    if stage == StageName.PROVISIONING:
-        return {**common, "problems": []}
-    return {**common, "app_url": None, "healthy": False}
-
-
 def _rule_based_diagnosis(stage: StageName, error_msg: str) -> SelfHealingDiagnosis:
     lowered = error_msg.lower()
 
@@ -225,7 +181,7 @@ def _rule_based_diagnosis(stage: StageName, error_msg: str) -> SelfHealingDiagno
                 "설치 후 [재시도]로 실패한 단계를 다시 실행합니다.",
                 "이미 만들어 둔 인프라가 있으면 [수동 입력]에 그 실제 값을 넣어 진행합니다.",
             ],
-            suggested_manual_input=_simulation_fixture(stage),
+            suggested_manual_input=None,
             diagnosed_by="rule",
         )
 
@@ -236,7 +192,7 @@ def _rule_based_diagnosis(stage: StageName, error_msg: str) -> SelfHealingDiagno
             action_plan=[
                 "환경변수 .env에 올바른 CDC_AGENT_URL 주소를 등록하고 백엔드를 재시작합니다.",
                 "OCI와의 IPsec VPN 터널 및 방화벽 헬스체크를 점검합니다.",
-                "시연 환경이면 CDC_AGENT_URL을 비우고 ALPHA_CDC_SIMULATION=1로 시뮬레이션 모드를 켭니다. 화면에 시뮬레이션으로 표시됩니다.",
+                "CDC_AGENT_URL이 실제 에이전트 주소(mock 주소가 아님)인지 확인하고, 그 주소의 /status 가 정상(status ok)으로 응답하는지 점검합니다.",
             ],
             diagnosed_by="rule",
         )

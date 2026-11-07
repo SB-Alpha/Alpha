@@ -236,7 +236,6 @@ class PreflightReport(BaseModel):
     gate: Gate = "cutover"
     verdict: PreflightVerdict
     advisory: bool = True
-    simulated: bool = False
     checks: list[PreflightCheck]
     measured_at: datetime
 

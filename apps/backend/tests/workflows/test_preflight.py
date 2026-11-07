@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.fakes.cdc_agent import FakeCdcAgent
 from app.features.provisioning.terraform import ProvisioningError
 from app.features.workflows import preflight
 from app.features.workflows.preflight import _http_status, evaluate_cutover
@@ -102,7 +103,7 @@ def test_report_shape_and_check_order():
     assert report.run_id == "mig-20261106-abcd1234"
     assert report.gate == "cutover"
     assert report.advisory is True
-    assert report.simulated is False
+    assert "simulated" not in report.model_dump()
     assert [c.id for c in report.checks] == CHECK_IDS
     assert all(c.label for c in report.checks)
     assert report.measured_at.tzinfo is not None
@@ -132,30 +133,31 @@ def test_unknown_without_fail_gives_unverified():
     assert report.verdict == "unverified"
 
 
-def test_simulated_is_always_unverified(monkeypatch):
-    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
-
-    all_pass = evaluate(max_lag_bytes=2048)
-    assert all_pass.simulated is True
-    assert {c.status for c in all_pass.checks} == {"pass"}
-    assert all_pass.verdict == "unverified"
-
-    with_fail = evaluate(job=job_with(mismatch=3))
-    assert with_fail.simulated is True
-    assert with_fail.verdict == "unverified"
-
-
-def test_real_agent_url_is_not_simulated_even_with_flag(monkeypatch):
-    monkeypatch.setenv("CDC_AGENT_URL", "https://cdc.example")
-    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
-    assert evaluate().simulated is False
-
-
-def test_simulator_through_real_defaults_never_claims_go(monkeypatch):
-    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
-    report = evaluate_cutover(make_run(), http_get=lambda url: 200, worker_target=worker_at(APP_URL))
-    assert report.simulated is True
+@pytest.mark.parametrize(
+    "agent_env",
+    [{"ALPHA_CDC_SIMULATION": "1"}, {"CDC_AGENT_URL": "mock://simulation"}],
+    ids=["simulation-flag", "mock-url"],
+)
+def test_mock_agent_through_real_defaults_never_claims_go(monkeypatch, agent_env):
+    # 모의 에이전트는 실제 전환 준비를 보여 주지 못합니다. 그 값으로 점검하지 않고 연결 실패처럼 unknown 으로 둡니다.
+    for name, value in agent_env.items():
+        monkeypatch.setenv(name, value)
+    report = evaluate_cutover(make_run(), http_get=lambda url: 200, worker_target=worker_at(APP_URL), max_lag_bytes=2048)
+    for check_id in CHECK_IDS[:4]:
+        assert check(report, check_id).status == "unknown"
     assert report.verdict == "unverified"
+
+
+def test_real_agent_url_is_read_even_with_simulation_flag(monkeypatch):
+    fake = FakeCdcAgent().install(monkeypatch)
+    fake.jobs["mig_20261106_abcd1234"] = dict(READY_JOB)
+    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+
+    report = evaluate_cutover(make_run(), http_get=lambda url: 200, worker_target=worker_at(APP_URL), max_lag_bytes=2048)
+
+    assert ("GET", "/jobs/mig_20261106_abcd1234") in fake.requests
+    assert {c.status for c in report.checks} == {"pass"}
+    assert report.verdict == "go"
 
 
 def test_unconfigured_agent_makes_agent_checks_unknown():

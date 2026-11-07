@@ -1,14 +1,13 @@
 // 대시보드 계산. run 상태만으로 만들고, 값이 없으면 null(화면에 "미제공")을 돌려줍니다.
 // db_migration 키는 #30·#31 이 실제로 보내는 이름입니다. serving 은 workflows 가 에이전트 보고로, cutover_seconds 는
 // 워커 측정값이나 에이전트 보고로 채웁니다(cutover_seconds_source). failed_requests·probe_* 는 프로버 실측값입니다.
-// 실제 run 에서 ALPHA_PROBE_URL 이 없으면 "미제공"이고, 시뮬레이터는 failed_requests 를 자체 값으로 보냅니다.
+// ALPHA_PROBE_URL 이 없으면 "미제공"입니다.
 // 목적지 DB 네트워크는 db_migration 계약(UI_API.md)의 target_db_network 를 읽고, 예전 run 의 cloud_sql_private_ip 도 읽습니다.
 
 import { isRecord } from "./plan";
 import type { ApprovalRecord, PreflightReport, PreflightVerdict, RunStatus, StageStatus, WorkflowState } from "./workflows";
 
 export const METRIC_KEYS = {
-  simulated: "simulated", // true: 실제 에이전트가 아닌 시뮬레이션 값
   serving: "serving", // "source" | "target": 지금 쓰기를 처리하는 쪽 (예전 run 은 "aws" | "gcp")
   replicationLagBytes: "replication_lag_bytes",
   copyPercent: "copy_percent",
@@ -102,9 +101,12 @@ export function countTone(value: number | null): SecurityTone {
   return value !== null && value > 0 ? "bad" : "neutral";
 }
 
-/** 시뮬레이션 모드에서 나온 값이 섞여 있으면 true 입니다. */
-export function isSimulated(run: RunStatus): boolean {
-  return findMetric(run, METRIC_KEYS.simulated) === true;
+/**
+ * 시뮬레이션을 없애기 전에 저장된 예전 run 이면 true 입니다. 새 run 에는 simulated 지표가 남지 않습니다.
+ * 백엔드 timings 가 같은 지표로 예전 run 을 거르는 것처럼, 화면에서도 그 값이 실측처럼 보이지 않게 합니다.
+ */
+export function isLegacySimulatedRun(run: RunStatus): boolean {
+  return findMetric(run, "simulated") === true;
 }
 
 /** 모듈이 실제로 보고한 값만 돌려줍니다. 보고가 없으면 null 입니다. */
@@ -184,7 +186,6 @@ export function cutoverSecondsSource(run: RunStatus): CutoverSecondsSource | nul
 }
 
 export interface CutoverOverlayFacts {
-  simulated: boolean;
   cutoverSeconds: number | null;
   cutoverSecondsSource: CutoverSecondsSource | null;
   failedRequests: number | null;
@@ -196,7 +197,6 @@ export interface CutoverOverlayFacts {
 export function cutoverOverlayFacts(run: RunStatus): CutoverOverlayFacts {
   const steps = cutoverSteps(run);
   return {
-    simulated: isSimulated(run),
     cutoverSeconds: numberMetric(run, METRIC_KEYS.cutoverSeconds),
     cutoverSecondsSource: cutoverSecondsSource(run),
     failedRequests: numberMetric(run, METRIC_KEYS.failedRequests),
@@ -229,9 +229,9 @@ export function cutoverApprovals(run: RunStatus): ApprovalRecord[] {
 
 const VERDICTS: PreflightVerdict[] = ["go", "no_go", "unverified"];
 
-/** 화면에 쓸 판정. 시뮬레이션이거나 모르는 값이면 go 로 보이지 않게 unverified 로 둡니다. */
+/** 화면에 쓸 판정. 모르는 값이면 go 로 보이지 않게 unverified 로 둡니다. */
 export function preflightVerdict(report: PreflightReport): PreflightVerdict {
-  if (report.simulated || !VERDICTS.includes(report.verdict)) return "unverified";
+  if (!VERDICTS.includes(report.verdict)) return "unverified";
   return report.verdict;
 }
 

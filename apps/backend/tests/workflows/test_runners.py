@@ -33,6 +33,7 @@ from app.features.workflows.schemas import (
     WorkflowState,
 )
 from app.features.workflows.store import RunStore
+from tests.fakes.cdc_agent import FAKE_AGENT_URL, FakeCdcAgent
 
 
 @pytest.fixture(autouse=True)
@@ -579,9 +580,8 @@ def test_cutover_runner_raises_on_failed(engine, monkeypatch):
         run_cutover(run, ctx=FakeCtx(), poll_interval_s=0.01)  # type: ignore[arg-type]
 
 
-def test_cutover_runner_with_simulation_fallback(engine, monkeypatch):
-    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
-    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+def test_cutover_runner_through_the_agent_lifecycle(engine, monkeypatch):
+    fake = FakeCdcAgent().install(monkeypatch)
 
     run = engine.create_run(REQUEST)
     reports = []
@@ -593,10 +593,13 @@ def test_cutover_runner_with_simulation_fallback(engine, monkeypatch):
     job = run_cutover(run, ctx=FakeCtx(), poll_interval_s=0.01)
     assert job["state"] == "succeeded"
     assert job["phase"] == "stabilizing"
+    assert [r["job_id"] for r in fake.cutover_requests] == [run.run_id.replace("-", "_")]
     last_report = reports[-1]
     assert last_report[1] == 100
-    assert last_report[2]["simulated"] is True
     assert last_report[2]["serving"] == "target"
+    assert last_report[2]["cutover_seconds"] == 1.2
+    assert last_report[2]["verification"] == "match"
+    assert "simulated" not in last_report[2]
 
 
 def _run_cutover_with_agent_metrics(engine, monkeypatch, metrics, **cutover_options):
@@ -704,24 +707,56 @@ def _run_db_migration_capturing_input(engine, monkeypatch, ctx):
     return seen
 
 
-def test_db_migration_skips_real_vpn_and_marks_run_in_simulation(engine, monkeypatch):
+@pytest.mark.parametrize(
+    "agent_env",
+    [{"ALPHA_CDC_SIMULATION": "1"}, {"CDC_AGENT_URL": "mock://simulation"}],
+    ids=["simulation-flag", "mock-url"],
+)
+def test_db_migration_rejects_a_mock_agent_before_starting(engine, monkeypatch, agent_env):
+    # 막지 않으면 모의 에이전트로 실제 VPN 경로를 탑니다.
     monkeypatch.delenv("CDC_AGENT_URL", raising=False)
-    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+    for name, value in agent_env.items():
+        monkeypatch.setenv(name, value)
     reports = []
 
     class FakeCtx:
         def report(self, state, progress, metrics=None, message=None):
             reports.append(metrics or {})
 
-    seen = _run_db_migration_capturing_input(engine, monkeypatch, FakeCtx())
+    monkeypatch.setattr("app.features.db_migration.service.run", lambda inp, proxy: pytest.fail("CDC 를 시작하면 안 됩니다"))
+    run = engine.create_run(REQUEST).model_copy(
+        update={"outputs": {"planning": {"source": {"tables": []}}, "provisioning": {"target": {"db": {}}}}}
+    )
+
+    with pytest.raises(RuntimeError, match="ALPHA_CDC_SIMULATION 모드는 지원하지 않습니다"):
+        run_db_migration(run, ctx=FakeCtx(), poll_interval_s=0.01)  # type: ignore[arg-type]
+    assert reports == []
+
+
+@pytest.mark.parametrize("flag", ["1", "true", "True"])
+def test_db_migration_skips_vpn_when_it_is_pre_provisioned(engine, monkeypatch, flag):
+    monkeypatch.setenv("CDC_AGENT_URL", FAKE_AGENT_URL)
+    monkeypatch.setenv("CDC_USE_EXISTING_VPN", flag)
+
+    seen = _run_db_migration_capturing_input(engine, monkeypatch, None)
 
     assert seen["options"] == {"skip_vpn": True}
-    assert reports[0]["simulated"] is True
+
+
+def test_db_migration_builds_the_vpn_by_default(engine, monkeypatch):
+    monkeypatch.setenv("CDC_AGENT_URL", FAKE_AGENT_URL)
+    monkeypatch.delenv("CDC_USE_EXISTING_VPN", raising=False)
+
+    seen = _run_db_migration_capturing_input(engine, monkeypatch, None)
+
+    assert "options" not in seen
 
 
 def test_db_migration_uses_real_vpn_path_with_real_agent_url(engine, monkeypatch):
+    # 실제 주소가 있으면 ALPHA_CDC_SIMULATION 이 켜져 있어도 실제 에이전트이므로 거부하지 않습니다.
     monkeypatch.setenv("CDC_AGENT_URL", "https://cdc.example")
     monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+    monkeypatch.delenv("CDC_USE_EXISTING_VPN", raising=False)
 
     seen = _run_db_migration_capturing_input(engine, monkeypatch, None)
 
@@ -736,13 +771,14 @@ def test_cutover_reports_probe_measurements_when_configured(engine, monkeypatch)
     assert m["failed_requests"] == m["probe_requests"]
 
 
-def test_simulated_cutover_does_not_probe(monkeypatch):
+def test_mock_agent_cutover_is_rejected_before_probing(monkeypatch):
     monkeypatch.delenv("CDC_AGENT_URL", raising=False)
     monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
     monkeypatch.setenv("ALPHA_PROBE_URL", "http://127.0.0.1:9/")
     monkeypatch.setattr("app.features.workflows.runners.prober_from_env", lambda: pytest.fail("프로버를 켜면 안 됩니다"))
-    monkeypatch.setattr("app.features.workflows.runners._request_cutover", lambda *a: {"phase": "stabilizing"})
-    assert run_cutover(None, ctx=None)["phase"] == "stabilizing"  # type: ignore[arg-type]
+    monkeypatch.setattr("app.features.workflows.runners._request_cutover", lambda *a: pytest.fail("전환을 요청하면 안 됩니다"))
+    with pytest.raises(RuntimeError, match="실제 CDC_AGENT_URL 이 필요합니다"):
+        run_cutover(None, ctx=None)  # type: ignore[arg-type]
 
 
 class ApproverAgent:
@@ -1012,9 +1048,8 @@ def test_missing_or_malformed_evidence_writes_no_step_metrics(engine, monkeypatc
     assert "경고" not in reports[-1].message
 
 
-def test_simulator_writes_no_step_metrics(engine, monkeypatch):
-    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
-    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+def test_agent_without_evidence_writes_no_step_metrics(engine, monkeypatch):
+    FakeCdcAgent().install(monkeypatch)
     ctx = RecordingCtx()
     run_cutover(engine.create_run(REQUEST), ctx=ctx, poll_interval_s=0.001)  # type: ignore[arg-type]
     m = ctx.reports[-1].metrics
@@ -1430,6 +1465,25 @@ def test_clean_up_cdc_does_nothing_without_an_agent(engine, monkeypatch):
     assert stopped == []
 
 
+@pytest.mark.parametrize(
+    "agent_env",
+    [{"ALPHA_CDC_SIMULATION": "1"}, {"CDC_AGENT_URL": "mock://simulation"}],
+    ids=["simulation-flag", "mock-url"],
+)
+def test_clean_up_cdc_does_not_use_a_mock_agent(engine, monkeypatch, agent_env):
+    # db_migration 이 mock 주소로 거부돼 FAILED 가 된 run 을 중단해도 모의 에이전트로 정리하지 않습니다.
+    stopped = _patch_cleanup(monkeypatch, _FakeCleanupAgent({"phase": "streaming", "state": "running"}))
+    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
+    for name, value in agent_env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(
+        "app.features.db_migration.client.CdcAgentClient", lambda settings: pytest.fail("모의 에이전트를 만들면 안 됩니다")
+    )
+
+    assert clean_up_cdc(_run_with_cdc_stage(engine, state=WorkflowState.FAILED)) is False
+    assert stopped == []
+
+
 @pytest.mark.parametrize("phase", ["cutover", "stabilizing", "closed"])
 @pytest.mark.parametrize("job_state", ["running", "failed"])
 def test_clean_up_cdc_refuses_a_job_past_the_cutover(engine, monkeypatch, phase, job_state):
@@ -1517,13 +1571,43 @@ def test_failed_cutover_still_reports_write_counts(engine, monkeypatch):
     assert reports[-1] == {"write_requests": 2}
 
 
-def test_simulated_cutover_does_not_read_the_worker(monkeypatch):
-    monkeypatch.delenv("CDC_AGENT_URL", raising=False)
-    monkeypatch.setenv("ALPHA_CDC_SIMULATION", "1")
+def test_mock_agent_cutover_is_rejected_before_reading_the_worker(monkeypatch):
+    monkeypatch.setenv("CDC_AGENT_URL", "mock://simulation")
     monkeypatch.setenv("WORKER_URL", "http://127.0.0.1:9")
     monkeypatch.setenv("WORKER_TOKEN", "token")
+    monkeypatch.setattr("app.features.workflows.runners._cutover_worker", lambda: pytest.fail("Worker 를 읽으면 안 됩니다"))
+    monkeypatch.setattr("app.features.workflows.runners._request_cutover", lambda *a: pytest.fail("전환을 요청하면 안 됩니다"))
+    with pytest.raises(RuntimeError, match="ALPHA_CDC_SIMULATION 모드는 지원하지 않습니다"):
+        run_cutover(None, ctx=None)  # type: ignore[arg-type]
+
+
+def test_real_agent_cutover_uses_the_prober_and_the_worker(monkeypatch):
+    # 시뮬레이션 분기가 사라졌으므로 실제 에이전트면 항상 측정 경로를 탑니다.
+    monkeypatch.setenv("CDC_AGENT_URL", FAKE_AGENT_URL)
+    used = []
+
+    class Prober:
+        def start(self):
+            used.append("prober")
+
+        def snapshot(self):
+            return {}
+
+        def stop(self):
+            return {}
+
+    monkeypatch.setattr("app.features.workflows.runners.prober_from_env", lambda: Prober())
+    monkeypatch.setattr("app.features.workflows.runners._cutover_worker", lambda: used.append("worker") or None)
     monkeypatch.setattr("app.features.workflows.runners._request_cutover", lambda *a: {"phase": "stabilizing"})
-    assert run_cutover(None, ctx=None)["phase"] == "stabilizing"  # type: ignore[arg-type]
+
+    class Ctx:
+        def report(self, *args, **kwargs):
+            pass
+
+    job = run_cutover(SimpleNamespace(run_id="mig-1"), Ctx(), probe_settle_s=0)  # type: ignore[arg-type]
+
+    assert job["phase"] == "stabilizing"
+    assert used == ["worker", "prober"]
 
 
 WAIT_S = 5

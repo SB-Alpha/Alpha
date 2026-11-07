@@ -159,6 +159,15 @@ def test_an_incomplete_finish_raises_with_what_is_left(monkeypatch, agent_env):
 
 def test_without_an_agent_url_it_fails_loudly(monkeypatch):
     monkeypatch.delenv("CDC_AGENT_URL", raising=False)
-    monkeypatch.delenv("ALPHA_CDC_SIMULATION", raising=False)  # 시뮬레이션이면 mock 에이전트로 갑니다
+    monkeypatch.delenv("ALPHA_CDC_SIMULATION", raising=False)  # db_migration 클라이언트가 이 값을 mock 주소로 바꿉니다
     with pytest.raises(RuntimeError, match="CDC_AGENT_URL"):
+        runners.decommission_cdc(_run())
+
+
+def test_a_mock_agent_url_is_rejected_before_finish(monkeypatch):
+    from app.features.db_migration import db_workflow
+
+    monkeypatch.setenv("CDC_AGENT_URL", "mock://simulation")
+    monkeypatch.setattr(db_workflow, "finish", lambda run_id, agent: pytest.fail("정리를 시작하면 안 됩니다"))
+    with pytest.raises(RuntimeError, match="실제 CDC_AGENT_URL 이 필요합니다"):
         runners.decommission_cdc(_run())

@@ -358,13 +358,29 @@ def _cutover_approver(run: RunStatus) -> str:
     return (record.approver if record else None) or "workflows"
 
 
-def _agent_is_simulated() -> bool:
+SIMULATION_UNSUPPORTED_MESSAGE = "ALPHA_CDC_SIMULATION 모드는 지원하지 않습니다. 실제 CDC_AGENT_URL 이 필요합니다"
+
+
+def _require_real_agent() -> None:
+    """모의(mock) 에이전트 주소를 설정 오류로 거부합니다. 화면의 모든 값은 실제 에이전트에서 와야 합니다.
+
+    db_migration 클라이언트는 아직 ALPHA_CDC_SIMULATION=1 을 mock 주소로 바꿉니다. 막지 않으면 모의 에이전트로
+    실제 VPN 경로를 탑니다. 주소가 없는 경우는 각 호출부가 이미 따로 처리하므로 여기서는 보지 않습니다.
+    KeyError 계열로 올리면 호출부가 '주소 없음'으로 바꾸거나 삼키므로 RuntimeError 로 올립니다.
+    """
     from app.features.db_migration.client import AgentSettings
 
     try:
-        return AgentSettings.from_env().is_simulation
+        url = AgentSettings.from_env().url
     except KeyError:
-        return False
+        return
+    if url.startswith("mock"):
+        raise RuntimeError(SIMULATION_UNSUPPORTED_MESSAGE)
+
+
+def _use_existing_vpn() -> bool:
+    """팀이 미리 띄운 VPN 을 쓰는지 (#101). 켜져 있으면 VPN 을 만들지 않습니다."""
+    return os.getenv("CDC_USE_EXISTING_VPN", "0") in ("1", "true", "True")
 
 
 DISCOVERY_MERGED_MESSAGE = "assessment 에 통합 — 원본 조회는 planning 단계에서 합니다"
@@ -474,10 +490,12 @@ def _check_cdc_settings() -> None:
     from app.features.db_migration.vpn import OciSettings
 
     try:
-        if AgentSettings.from_env().is_simulation:
-            return  # 모의 에이전트로는 실제 VPN 을 만들지 않습니다.
+        AgentSettings.from_env()
     except KeyError:
         raise RuntimeError("CDC_AGENT_URL 환경변수가 설정되지 않아 CDC 를 시작할 수 없습니다") from None
+    _require_real_agent()
+    if _use_existing_vpn():
+        return  # VPN 을 미리 띄웠으면 OCI 로 VPN 을 만들지 않으므로 OCI 설정이 필요 없습니다.
     OciSettings.from_env()
 
 
@@ -547,6 +565,12 @@ def clean_up_cdc(run: RunStatus) -> bool:
     except KeyError:
         log.warning("CDC_AGENT_URL 이 없어 run %s 의 복제 자원을 정리하지 않습니다", run.run_id)
         return False
+    try:
+        _require_real_agent()
+    except RuntimeError:
+        # 모의 에이전트의 '정리됨' 응답을 믿고 실제 슬롯·VPN 이 남은 것을 놓치지 않게, 주소가 없을 때처럼 손대지 않습니다.
+        log.warning("CDC_AGENT_URL 이 mock 주소라 run %s 의 복제 자원을 정리하지 않습니다", run.run_id)
+        return False
 
     agent = CdcAgentClient(settings)
     try:
@@ -586,6 +610,7 @@ def decommission_cdc(run: RunStatus) -> str:
         settings = AgentSettings.from_env()
     except KeyError:
         raise RuntimeError("CDC_AGENT_URL 이 없어 이전 자원을 정리하지 못했습니다") from None
+    _require_real_agent()  # 모의 에이전트로 VPN 삭제 경로를 타지 않습니다.
     result = db_workflow.finish(run.run_id, agent=CdcAgentClient(settings))
     if result.state != "finished":
         left = ", ".join(result.remaining) or "확인 필요"
@@ -654,15 +679,10 @@ def run_db_migration(
         "target": dict(target),
     }
 
-    if os.getenv("CDC_USE_EXISTING_VPN", "0") in ("1", "true", "True"):
+    _require_real_agent()
+    if _use_existing_vpn():
         # 팀이 미리 띄운 VPN 으로 원본·대상이 이미 닿을 때. probe 가 실패하면 바로 멈춥니다.
         inp["options"] = {"skip_vpn": True}
-
-    if _agent_is_simulated():
-        # 모의 에이전트로 실제 VPN 을 만들지 않습니다. 화면에는 simulated 지표로 구분됩니다.
-        inp["options"] = {"skip_vpn": True}
-        if ctx is not None:
-            ctx.report("running", 0, {"simulated": True}, "시뮬레이션 모드: 실제 VPN·CDC 없이 진행합니다")
 
     job_id = to_job_id(run.run_id)
     ready_event = threading.Event()
@@ -813,12 +833,12 @@ def run_cutover(
     """전환을 실행하고 실측값을 남긴 뒤, 전환 시점 데이터 비교가 끝날 때까지 봅니다.
 
     ALPHA_PROBE_URL 이 있으면 외부 프로버로 읽기 실패 수와 대기 시간을, WORKER_URL 이 있으면 Worker 집계로
-    쓰기 실패 수를 잽니다. 시뮬레이션에서는 실제 전환이 없어 잴 대상이 없으므로 둘 다 켜지 않습니다.
+    쓰기 실패 수를 잽니다. 모의(mock) 에이전트 주소는 프로버·Worker 를 켜기 전에 설정 오류로 거부합니다.
     측정은 전환 직후에 끝납니다. 비교는 오래 걸릴 수 있고 전환 시간과 상관이 없습니다.
     """
-    is_simulated = _agent_is_simulated()
-    prober = None if is_simulated else prober_from_env()
-    worker = None if is_simulated else _cutover_worker()
+    _require_real_agent()
+    prober = prober_from_env()
+    worker = _cutover_worker()
     if prober is None and worker is None:
         job = _request_cutover(run, ctx, poll_interval_s, timeout_s)
     else:

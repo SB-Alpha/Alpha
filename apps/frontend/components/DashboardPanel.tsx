@@ -7,7 +7,7 @@ import {
   formatBytes,
   formatDuration,
   isFinished,
-  isSimulated,
+  isLegacySimulatedRun,
   numberMetric,
   overallProgress,
   securityAuditSummary,
@@ -129,9 +129,9 @@ export function DashboardPanel({ run }: Props) {
         이전 관제 대시보드
       </h2>
 
-      {isSimulated(run) && (
+      {isLegacySimulatedRun(run) && (
         <p role="status" className="rounded-lg border-2 border-amber-500 bg-amber-50 p-3 text-sm font-semibold text-amber-950 lg:col-span-2">
-          시뮬레이션 모드입니다. 아래 CDC·전환 지표는 실제 복제나 트래픽 전환 결과가 아닙니다.
+          시뮬레이션을 없애기 전에 저장된 예전 run 입니다. 아래 CDC·전환 지표는 실제 측정값이 아닙니다.
         </p>
       )}
 
