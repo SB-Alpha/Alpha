@@ -60,12 +60,24 @@ variable "memory" {
   description = "메모리 (MiB). cpu 마다 가능한 범위가 정해져 있다 (예: 0.5 vCPU 는 1024~4096, 1 vCPU 는 2048~8192)"
   type        = number
   default     = 1024
+
+  # Fargate 가 받는 (vCPU, 메모리) 조합. 어긋나면 RegisterTaskDefinition 이 거부하므로 plan 에서 미리 막는다.
+  validation {
+    condition = contains(lookup({
+      "0.25" = [512, 1024, 2048]
+      "0.5"  = [1024, 2048, 3072, 4096]
+      "1"    = [2048, 3072, 4096, 5120, 6144, 7168, 8192]
+      "2"    = [4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384]
+      "4"    = [8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384, 17408, 18432, 19456, 20480, 21504, 22528, 23552, 24576, 25600, 26624, 27648, 28672, 29696, 30720]
+    }, tostring(var.cpu), []), var.memory)
+    error_message = "cpu 와 memory 조합이 Fargate 에서 허용되지 않습니다. 예: 0.5 vCPU 는 1024~4096, 1 vCPU 는 2048~8192 (MiB, 1024 단위)."
+  }
 }
 
 variable "health_check_path" {
-  description = "상태 확인 경로"
+  description = "ALB 대상 그룹의 상태 확인 경로. 프로세스만 보는 경로(live)를 쓴다. DB 까지 보는 /health/ready 를 쓰면 DB 가 잠깐 막힐 때(예: RDS 재부팅) 정상 태스크까지 계속 교체된다. 전환 판단용 ready 확인은 백엔드가 따로 한다"
   type        = string
-  default     = "/health/ready"
+  default     = "/health/live"
 }
 
 variable "env_vars" {
@@ -78,6 +90,12 @@ variable "secret_refs" {
   description = "환경 변수 이름 => Secrets Manager 비밀 이름"
   type        = map(string)
   default     = {}
+}
+
+variable "cdc_allowed_cidrs" {
+  description = "DB(5432)에 접속을 허용할 추가 대역. CDC 가 VPN 으로 들어올 때 원격 대역(예: OCI 10.50.0.0/16)을 넣는다. 기본은 비어 있어 앱 보안 그룹에서 오는 접속만 허용한다"
+  type        = list(string)
+  default     = []
 }
 
 variable "db_version" {

@@ -103,7 +103,7 @@ resource "aws_security_group" "app" {
 
 resource "aws_security_group" "db" {
   name        = "${var.name}-db"
-  description = "DB: 앱과 VPC 안에서 오는 5432 만 받는다"
+  description = "DB: 앱 보안 그룹(과 지정한 추가 대역)에서 오는 5432 만 받는다"
   vpc_id      = aws_vpc.this.id
 
   ingress {
@@ -113,11 +113,15 @@ resource "aws_security_group" "db" {
     security_groups = [aws_security_group.app.id]
   }
 
-  # CDC 연결(VPN 으로 들어오는 트래픽 포함)은 VPC 안으로 들어온 뒤의 주소로 온다
-  ingress {
-    from_port   = 5432
-    to_port     = 5432
-    protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
+  # CDC 가 VPN 으로 들어오면 원격 대역(예: OCI)이 출발지 주소로 남는다. VPC 전체를 열면 ALB 와 공개 서브넷까지
+  # 5432 에 닿으므로, 필요한 대역만 변수(cdc_allowed_cidrs)로 받는다. 기본은 비어 있다.
+  dynamic "ingress" {
+    for_each = length(var.db_extra_cidrs) > 0 ? [1] : []
+    content {
+      from_port   = 5432
+      to_port     = 5432
+      protocol    = "tcp"
+      cidr_blocks = var.db_extra_cidrs
+    }
   }
 }
