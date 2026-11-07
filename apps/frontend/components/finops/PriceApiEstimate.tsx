@@ -4,8 +4,9 @@ import { useMemo, useState } from "react";
 import { NOT_PROVIDED, type FinOpsInputParams, type TargetProvider } from "@/lib/finops";
 import type { ArbitrageResult, CloudCost, Crossover, EstimateState, FinopsEstimate, Saving } from "@/lib/finopsApi";
 
-// 백엔드 /finops/estimate 결과를 그대로 그리며, 슬라이더 조작 시 백엔드 단가 앵커를 사용해
-// 그래프와 요약 수치가 지연 없이 반응합니다. 가상의 시뮬레이션은 일절 없으며 실제 run 지표만 반영합니다.
+// 백엔드 /finops/estimate 결과를 그립니다. 슬라이더를 움직이면 백엔드가 준 가격 API 단가(앵커)에
+// 슬라이더 값을 곱해 화면에서 다시 계산합니다. 이 값은 "추정 (화면 계산)" 으로 표시하고,
+// 모르는 금액은 0 으로 더하지 않고 "미제공" 으로 둡니다.
 
 const CLOUD_LABEL: Record<string, string> = { aws: "AWS", gcp: "GCP", azure: "Azure" };
 const CLOUD_REGION_LABEL: Record<string, string> = {
@@ -21,8 +22,13 @@ const LINE_COLORS: Record<string, string> = {
 };
 
 const SECONDS_PER_MONTH = 730 * 3600;
-const CLOUD_RUN_REQ_PER_MILLION_USD = 0.4;
-const AVG_RESPONSE_KB = 4.0;
+// 아래 값은 화면 추정에만 씁니다. 백엔드 차익거래(arbitrage.py · /finops/estimate)의 기본값과 같은 값이고 실측이 아닙니다
+const CLOUD_RUN_REQ_PER_MILLION_USD = 0.4; // arbitrage.CLOUD_RUN_REQ_PER_MILLION_DEFAULT
+const AVG_RESPONSE_KB = 4.0; // ArbitrageRequest.avg_response_kb 기본값
+const READ_RATIO = 0.8; // /finops/estimate 가 넣는 read_ratio
+// 읽기 분산을 막는 복제 지연 기준. 백엔드 finops MAX_SAFE_LAG_BYTES · 전환 승인 ② 와 같은 1 MiB
+const MAX_SAFE_LAG_BYTES = 1024 * 1024;
+const ESTIMATE_LABEL = "추정 (화면 계산)";
 
 /** 실제 RunStatus 에서 읽은 실시간 지표 (가상 생성값 없음) */
 export interface RealRunTelemetry {
@@ -131,7 +137,9 @@ export function deriveLiveView(
     if (s.cloud !== "gcp" || !s.complete || currentTotal === null || liveGcpAppUsd === null) return s;
     const gcpCand = liveCandidates.find((c) => c.cloud === "gcp");
     if (!gcpCand || gcpCand.lines.some((l) => l.monthly_usd === null)) return s;
-    const candTotal = Number(gcpCand.lines.reduce((acc, l) => acc + (l.monthly_usd ?? 0), 0).toFixed(2));
+    // 위에서 금액이 빠진 항목이 있으면 이미 돌아갔으므로 여기서는 모든 항목이 금액을 가집니다
+    const knownAmounts = gcpCand.lines.map((l) => l.monthly_usd).filter((v): v is number => v !== null);
+    const candTotal = Number(knownAmounts.reduce((acc, v) => acc + v, 0).toFixed(2));
     const diff = Number((currentTotal - candTotal).toFixed(2));
     const pct = currentTotal > 0 ? Number(((diff / currentTotal) * 100).toFixed(1)) : null;
     return {
@@ -145,10 +153,10 @@ export function deriveLiveView(
   let liveArb: ArbitrageResult | null | undefined = baseArb;
   if (baseArb && crInstanceFull !== null) {
     const lagFenced =
-      typeof replicationLagBytes === "number" && Number.isFinite(replicationLagBytes) && replicationLagBytes > 1024;
+      typeof replicationLagBytes === "number" && Number.isFinite(replicationLagBytes) && replicationLagBytes > MAX_SAFE_LAG_BYTES;
     const baselineUsd = baseArb.baseline_monthly_cost ?? fargateApp;
     const egressPerGb = baseArb.egress_usd_per_gb;
-    const readRatio = 0.8;
+    const readRatio = READ_RATIO;
     const readRps = rps * readRatio;
     const activeSeconds = SECONDS_PER_MONTH * activeShare;
     const totalReadReqs = readRps * activeSeconds;
@@ -255,7 +263,8 @@ function CompactCrossoverChart({
 }) {
   const [axisMode, setAxisMode] = useState<"rps" | "idle">("rps");
 
-  if (!x || x.fargate_app_monthly_usd === null || x.cloud_run_instance_monthly_usd === null) {
+  // 입력(슬라이더 값)이 없으면 RPS·유휴율·처리 시간을 짐작하지 않고 그래프를 그리지 않습니다
+  if (!params || !x || x.fargate_app_monthly_usd === null || x.cloud_run_instance_monthly_usd === null) {
     return (
       <div className="flex h-full items-center justify-center rounded-lg border border-ink/15 bg-paper/40 p-3 text-xs text-ink/50">
         교차점 그래프: {NOT_PROVIDED}
@@ -266,9 +275,9 @@ function CompactCrossoverChart({
   const fargate = x.fargate_app_monthly_usd;
   const crFull = x.cloud_run_instance_monthly_usd;
   const beIdle = x.break_even_idle_percent;
-  const rpsNow = params?.rps ?? 10;
-  const idleNow = params?.idlePercent ?? 40;
-  const latencySec = (params?.avgRequestMs ?? 100) / 1000;
+  const rpsNow = params.rps;
+  const idleNow = params.idlePercent;
+  const latencySec = params.avgRequestMs / 1000;
   const activeShare = 1 - idleNow / 100;
 
   const W = 440;
@@ -295,9 +304,9 @@ function CompactCrossoverChart({
   const arbCostAtRps = (r: number) => {
     if (!arb || arbBase <= 0) return null;
     if (isFenced) return arbBase;
-    const writeShareCost = arbBase * 0.2;
+    const writeShareCost = arbBase * (1 - READ_RATIO);
     if (arbCrossRps && arbCrossRps > 0) {
-      const readCost = (r / arbCrossRps) * (arbBase * 0.8);
+      const readCost = (r / arbCrossRps) * (arbBase * READ_RATIO);
       return Math.min(arbBase, writeShareCost + readCost);
     }
     return null;
@@ -343,6 +352,7 @@ function CompactCrossoverChart({
           <span className="text-[10px] text-ink/55">
             (교차: {x.break_even_rps !== null ? `≤${x.break_even_rps} RPS` : `유휴 >${beIdle ?? "—"}%`})
           </span>
+          <span className="rounded border border-amber-300 bg-amber-50 px-1 text-[9px] text-amber-800">{ESTIMATE_LABEL}</span>
         </div>
         <div className="inline-flex rounded border border-ink/20 bg-white p-0.5 font-mono text-[10px]">
           <button
@@ -427,7 +437,7 @@ function CompactCrossoverChart({
               x1={xOfIdle(0)}
               y1={yOf(crFull)}
               x2={xOfIdle(80)}
-              y2={yOf(crFull * 0.2)}
+              y2={yOf(crFull * (1 - 80 / 100))}
               stroke="#3730a3"
               strokeWidth="2"
             />
@@ -522,7 +532,9 @@ function CollapsibleDetailedSection({
                   {total !== null && total > 0 && (
                     <div className="flex h-full" style={{ width: `${widthPct}%` }}>
                       {cost.lines.map((line) => {
-                        const pct = total > 0 ? ((line.monthly_usd ?? 0) / total) * 100 : 0;
+                        // 금액을 모르는 항목은 막대에 0 으로 넣지 않고 빼 둡니다 (아래 목록에 "미제공" 으로 나옴)
+                        if (line.monthly_usd === null) return null;
+                        const pct = total > 0 ? (line.monthly_usd / total) * 100 : 0;
                         return pct > 0 ? (
                           <div
                             key={line.item}
@@ -640,7 +652,10 @@ export function PriceApiEstimate({
                     : savingText(selectedSaving)}
                 </p>
               </div>
-              <span className="font-mono text-xl font-bold tabular-nums text-ink">{usd(selectedTotal)}/월</span>
+              <div className="text-right">
+                <span className="font-mono text-xl font-bold tabular-nums text-ink">{usd(selectedTotal)}/월</span>
+                {params && <p className="text-[9px] text-amber-800">{ESTIMATE_LABEL} · 공시가 기준, 청구액 아님</p>}
+              </div>
             </div>
 
             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px]">
@@ -657,7 +672,10 @@ export function PriceApiEstimate({
           {arbitrage && (
             <div className="mt-3 rounded border border-ink/15 bg-paper/60 px-2.5 py-2 font-mono text-[11px]">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="font-semibold text-ink">동적 차익거래 ({arbitrageStatus(arbitrage)})</span>
+                <span className="font-semibold text-ink">
+                  동적 차익거래 ({arbitrageStatus(arbitrage)})
+                  {params && <span className="ml-1 text-[9px] font-normal text-amber-800">{ESTIMATE_LABEL}</span>}
+                </span>
                 <span className="font-bold text-indigo-900">
                   {arbitrage.monthly_savings !== null ? `월 ${usd(arbitrage.monthly_savings)} 절감` : NOT_PROVIDED}
                 </span>

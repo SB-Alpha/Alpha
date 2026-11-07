@@ -167,6 +167,8 @@ def calculate_arbitrage(
             f"복제 지연({req.replication_lag_bytes:,} B)이 안전 임계치({req.max_safe_lag_bytes:,} B)를 "
             f"초과하여 데이터 일관성 보호를 위해 읽기 우회를 차단하고 원본 마스터로 100% 펜싱했습니다."
         )
+    elif req.replication_lag_bytes is None:
+        reasons.append("미제공: 복제 지연을 받지 못해 지연 안전 판단(펜싱)을 하지 않았습니다.")
 
     # 3. 읽기 트래픽 및 Scale-to-Zero 비용 연산 (Poisson 도착 및 동시성 모델링)
     read_rps = req.rps * req.read_ratio

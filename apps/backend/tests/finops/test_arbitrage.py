@@ -284,3 +284,55 @@ def test_egress_skus_do_not_disturb_cloud_run_compute_prices():
     one = GcpPrices(GCP_WITH_EGRESS.__getitem__).app_instance_month(
         estimate.CostRequest(source_region="ap-northeast-2", app_vcpu=1, app_memory_mib=2048), "asia-northeast3")
     assert one == pytest.approx(730 * 3600 * (0.0000216 + 2 * 0.0000024))
+
+
+# -- 복제 지연: 모르면 None 그대로, 기준은 전환 승인 ② 와 같은 값 ------------------------------------------
+
+def test_lag_threshold_matches_cutover_readiness():
+    """차익거래 펜싱 기준과 전환 승인 ② 의 복제 지연 기준이 같아야 화면끼리 판단이 어긋나지 않습니다."""
+    from app.features.finops.schemas import MAX_SAFE_LAG_BYTES, Traffic
+    from app.features.workflows.readiness import MAX_REPLICATION_LAG_BYTES
+
+    assert MAX_SAFE_LAG_BYTES == MAX_REPLICATION_LAG_BYTES
+    assert ArbitrageRequest().max_safe_lag_bytes == MAX_SAFE_LAG_BYTES
+    assert Traffic(idle_percent=0).max_safe_lag_bytes == MAX_SAFE_LAG_BYTES
+
+
+def test_unknown_lag_is_not_treated_as_zero():
+    """지연을 모르면 None 으로 두고, 지연 안전 판단을 하지 않았다고 적습니다. 0(잰 값)과 구분합니다."""
+    assert ArbitrageRequest().replication_lag_bytes is None
+    unknown = _calc(_prices(), **{**LOW_TRAFFIC, "replication_lag_bytes": None})
+    assert unknown.lag_fenced is False
+    assert any(r.startswith("미제공: 복제 지연") for r in unknown.reasons)
+    measured_zero = _calc(_prices(), **LOW_TRAFFIC)
+    assert not any(r.startswith("미제공: 복제 지연") for r in measured_zero.reasons)
+
+
+def _estimate_with_lag(monkeypatch, lag: int | None) -> dict:
+    real_build = estimate.build_input
+    monkeypatch.setattr(estimate, "build_input", lambda req: real_build(
+        req, aws=AwsPrices(FakePricingClient()), gcp=GcpPrices(GCP_SKUS.__getitem__),
+        azure=estimate.AzurePrices(fake_azure_query), today=TODAY))
+    traffic = {"idle_percent": 70.0, "rps": 2.0, "avg_latency_ms": 100.0}
+    if lag is not None:
+        traffic["replication_lag_bytes"] = lag
+    payload = {"source_region": "ap-northeast-2", "app_vcpu": 1.0, "app_memory_mib": 2048, "app_instances": 1,
+               "candidates": [{"cloud": "gcp", "region": "asia-northeast3"}], "traffic": traffic}
+    resp = client.post("/finops/estimate", json=payload)
+    assert resp.status_code == 200
+    return resp.json()["arbitrage"]
+
+
+def test_estimate_passes_unknown_lag_as_none(monkeypatch, fake_prices):
+    """/estimate 는 traffic 에 지연이 없으면 0 으로 바꾸지 않고 None 으로 넘깁니다."""
+    arb = _estimate_with_lag(monkeypatch, None)
+    assert arb["lag_fenced"] is False
+    assert any(r.startswith("미제공: 복제 지연") for r in arb["reasons"])
+
+
+@pytest.mark.parametrize(("lag", "fenced"), [(6_760, False), (1024 * 1024 + 1, True)])
+def test_estimate_fences_on_measured_lag(monkeypatch, fake_prices, lag, fenced):
+    """실측 지연(예: 전환 순간 6,760 B)은 1 MiB 기준 아래라 펜싱하지 않고, 기준을 넘으면 펜싱합니다."""
+    arb = _estimate_with_lag(monkeypatch, lag)
+    assert arb["lag_fenced"] is fenced
+    assert not any(r.startswith("미제공: 복제 지연") for r in arb["reasons"])
