@@ -36,20 +36,18 @@ SELECT n.nspname, c.relname, pg_get_userbyid(c.relowner), c.relreplident, c.relt
    AND n.nspname NOT LIKE 'pg_toast%'
  ORDER BY n.nspname, c.relname
 """
-# CSP별로 복제를 허용하는 역할. 멤버십은 직접 멤버만 본다(상속된 간접 멤버십은 미확인).
-REPLICATION_ROLES = {
-    "aws": ("rds_replication",),
-    "gcp": ("cloudsqlsuperuser",),
-    "azure": ("azure_pg_admin",),
-}
+# 복제 권한을 주는 역할(직접 멤버만 확인). GCP/Azure 는 관리자 역할(cloudsqlsuperuser, azure_pg_admin)이
+# REPLICATION 속성을 주지 않음이 Azure 실환경에서 확인돼 속성(rolreplication/rolsuper)만 본다.
+REPLICATION_ROLES = {"aws": ("rds_replication",), "gcp": (), "azure": ()}
 
 
 def sql_can_replicate(cloud: str = "aws") -> str:
     roles = ", ".join(f"'{r}'" for r in REPLICATION_ROLES[cloud])  # 고정 상수라 주입 위험 없음
-    return f"""
-SELECT r.rolreplication OR r.rolsuper OR EXISTS (
+    member = f""" OR EXISTS (
          SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
-          WHERE m.member = r.oid AND g.rolname IN ({roles}))
+          WHERE m.member = r.oid AND g.rolname IN ({roles}))""" if roles else ""
+    return f"""
+SELECT r.rolreplication OR r.rolsuper{member}
   FROM pg_roles r WHERE r.rolname = current_user
 """
 

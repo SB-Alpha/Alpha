@@ -55,14 +55,13 @@ def test_unknown_csp_gap_not_raise():
     assert out.gaps == ["지원하지 않는 원본 클라우드: oracle"]
 
 
-@pytest.mark.parametrize("cloud,role", [
-    ("aws", "rds_replication"), ("gcp", "cloudsqlsuperuser"), ("azure", "azure_pg_admin")])
-def test_replication_role_per_csp(cloud, role):
-    assert f"'{role}'" in pg_tables.sql_can_replicate(cloud)
-    assert "rds_superuser" not in pg_tables.sql_can_replicate(cloud)
-    other = {"gcp": "azure_pg_admin", "azure": "cloudsqlsuperuser"}.get(cloud)
-    if other:
-        assert other not in pg_tables.sql_can_replicate(cloud)
+def test_replication_role_per_csp():
+    assert "'rds_replication'" in pg_tables.sql_can_replicate("aws")
+    for cloud in ("aws", "gcp", "azure"):
+        assert "rds_superuser" not in pg_tables.sql_can_replicate(cloud)
+    for cloud in ("gcp", "azure"):  # 관리자 역할은 REPLICATION 을 주지 않으므로 속성만 본다
+        sql = pg_tables.sql_can_replicate(cloud)
+        assert "pg_auth_members" not in sql and "rolreplication" in sql
 
 
 def test_logical_flag_per_csp():

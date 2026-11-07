@@ -76,6 +76,63 @@ def _vnet(subnet_id: str | None) -> str | None:
     return subnet_id.split("/subnets/")[0].lower() if subnet_id else None
 
 
+def _vnet_id(subnet_id: str | None) -> str | None:
+    return (subnet_id.split("/subnets/")[0] or None) if subnet_id else None
+
+
+def _val(x: Any) -> str:
+    return str(getattr(x, "value", x)).lower()
+
+
+def _port_ok(spec: str | None, port: int) -> bool:
+    if not spec or spec == "*":
+        return bool(spec)
+    lo, _, hi = spec.partition("-")
+    try:
+        return int(lo) <= port <= int(hi or lo)
+    except ValueError:
+        return False
+
+
+def _nsg_cidrs(network, nsg_id: str, port: int = 5432) -> list[str]:
+    """NSG 인바운드 허용 규칙 중 port 에 닿는 출발지 CIDR. 서비스 태그(VirtualNetwork 등)는 건너뛴다. deny 우선순위는 평가하지 않음."""
+    out: list[str] = []
+    nsg = network.network_security_groups.get(*_rg_name(nsg_id))
+    for r in sorted(nsg.security_rules or [], key=lambda r: r.priority):
+        if _val(r.direction) != "inbound" or _val(r.access) != "allow" or _val(r.protocol) not in ("tcp", "*"):
+            continue
+        if not any(_port_ok(x, port) for x in [r.destination_port_range, *(r.destination_port_ranges or [])]):
+            continue
+        for src in [r.source_address_prefix, *(r.source_address_prefixes or [])]:
+            if src in ("*", "Internet", "Any"):
+                out.append("0.0.0.0/0")
+            elif src:
+                try:
+                    out.append(str(ipaddress.ip_network(src, strict=False)))
+                except ValueError:
+                    pass
+    return list(dict.fromkeys(out))
+
+
+def find_private_endpoint(network, sub: str, rg: str, name: str) -> dict | None:
+    """서버를 가리키는 Private Endpoint 의 네트워크 사실(서버 응답에는 없어 네트워크 쪽에서 찾는다). 없으면 None."""
+    srv = f"/subscriptions/{sub}/resourcegroups/{rg}/providers/microsoft.dbforpostgresql/flexibleservers/{name}".lower()
+    for pe in network.private_endpoints.list_by_subscription():
+        conns = [*(pe.private_link_service_connections or []), *(pe.manual_private_link_service_connections or [])]
+        if not any((c.private_link_service_id or "").lower() == srv for c in conns):
+            continue
+        sid = pe.subnet.id
+        p = sid.split("/")
+        sn = network.subnets.get(p[4], p[8], p[10])
+        vn = network.virtual_networks.get(p[4], p[8])
+        nsg = sn.network_security_group.id if sn.network_security_group else None
+        prefixes = (vn.address_space.address_prefixes if vn.address_space else None) or []
+        return {"subnet_id": sid, "cidr": prefixes[0] if prefixes else None, "nsg_id": nsg,
+                "route_table_ids": [sn.route_table.id] if sn.route_table else [],
+                "allowed": _nsg_cidrs(network, nsg) if nsg else []}
+    return None
+
+
 def find_bastion(session: Any, sub: str, subnet_id: str | None, compute_factory, network_factory):
     """(접속 주소, VM 리소스 ID, VNet ID, 실패 사유). 태그 Purpose=alpha-assessment-bastion + running VM, 서버와 같은 VNet 우선, 공용 IP 우선. 서버 VNet 과 같은 VM 만, VNet 미상이면 BASTION_VM_ENV 로 고정된 VM 만."""
     tag_k, tag_v = ssh_tunnel.BASTION_TAG
@@ -183,6 +240,13 @@ def collect(inp: AssessmentInput, session: Any, client_factory: Callable[[Any, s
     net = getattr(s, "network", None)
     public = None if net is None or net.public_network_access is None else net.public_network_access == "Enabled"
     subnet = getattr(net, "delegated_subnet_resource_id", None)
+    pe = None
+    if not subnet:  # VNet 통합이 아니면 Private Endpoint 쪽에서 네트워크를 찾는다
+        try:
+            pe = find_private_endpoint(network_factory(session, sub), sub, rg, name)
+        except Exception as e:
+            src.gaps.append(f"Private Endpoint 조회 실패 ({_err(e)})")
+        subnet = pe["subnet_id"] if pe else None
     sku, storage = getattr(s, "sku", None), getattr(s, "storage", None)
     host = getattr(s, "fully_qualified_domain_name", None)
     ha_mode = getattr(getattr(s, "high_availability", None), "mode", None)
@@ -197,7 +261,7 @@ def collect(inp: AssessmentInput, session: Any, client_factory: Callable[[Any, s
     src.db = DbInfo(
         engine="postgres", publicly_accessible=public, engine_version=getattr(s, "version", None),
         instance_class=getattr(sku, "name", None), allocated_storage_gb=getattr(storage, "storage_size_gb", None),
-        logical_replication=lr,
+        logical_replication=lr, wal_level=flag,
         ha_enabled=None if ha_mode is None else ha_mode != "Disabled",
         backup_retention_days=getattr(getattr(s, "backup", None), "backup_retention_days", None),
     )
@@ -205,7 +269,10 @@ def collect(inp: AssessmentInput, session: Any, client_factory: Callable[[Any, s
         instance_id=f"{rg}/{name}", host=host, port=5432, version=src.db.engine_version,
         publicly_accessible=public, logical_replication=lr,
     )
-    src.network = SourceNetwork(vpc_id=subnet)  # 위임 서브넷 ID (프라이빗 접근일 때)
+    src.network = SourceNetwork(vpc_id=_vnet_id(subnet))
+    if pe:
+        src.network.cidr, src.network.route_table_ids = pe["cidr"], pe["route_table_ids"]
+        src.network.db_security_group_id, src.network.allowed_cidrs = pe["nsg_id"], pe["allowed"]
 
     rules = None
     if public:
@@ -213,12 +280,13 @@ def collect(inp: AssessmentInput, session: Any, client_factory: Callable[[Any, s
             rules = list(client.firewall_rules.list_by_server(rg, name))
         except Exception as e:
             src.gaps.append(f"방화벽 규칙 조회 실패 ({_err(e)})")
-    src.network.allowed_cidrs = _cidrs(rules)
+    src.network.allowed_cidrs = _cidrs(rules) + src.network.allowed_cidrs
     direct_ok = bool(public and rules and host)
+    note = None  # 중계 VM 경유가 실패했을 때만 gaps 에 남긴다(성공하면 정상 경로라 잡음)
     if not direct_ok and not public:
-        src.gaps.append("서버가 공개 접근이 아니거나 확인 불가 — 중계 VM 경유 시도")
+        note = "서버가 공개 접근이 아니거나 확인 불가 — 중계 VM 경유 시도"
     elif not direct_ok:
-        src.gaps.append("공개 접근이지만 방화벽 규칙/FQDN 이 없거나 확인 불가 — 중계 VM 경유 시도")
+        note = "공개 접근이지만 방화벽 규칙/FQDN 이 없거나 확인 불가 — 중계 VM 경유 시도"
 
     def direct_tunnel():
         # ponytail: 방화벽이 이 실행 주소를 허용하는지는 검사하지 않음(접속 실패는 DB 접속 gap 으로 드러남)
@@ -256,4 +324,6 @@ def collect(inp: AssessmentInput, session: Any, client_factory: Callable[[Any, s
             src.tunnel = None
         else:
             src.creds = creds
+    if note and src.tunnel is None:
+        src.gaps.append(note)
     return src

@@ -24,7 +24,7 @@ def server(public="Enabled", subnet=None):
 
 def factory(srv=None, flag="logical", rules=(1,), get_err=None, cfg_err=None):
     def cfg(rg, n, k):
-        assert k == "azure.replication_support"
+        assert k == "wal_level"
         if cfg_err:
             raise cfg_err
         return N(value=flag)
@@ -59,7 +59,8 @@ def net(nics=None, pips=None):
         return N(ip_configurations=[N(private_ip_address=ip, subnet=N(id=f"{SUB}/virtualNetworks/{v}/subnets/x"),
                                       public_ip_address=N(id=f"{SUB}/publicIPAddresses/{pip}") if pip else None)])
 
-    c = N(network_interfaces=N(get=nic), public_ip_addresses=N(get=lambda rg, n: N(ip_address=pips[n])))
+    c = N(network_interfaces=N(get=nic), public_ip_addresses=N(get=lambda rg, n: N(ip_address=pips[n])),
+          private_endpoints=N(list_by_subscription=lambda: []))
     return lambda session, sub: c
 
 
@@ -142,8 +143,8 @@ def test_bad_id(rid):
 
 
 def test_private_no_tunnel():
-    r = run(factory(srv=server(public="Disabled", subnet="/subnets/x")))
-    assert r.tunnel is None and r.network.vpc_id == "/subnets/x" and r.db.publicly_accessible is False
+    r = run(factory(srv=PRIV()))
+    assert r.tunnel is None and r.network.vpc_id == f"{SUB}/virtualNetworks/v1" and r.db.publicly_accessible is False
 
 
 def test_no_firewall_rules_no_tunnel():
@@ -304,7 +305,7 @@ def test_select_bastion_tunnel(procs):
             nf=bnet({"n1": ("v1", "10.0.0.4", None)}, [bhost("v1")]))
     with r.tunnel():
         pass
-    assert procs[0][:4] == ["az", "network", "bastion", "tunnel"] and r.gaps
+    assert procs[0][:4] == ["az", "network", "bastion", "tunnel"] and not r.gaps
 
 
 def test_select_no_az_gap_and_ssh_fallback(monkeypatch):
@@ -322,3 +323,54 @@ def test_select_az_but_no_bastion_resource_falls_back(monkeypatch):
     r = run(factory(srv=PRIV()), cf=compute([("b1", TAG, "n1")]), nf=bnet({"n1": ("v1", "10.0.0.4", None)}, []))
     r.tunnel()
     assert calls[0][0] == "10.0.0.4" and any("Bastion" in g for g in r.gaps)
+
+
+def pe_net(sub="sub", rg="rg", name="srv", nsg_rules=None):
+    """서버를 가리키는 Private Endpoint 하나가 있는 가짜 네트워크."""
+    srv = f"/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.DBforPostgreSQL/flexibleServers/{name}"
+    pe = N(private_link_service_connections=[N(private_link_service_id=srv.upper())], manual_private_link_service_connections=None,
+           subnet=N(id=f"{SUB}/virtualNetworks/v1/subnets/pe"))
+    other = N(private_link_service_connections=[N(private_link_service_id="/x/other")], manual_private_link_service_connections=None,
+              subnet=N(id=f"{SUB}/virtualNetworks/v9/subnets/pe"))
+    rules = nsg_rules if nsg_rules is not None else [
+        N(priority=100, direction="Inbound", access="Allow", protocol="Tcp", source_address_prefix="10.20.0.0/24",
+          source_address_prefixes=None, destination_port_range="5432", destination_port_ranges=None),
+        N(priority=110, direction="Inbound", access="Allow", protocol="Tcp", source_address_prefix=None,
+          source_address_prefixes=["10.50.0.0/16", "VirtualNetwork"], destination_port_range=None, destination_port_ranges=["5000-5500"]),
+        N(priority=120, direction="Inbound", access="Allow", protocol="Tcp", source_address_prefix="10.99.0.0/24",
+          source_address_prefixes=None, destination_port_range="22", destination_port_ranges=None),
+        N(priority=4000, direction="Inbound", access="Deny", protocol="*", source_address_prefix="*",
+          source_address_prefixes=None, destination_port_range="*", destination_port_ranges=None)]
+    base = net()(None, None)
+    base.private_endpoints = N(list_by_subscription=lambda: [other, pe])
+    base.subnets = N(get=lambda rg, v, sn: N(network_security_group=N(id=f"{SUB}/networkSecurityGroups/nsg-pe"), route_table=None))
+    base.virtual_networks = N(get=lambda rg, v: N(address_space=N(address_prefixes=["10.20.0.0/16"])))
+    base.network_security_groups = N(get=lambda rg, n: N(security_rules=rules))
+    return lambda session, sub: base
+
+
+def test_private_endpoint_fills_network():
+    r = run(factory(srv=server(public="Disabled")), nf=pe_net())
+    assert r.network.vpc_id == f"{SUB}/virtualNetworks/v1" and r.network.cidr == "10.20.0.0/16"
+    assert r.network.db_security_group_id.endswith("/networkSecurityGroups/nsg-pe")
+    assert r.network.allowed_cidrs == ["10.20.0.0/24", "10.50.0.0/16"]  # 5432 에 닿는 CIDR 만, 서비스 태그·다른 포트·deny 제외
+
+
+def test_private_endpoint_none_leaves_network_empty():
+    r = run(factory(srv=server(public="Disabled")))
+    assert r.network.vpc_id is None and r.network.allowed_cidrs == [] and not any("Private Endpoint" in g for g in r.gaps)
+
+
+def test_private_endpoint_lookup_error_is_gap():
+    def boom(session, sub):
+        raise Err(403, "AuthorizationFailed")
+
+    r = run(factory(srv=server(public="Disabled")), nf=boom)
+    assert any("Private Endpoint 조회 실패" in g for g in r.gaps) and r.network.vpc_id is None
+
+
+def test_private_endpoint_vnet_selects_bastion_without_pin():
+    nf = pe_net()(None, None)
+    nf.network_interfaces = net({"n1": ("v1", "10.0.0.4", None)})(None, None).network_interfaces
+    r = run(factory(srv=server(public="Disabled")), cf=compute([("b1", TAG, "n1")]), nf=lambda s, sub: nf)
+    assert r.tunnel is not None and not any("VNet 을 알 수 없어" in g for g in r.gaps)

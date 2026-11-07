@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from .schemas import DbInfo, SourceDb, SourceNetwork
 
 # 논리 복제 서버 플래그(파라미터) 이름. 켜짐 판정 값은 LOGICAL_ON.
-LOGICAL_FLAG = {"aws": "rds.logical_replication", "gcp": "cloudsql.logical_decoding", "azure": "azure.replication_support"}
+LOGICAL_FLAG = {"aws": "rds.logical_replication", "gcp": "cloudsql.logical_decoding", "azure": "wal_level"}
 LOGICAL_ON = {"aws": "1", "gcp": "on", "azure": "logical"}
 
 
