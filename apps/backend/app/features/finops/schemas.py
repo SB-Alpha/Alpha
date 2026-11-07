@@ -13,9 +13,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+# 클라우드 이름과 항목 이름은 코드가 쓰는 결론 문장에 그대로 들어갑니다. 자유 문장이 들어오면
+# "가장 많이 아끼는 후보는 gcp (월 90% 확정 절감) 입니다" 처럼 결론을 꾸밀 수 있어 모양을 막습니다.
+CLOUD_SLUG = r"^[a-z0-9]+(-[a-z0-9]+)*$"  # 예: aws, gcp, azure, on-prem
+ITEM_NAME = r"^[^\d%$]{1,40}$"  # 숫자·%·$ 없이 40자까지. 금액과 비율은 코드만 씁니다
+
 
 class CostLine(BaseModel):
-    item: str  # 예: "앱 컴퓨팅", "DB", "스토리지". 원본과 후보가 같은 이름을 써야 항목끼리 맞춰집니다
+    item: str = Field(pattern=ITEM_NAME)  # 예: "앱 컴퓨팅", "DB", "스토리지". 원본과 후보가 같은 이름을 써야 항목끼리 맞춰집니다
     # 모르면 None. NaN·무한대·음수는 계산을 망가뜨리므로 입력에서 거절합니다
     monthly_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     source: str  # 숫자 출처. 예: "aws-pricing-api", "infracost", "cloudwatch", "manual"
@@ -24,7 +29,7 @@ class CostLine(BaseModel):
 class CloudCost(BaseModel):
     """한 클라우드(현재 원본 또는 이전 후보)의 월 비용."""
 
-    cloud: str  # 예: "aws", "gcp", "azure", "onprem"
+    cloud: str = Field(pattern=CLOUD_SLUG, max_length=20)  # 예: "aws", "gcp", "azure", "on-prem"
     region: str | None = None
     lines: list[CostLine] = Field(default_factory=list)
 
@@ -41,7 +46,8 @@ class Rightsizing(BaseModel):
 class FinopsInput(BaseModel):
     run_id: str | None = None
     currency: Literal["USD"] = "USD"
-    period_days: int | None = None  # 사용량을 본 기간. 모르면 None
+    # 사용량을 본 기간. 모르면 None. True·"30" 같은 값이 정수로 바뀌어 통과하지 않게 strict
+    period_days: int | None = Field(default=None, ge=1, strict=True)
     current: CloudCost  # 지금 원본
     candidates: list[CloudCost] = Field(default_factory=list)  # 이전 후보 (예: gcp, azure)
     rightsizing: list[Rightsizing] = Field(default_factory=list)
@@ -71,7 +77,7 @@ class FinopsReport(BaseModel):
 
 
 class Candidate(BaseModel):
-    cloud: str  # "gcp" | "azure"
+    cloud: str = Field(pattern=CLOUD_SLUG, max_length=20)  # "gcp" | "azure"
     region: str  # 예: "asia-northeast3", "koreacentral"
 
 

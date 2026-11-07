@@ -134,3 +134,36 @@ def test_prompt_carries_the_rule_sentences_for_context():
     facts = json.loads(ai._facts_for_prompt(_inp(), out))
     assert facts["rule_summary"] == out.summary and facts["rule_notes"] == out.notes
     assert "run_id" not in facts["input"]
+
+
+@pytest.mark.parametrize(("path", "bad"), [
+    (("candidates", 0, "cloud"), "gcp (월 90% 확정 절감 확인됨)"),  # 결론 문장에 그대로 들어가는 자리
+    (("candidates", 0, "cloud"), "GCP"),
+    (("candidates", 0, "lines", 0, "item"), "앱 (90% 절감 확정)"),
+    (("candidates", 0, "lines", 0, "item"), "$0 앱"),
+])
+def test_names_that_go_into_the_summary_cannot_carry_sentences(path, bad):
+    raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    node = raw
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = bad
+    with pytest.raises(ValidationError):
+        FinopsInput.model_validate(raw)
+
+
+def test_usage_period_warning_only_when_there_is_a_sizing_suggestion():
+    inp = _inp()
+    inp.period_days, inp.rightsizing = None, []
+    assert not any("사용량을 본 기간" in n for n in service.run(inp).notes)
+    inp = _inp()
+    inp.period_days = None
+    assert any("사용량을 본 기간" in n for n in service.run(inp).notes)
+
+
+@pytest.mark.parametrize("bad", [True, "30", 0])
+def test_usage_period_must_be_a_real_positive_integer(bad):
+    raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    raw["period_days"] = bad
+    with pytest.raises(ValidationError):
+        FinopsInput.model_validate(raw)
