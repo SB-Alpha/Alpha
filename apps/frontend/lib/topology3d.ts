@@ -22,7 +22,7 @@ export interface TableSyncItem {
   name: string;
   sourceRows: number;
   targetRows: number;
-  percent: number;
+  percent: number | null;
   match: boolean;
 }
 
@@ -93,7 +93,7 @@ export function extractTables(run: RunStatus): TableSyncItem[] {
     const targetRows = numOrNull(val.target_rows);
     if (sourceRows === null || targetRows === null) continue;
     const percent =
-      numOrNull(val.percent) ?? (sourceRows > 0 ? Math.round((targetRows / sourceRows) * 100) : 100);
+      numOrNull(val.percent) ?? (sourceRows > 0 ? Math.round((targetRows / sourceRows) * 100) : null);
     const match = typeof val.match === "boolean" ? val.match : sourceRows === targetRows;
     items.push({ name, sourceRows, targetRows, percent, match });
   }

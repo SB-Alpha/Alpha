@@ -3,7 +3,7 @@
 import { OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { servingSide } from "@/lib/dashboard";
+import { cutoverOverlayFacts, servingSide } from "@/lib/dashboard";
 import type { StageReportCardData } from "@/lib/topology3d";
 import type { RunStatus } from "@/lib/workflows";
 import {
@@ -174,6 +174,7 @@ export default function PhysicsCanvasView({
       <PhysicsControlsOverlay
         mode={mode}
         onChangeMode={setMode}
+        measured={cutoverOverlayFacts(run)}
         metrics={metrics}
         phase={phase}
         isSequenceRunning={isSequenceRunning}

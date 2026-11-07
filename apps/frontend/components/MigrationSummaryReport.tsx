@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { StateBadge } from "@/components/StateBadge";
 import { FinOpsGreenOpsCard } from "@/components/FinOpsGreenOpsCard";
-import { formatBytes } from "@/lib/dashboard";
+import { countTone, formatBytes, isFinished } from "@/lib/dashboard";
 import { formatTime } from "@/lib/labels";
 import {
   extractCdcArcData,
@@ -30,6 +30,26 @@ interface Props {
   standalone?: boolean;
 }
 
+// 끝나지 않았거나 실패한 run 을 완료 리포트로 부르지 않습니다.
+function reportPrefix(state: RunStatus["state"]): string {
+  if (state === "succeeded") return "POST-MIGRATION VISUAL REPORT";
+  return isFinished(state) ? "MIGRATION REPORT · 미완료" : "MIGRATION REPORT · 진행 중";
+}
+
+const COUNT_TONE_CLASS = {
+  good: "text-emerald-700",
+  bad: "text-rose-700",
+  neutral: "text-ink/60",
+} as const;
+
+function CountValue({ value, unit }: { value: number | null; unit: string }) {
+  return (
+    <span className={COUNT_TONE_CLASS[countTone(value)]}>
+      {value !== null ? `${value}${unit}` : "미제공"}
+    </span>
+  );
+}
+
 export function MigrationSummaryReport({ run, standalone = false }: Props) {
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -47,13 +67,13 @@ export function MigrationSummaryReport({ run, standalone = false }: Props) {
     <section aria-labelledby="summary-report-heading" className={wrapperClass}>
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-ink/15 pb-4">
         <div>
-          <p className="font-mono text-xs text-ink/50">POST-MIGRATION VISUAL REPORT · {run.run_id}</p>
+          <p className="font-mono text-xs text-ink/50">{reportPrefix(run.state)} · {run.run_id}</p>
           <h2 id="summary-report-heading" className="mt-0.5 text-lg font-semibold sm:text-xl">
-            이전 요약 리포트 (3D ScrollControls 플라이스루)
+            이전 요약 리포트 (3D 플라이스루)
           </h2>
           <p className="mt-0.5 text-xs text-ink/65">
-            {source.serviceTitle} · {source.region} → {target.providerSummary} · 완료 시각{" "}
-            {formatTime(run.updated_at)}
+            {source.serviceTitle} · {source.region} → {target.providerSummary} ·{" "}
+            {run.state === "succeeded" ? "완료 시각" : "마지막 갱신 시각"} {formatTime(run.updated_at)}
           </p>
         </div>
 
@@ -88,7 +108,11 @@ export function MigrationSummaryReport({ run, standalone = false }: Props) {
       <dl className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-5">
         <div className="rounded-lg border border-ink/15 bg-paper p-2.5">
           <dt className="text-[11px] text-ink/55">현재 트래픽 처리</dt>
-          <dd className="mt-0.5 font-mono text-base font-semibold text-emerald-700">
+          <dd
+            className={`mt-0.5 font-mono text-base font-semibold ${
+              metrics.serving === "gcp" ? "text-emerald-700" : ""
+            }`}
+          >
             {metrics.serving ? metrics.serving.toUpperCase() : "미제공"}
           </dd>
         </div>
@@ -114,9 +138,9 @@ export function MigrationSummaryReport({ run, standalone = false }: Props) {
         </div>
         <div className="rounded-lg border border-ink/15 bg-paper p-2.5">
           <dt className="text-[11px] text-ink/55">불일치 / 실패 요청</dt>
-          <dd className="mt-0.5 font-mono text-base font-semibold text-emerald-700">
-            {metrics.mismatch !== null ? `${metrics.mismatch}개` : "미제공"} /{" "}
-            {metrics.failedRequests !== null ? `${metrics.failedRequests}건` : "미제공"}
+          <dd className="mt-0.5 font-mono text-base font-semibold">
+            <CountValue value={metrics.mismatch} unit="개" /> /{" "}
+            <CountValue value={metrics.failedRequests} unit="건" />
           </dd>
         </div>
       </dl>
@@ -130,7 +154,7 @@ export function MigrationSummaryReport({ run, standalone = false }: Props) {
         <JourneyCanvasView run={run} />
       </div>
 
-      {/* 하단 테이블 대조 & 단계별 감사 요약 표 (전용 페이지 또는 펼침 시) */}
+      {/* 전용 페이지에서만 표시 */}
       {standalone && (
         <div className="mt-6 grid gap-6 md:grid-cols-2">
           <div className="rounded-lg border border-ink/15 bg-paper p-4">
@@ -184,7 +208,7 @@ export function MigrationSummaryReport({ run, standalone = false }: Props) {
                           t.match ? "text-emerald-700" : "text-rose-700"
                         }`}
                       >
-                        {t.match ? `MATCH (${t.percent}%)` : `MISMATCH (${t.percent}%)`}
+                        {t.match ? "MATCH" : "MISMATCH"} ({t.percent !== null ? `${t.percent}%` : "미제공"})
                       </td>
                     </tr>
                   ))}

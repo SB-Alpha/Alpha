@@ -221,7 +221,7 @@ export function CdcPipelineArc({ run, selectedNode, onSelectNode, onNavigateSect
                       <li key={t.name} className="flex items-center justify-between">
                         <span className="truncate font-medium">{t.name}</span>
                         <span className={t.match ? "text-emerald-700" : "text-amber-800"}>
-                          {t.sourceRows.toLocaleString("ko-KR")} → {t.targetRows.toLocaleString("ko-KR")} ({t.percent}%)
+                          {t.sourceRows.toLocaleString("ko-KR")} → {t.targetRows.toLocaleString("ko-KR")} ({t.percent !== null ? `${t.percent}%` : "미제공"})
                         </span>
                       </li>
                     ))}

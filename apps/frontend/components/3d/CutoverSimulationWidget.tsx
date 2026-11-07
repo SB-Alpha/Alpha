@@ -27,7 +27,7 @@ export function CutoverSimulationWidget({
   sequenceTrigger = 0,
   defaultOpen = true,
   initialMode = "cutover_valve",
-  title = "무중단 트래픽 전환 물리 시뮬레이션 & 파이프라인 주행 데모",
+  title = "전환 순서 리허설 애니메이션 & 파이프라인 주행 데모 (실측 아님)",
 }: Props) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const [isFullscreen, setIsFullscreen] = useState(false);

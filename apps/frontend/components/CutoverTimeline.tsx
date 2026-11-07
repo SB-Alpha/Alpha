@@ -153,7 +153,7 @@ export function CutoverTimeline({ run }: Props) {
         <CutoverSimulationWidget
           run={run}
           defaultOpen={true}
-          title="승인 ② 전환 검증 물리 시뮬레이션 & 경영진/클라이언트 데모 주행 모드"
+          title="전환 순서 리허설 애니메이션 & 파이프라인 주행 데모 (실측 아님)"
         />
       )}
     </section>

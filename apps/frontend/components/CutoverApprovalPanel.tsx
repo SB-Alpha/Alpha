@@ -154,7 +154,7 @@ export function CutoverApprovalPanel({ run, runId, readiness, isBusy, isTrafficU
           run={run}
           sequenceTrigger={sequenceTrigger}
           defaultOpen={true}
-          title="승인 ② 사전 리허설: 물리 트래픽 전환 시뮬레이션 & 파이프라인 주행 데모"
+          title="승인 ② 사전 리허설: 전환 순서 애니메이션 & 파이프라인 주행 데모 (실측 아님)"
         />
       </div>
 

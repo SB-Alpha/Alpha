@@ -1,9 +1,11 @@
-"""AI 보강: 비용 비교 결과를 승인자가 읽을 제안 문장으로 다듬습니다. (이주호)
+"""AI 보강: 비용 비교 결과에 붙일 주의점 코드를 고릅니다. (이주호)
 
 - 기본은 꺼져 있습니다. ALPHA_AI_ENABLED=1 일 때만 Claude 를 부릅니다 (assessment AI 와 같은 스위치).
-- AI 는 문장(summary · notes)만 씁니다. savings · best 같은 숫자 결과는 절대 바꾸지 않습니다.
-- **숫자 대조:** AI 문장에 나온 숫자가 입력이나 계산 결과에 없으면 그 결과는 버리고 규칙 문장을 씁니다.
-- 꺼져 있거나, SDK 가 없거나, 호출·검증이 실패해도 규칙 문장을 그대로 돌려줍니다.
+- AI 는 정해진 코드(CaveatCode)만 고릅니다. 문장은 코드가 씁니다. 자유 문장은 모델 계약에서 거절됩니다.
+- 코드가 고른 주의점은 조건이 맞을 때만 notes 뒤에 붙습니다. summary · savings · best 는 바꾸지 않습니다.
+- AI 가 summary 를 쓰지 않으므로 summary_source 는 항상 "rules" 입니다.
+- 모델에는 숫자와 플래그만 보냅니다. 항목 이름 · 출처 · 근거 · 클라우드 · 리전 문자열은 보내지 않습니다.
+- 꺼져 있거나, SDK 가 없거나, 호출이 실패해도 규칙 결과를 그대로 돌려줍니다.
 """
 
 from __future__ import annotations
@@ -11,9 +13,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
+from collections.abc import Callable
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .schemas import FinopsInput, FinopsReport
 
@@ -21,22 +24,51 @@ log = logging.getLogger(__name__)
 
 MODEL = "claude-opus-5-5"
 TIMEOUT_SECONDS = 30.0
-MAX_SENTENCES = 5
+
+CaveatCode = Literal["INCOMPLETE_COMPARISON", "NO_USAGE_PERIOD", "COST_INCREASE", "NO_CONFIRMED_SAVING"]
 
 SYSTEM = (
-    "너는 클라우드 이전 비용 비교를 승인자에게 설명하는 도우미다. 입력 JSON 의 숫자는 계산 코드가 이미 낸 값이다.\n"
-    "- 숫자를 새로 계산하거나 바꾸지 마라. 문장에 쓰는 숫자는 입력 JSON 에 있는 값을 그대로 옮겨라.\n"
-    "- 입력에 없는 값·단가·기간을 지어내지 마라. 모르는 것은 '미제공' 이라고 써라.\n"
-    "- summary 는 한국어 문장 2~5개: 현재 비용 / 후보별 증감 / 추천 후보 또는 추천할 수 없는 이유.\n"
-    "- notes 는 승인자가 알아야 할 주의점(빠진 항목, 근거 기간, 크기 줄이기 제안의 위험) 최대 5개."
+    "너는 클라우드 이전 비용 비교에 붙일 주의점 코드를 고르는 도우미다. 입력 JSON 의 숫자는 계산 코드가 이미 낸 값이다.\n"
+    "- 아래 코드 중 입력에 해당하는 것만 caveats 에 담아라. 해당하는 것이 없으면 빈 목록을 돌려줘라.\n"
+    "- 문장을 쓰지 마라. 코드 말고 다른 값은 넣지 마라.\n"
+    "- INCOMPLETE_COMPARISON: complete 가 false 인 후보가 있다.\n"
+    "- NO_USAGE_PERIOD: period_days 가 null 이다.\n"
+    "- COST_INCREASE: monthly_saving_usd 가 음수인 후보가 있다.\n"
+    "- NO_CONFIRMED_SAVING: has_best 가 false 이고 monthly_saving_usd 가 양수인 후보가 없다."
 )
-
-_NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
 class AiNotes(BaseModel):
-    summary: list[str]
-    notes: list[str] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
+
+    caveats: list[CaveatCode] = Field(default_factory=list, max_length=4)
+
+
+def _any_incomplete(inp: FinopsInput, report: FinopsReport) -> bool:
+    return any(not s.complete for s in report.savings)
+
+
+def _no_usage_period(inp: FinopsInput, report: FinopsReport) -> bool:
+    return inp.period_days is None
+
+
+def _any_increase(inp: FinopsInput, report: FinopsReport) -> bool:
+    return any(s.monthly_saving_usd is not None and s.monthly_saving_usd < 0 for s in report.savings)
+
+
+def _no_confirmed_saving(inp: FinopsInput, report: FinopsReport) -> bool:
+    # 동률이면 best 는 None 이지만 후보는 실제로 줄어듭니다. 이때 '줄어드는 후보가 없다' 고 쓰면 거짓입니다
+    has_saving = any(s.monthly_saving_usd is not None and s.monthly_saving_usd > 0 for s in report.savings)
+    return report.best is None and not has_saving
+
+
+# 코드 → (조건, 문장). 문장에는 숫자와 클라우드 이름을 넣지 않습니다
+_CAVEATS: dict[str, tuple[Callable[[FinopsInput, FinopsReport], bool], str]] = {
+    "INCOMPLETE_COMPARISON": (_any_incomplete, "비교에서 빠진 후보가 있습니다. 빠진 금액이나 항목을 채운 뒤 다시 비교하세요."),
+    "NO_USAGE_PERIOD": (_no_usage_period, "사용량 근거 기간이 미제공입니다. 크기 제안을 적용하기 전에 사용량을 먼저 확인하세요."),
+    "COST_INCREASE": (_any_increase, "비용이 늘어나는 후보가 있습니다. 비용 외 이전 사유를 승인 기록에 남기세요."),
+    "NO_CONFIRMED_SAVING": (_no_confirmed_saving, "확실히 줄어드는 후보가 없으므로 비용 절감을 이전 근거로 쓰지 마세요."),
+}
 
 
 def enabled() -> bool:
@@ -46,79 +78,36 @@ def enabled() -> bool:
 def enhance(inp: FinopsInput, report: FinopsReport) -> FinopsReport:
     if not enabled():
         return report
-    facts = _facts_for_prompt(inp, report)
     try:
-        notes = _ask_claude(facts)
+        notes = _ask_claude(_facts_for_prompt(inp, report))
+        rendered = [] if notes is None else _render(notes, inp, report)
     except Exception as e:  # 어떤 실패든 규칙 결과로 돌아감
         log.warning("finops AI 보강 실패, 규칙 결과 사용 (%s)", type(e).__name__)
         return report
-    if notes is None or not _valid(notes) or not _valid_polarity(notes, report):
-        return report
-    unknown = unknown_numbers(notes.summary + notes.notes, facts)
-    if unknown:
-        log.warning("finops AI 문장에 입력에 없는 숫자 %d개, 규칙 결과 사용", len(unknown))
-        return report
-    return report.model_copy(update={
-        "summary": [s.strip() for s in notes.summary],
-        "notes": [n.strip() for n in notes.notes[:MAX_SENTENCES]],
-        "summary_source": "ai",
-    })
+    return report.model_copy(update={"notes": [*report.notes, *rendered]})
 
 
-def _valid(notes: AiNotes) -> bool:
-    return 2 <= len(notes.summary) <= MAX_SENTENCES and all(s.strip() for s in notes.summary)
-
-
-def _valid_polarity(notes: AiNotes, report: FinopsReport) -> bool:
-    """비용 증가 후보를 '절감'이라고 하거나, 절감 후보를 '증가'라고 뒤집은 서술을 차단합니다."""
-    for s in report.savings:
-        if s.monthly_saving_usd is None:
-            continue
-        for text in notes.summary:
-            if s.cloud.lower() in text.lower():
-                if s.monthly_saving_usd < 0:
-                    if any(w in text for w in ("절감", "아낍", "줄어")) and not any(w in text for w in ("늘어", "증가", "추가")):
-                        log.warning("finops AI 문장에 비용 증가 후보(%s)의 절감 오표기 감지, 규칙 결과 사용", s.cloud)
-                        return False
-                elif s.monthly_saving_usd > 0:
-                    if any(w in text for w in ("늘어", "증가")) and not any(w in text for w in ("절감", "아낍", "줄어")):
-                        log.warning("finops AI 문장에 비용 절감 후보(%s)의 증가 오표기 감지, 규칙 결과 사용", s.cloud)
-                        return False
-    return True
+def _render(notes: AiNotes, inp: FinopsInput, report: FinopsReport) -> list[str]:
+    """고른 코드를 처음 나온 순서로 한 번씩 보고, 조건이 맞는 것만 문장으로 바꿉니다."""
+    rendered = []
+    for code in dict.fromkeys(notes.caveats):
+        predicate, sentence = _CAVEATS[code]
+        if predicate(inp, report):
+            rendered.append(sentence)
+    return rendered
 
 
 def _facts_for_prompt(inp: FinopsInput, report: FinopsReport) -> str:
+    # 허용 목록으로 만듭니다. 입력 문자열이 모델에 닿지 않고, 나중에 필드가 늘어도 새지 않습니다
     data = {
-        "input": inp.model_dump(mode="json", exclude={"run_id"}),
-        "computed": {"savings": [s.model_dump(mode="json") for s in report.savings], "best": report.best},
+        "period_days": inp.period_days,
+        "candidates": [
+            {"monthly_saving_usd": s.monthly_saving_usd, "saving_pct": s.saving_pct, "complete": s.complete}
+            for s in report.savings
+        ],
+        "has_best": report.best is not None,
     }
     return json.dumps(data, ensure_ascii=False, sort_keys=True)
-
-
-def _as_number(text: str) -> float | None:
-    try:
-        return float(text.replace(",", ""))
-    except ValueError:
-        return None
-
-
-def unknown_numbers(sentences: list[str], facts: str) -> list[str]:
-    """문장 속 숫자 중 facts(JSON) 에 없는 것. 반올림 표기(소수 0~2자리)와 천 단위 쉼표는 같은 숫자로 봅니다."""
-    allowed: set[float] = set()
-    for token in _NUMBER.findall(facts):
-        value = _as_number(token)
-        if value is None:
-            continue
-        for digits in (0, 1, 2):
-            allowed.add(round(value, digits))
-        allowed.add(abs(value))
-    found = []
-    for sentence in sentences:
-        for token in _NUMBER.findall(sentence):
-            value = _as_number(token)
-            if value is None or value not in allowed:
-                found.append(token)
-    return found
 
 
 def _ask_claude(facts: str) -> AiNotes | None:
@@ -128,7 +117,7 @@ def _ask_claude(facts: str) -> AiNotes | None:
     try:
         response = client.messages.parse(
             model=MODEL,
-            max_tokens=4000,
+            max_tokens=300,
             system=SYSTEM,
             messages=[{"role": "user", "content": facts}],
             output_format=AiNotes,

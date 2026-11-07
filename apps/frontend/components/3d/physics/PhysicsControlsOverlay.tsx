@@ -1,5 +1,6 @@
 "use client";
 
+import { countTone, type CutoverOverlayFacts, type CutoverSecondsSource } from "@/lib/dashboard";
 import type { StageReportCardData } from "@/lib/topology3d";
 import type { CutoverPhase, PhysicsMetrics } from "./CutoverPhysicsScene";
 import type { CameraMode, DrivingControlState } from "./PipelineDrivingScene";
@@ -9,6 +10,8 @@ export type Step3Mode = "cutover_valve" | "driving_demo";
 interface Props {
   mode: Step3Mode;
   onChangeMode: (mode: Step3Mode) => void;
+  // 이 run 의 보고값 (애니메이션과 별개)
+  measured: CutoverOverlayFacts;
   // Cutover Valve Mode props
   metrics: PhysicsMetrics;
   phase: CutoverPhase;
@@ -36,9 +39,59 @@ const PHASE_STEPS: { key: CutoverPhase; label: string }[] = [
   { key: "gcp_serving", label: "4. 보류 해제·완료" },
 ];
 
+const SECONDS_SOURCE_LABEL: Record<CutoverSecondsSource, string> = {
+  worker: "Worker 측정",
+  agent: "에이전트 보고",
+};
+
+const COUNT_TONE_CLASS = {
+  good: "text-emerald-700",
+  bad: "text-rose-700",
+  neutral: "",
+} as const;
+
+function FailureCount({ value }: { value: number | null }) {
+  return (
+    <span className={`font-semibold ${COUNT_TONE_CLASS[countTone(value)]}`}>
+      {value !== null ? `${value}건` : "미제공"}
+    </span>
+  );
+}
+
+function stepsText(steps: CutoverOverlayFacts["steps"]): string {
+  if (!steps || steps.length === 0) return "미제공";
+  return steps
+    .map((s) => `${s.step} ${s.elapsedMs !== null ? `${s.elapsedMs}ms` : "미제공"}`)
+    .join(" · ");
+}
+
+// 이 run 이 실제로 보고한 값만 보여 줍니다. 위 애니메이션 단계와 대응시키지 않습니다.
+function MeasuredFacts({ measured }: { measured: CutoverOverlayFacts }) {
+  const { cutoverSeconds, cutoverSecondsSource } = measured;
+  return (
+    <div className="pointer-events-auto rounded-md border border-ink/20 bg-white/95 px-3 py-1 font-mono text-[10px] text-ink/75 shadow-xs">
+      <p className="flex flex-wrap items-center gap-x-1">
+        {measured.simulated && (
+          <span className="rounded border border-amber-400 bg-amber-50 px-1 font-semibold text-amber-900">
+            시뮬레이션 값
+          </span>
+        )}
+        <span>
+          이 run 보고값: 전환 소요 {cutoverSeconds !== null ? `${cutoverSeconds.toFixed(1)}초` : "미제공"} (
+          {cutoverSecondsSource ? SECONDS_SOURCE_LABEL[cutoverSecondsSource] : "출처 미제공"}) · 읽기 실패{" "}
+          <FailureCount value={measured.failedRequests} /> (프로버) · 쓰기 실패{" "}
+          <FailureCount value={measured.writeFailedRequests} /> (Worker)
+        </span>
+      </p>
+      <p>전환 시작 후 경과: {stepsText(measured.steps)}</p>
+    </div>
+  );
+}
+
 export function PhysicsControlsOverlay({
   mode,
   onChangeMode,
+  measured,
   metrics,
   phase,
   isSequenceRunning,
@@ -187,33 +240,35 @@ export function PhysicsControlsOverlay({
       {/* 하단 바 */}
       {mode === "cutover_valve" ? (
         <div className="flex flex-col gap-2">
-          {/* Cloudflare Worker 4-Step Zero-Loss Waterfall Timing Bar */}
+          {/* 전환 순서 막대: 애니메이션 단계만 표시 (실측 아님) */}
           <div className="pointer-events-auto flex flex-wrap items-center justify-between gap-1 rounded-md border border-ink/20 bg-white/95 px-3 py-1.5 text-[11px] font-mono shadow-xs">
-            <span className="flex items-center gap-1.5 font-semibold text-emerald-800">
-              <span className="inline-block h-2 w-2 rounded-full bg-emerald-600 animate-pulse" />
-              Cloudflare 4단계 제로-다운타임 시퀀스
+            <span className="flex items-center gap-1.5 font-semibold text-ink">
+              <span className="inline-block h-2 w-2 rounded-full bg-ink/40" />
+              Cloudflare 4단계 전환 순서
+              <span className="rounded border border-ink/25 bg-paper px-1.5 py-0.5 text-[10px] font-medium text-ink/70">
+                리허설 애니메이션, 실측 아님
+              </span>
             </span>
             <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-ink/65">
               <span className={`rounded px-1.5 py-0.5 transition-colors ${phase === "hold" ? "bg-amber-100 font-bold text-amber-900 border border-amber-300" : ""}`}>
-                ① 보류(Hold) 24ms
+                ① 보류(Hold)
               </span>
               <span>→</span>
               <span className={`rounded px-1.5 py-0.5 transition-colors ${phase === "verify" ? "bg-indigo-100 font-bold text-indigo-900 border border-indigo-300" : ""}`}>
-                ② 반영 확인 14ms
+                ② 반영 확인
               </span>
               <span>→</span>
               <span className={`rounded px-1.5 py-0.5 transition-colors ${phase === "switch" ? "bg-purple-100 font-bold text-purple-900 border border-purple-300" : ""}`}>
-                ③ 경로 변경 4ms
+                ③ 경로 변경
               </span>
               <span>→</span>
               <span className={`rounded px-1.5 py-0.5 transition-colors ${phase === "gcp_serving" ? "bg-emerald-100 font-bold text-emerald-900 border border-emerald-300" : ""}`}>
-                ④ 보류 해제 8ms
-              </span>
-              <span className="ml-1 rounded border border-emerald-600/30 bg-emerald-50 px-1.5 py-0.5 font-bold text-emerald-800">
-                손실 0건 (0.00%)
+                ④ 보류 해제
               </span>
             </div>
           </div>
+
+          <MeasuredFacts measured={measured} />
 
           {/* 4단계 전환 시퀀스 스텝 버튼 */}
           <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-1 rounded-md border border-ink/20 bg-white/95 p-1.5 shadow-xs">
@@ -236,10 +291,10 @@ export function PhysicsControlsOverlay({
             })}
           </div>
 
-          {/* 실시간 물리 계측 타일 (원본 AWS / Worker 보류 큐 / 목적지 GCP) */}
+          {/* 애니메이션 카운터 (실측 아님) */}
           <div className="grid grid-cols-3 gap-2">
             <div className="pointer-events-auto rounded-md border border-ink/20 bg-white/95 px-3 py-1.5 shadow-xs">
-              <span className="block text-[10px] text-ink/55">원본 AWS 처리</span>
+              <span className="block text-[10px] text-ink/55">원본 AWS 처리 (애니메이션)</span>
               <span className="font-mono text-base font-bold tabular-nums">
                 {metrics.awsCount.toLocaleString("ko-KR")}
                 <span className="ml-1 text-[10px] font-normal text-ink/50">건</span>
@@ -248,7 +303,7 @@ export function PhysicsControlsOverlay({
 
             <div className="pointer-events-auto rounded-md border border-amber-400 bg-amber-50/95 px-3 py-1.5 text-center shadow-xs">
               <span className="block text-[10px] font-medium text-amber-900">
-                Cloudflare 보류 버퍼 (유실 0건)
+                Cloudflare 보류 버퍼 (애니메이션)
               </span>
               <span className="font-mono text-base font-bold tabular-nums text-amber-900">
                 {metrics.bufferedCount}
@@ -257,7 +312,7 @@ export function PhysicsControlsOverlay({
             </div>
 
             <div className="pointer-events-auto rounded-md border border-emerald-600/40 bg-white/95 px-3 py-1.5 text-right shadow-xs">
-              <span className="block text-[10px] text-emerald-800">목적지 GCP 처리</span>
+              <span className="block text-[10px] text-emerald-800">목적지 GCP 처리 (애니메이션)</span>
               <span className="font-mono text-base font-bold tabular-nums text-emerald-700">
                 {metrics.gcpCount.toLocaleString("ko-KR")}
                 <span className="ml-1 text-[10px] font-normal text-ink/50">건</span>
