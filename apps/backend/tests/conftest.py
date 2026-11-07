@@ -1,7 +1,15 @@
 import pytest
 
 from app.core.local_access import require_local_access
+from app.features.workflows import runners
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def cdc_settings_present(request, monkeypatch):
+    """The check itself is tested in test_cdc_settings_check.py; other tests are about what runs after it."""
+    if not request.module.__name__.endswith("test_cdc_settings_check"):
+        monkeypatch.setattr(runners, "_check_cdc_settings", lambda: None)
 
 
 @pytest.fixture(autouse=True)

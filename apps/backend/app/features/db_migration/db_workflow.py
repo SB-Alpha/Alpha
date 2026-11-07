@@ -1084,9 +1084,13 @@ def execute(inp: DbMigrationInput | dict, ctx: Reporter | None = None, *,
                   tables=len(mig.source.tables), skip_vpn=mig.options.skip_vpn)
         creds = resolve_inputs(mig)
         preflight.check_app_account(mig, creds.source_admin["user"])
+        client = agent or _default_agent()
+        if not mig.options.skip_vpn:
+            # 첫 단계인 VPN이 15~20분 걸린다. 고장 난 클러스터나 겹치는 대역은 그 전에 멈춘다.
+            preflight.check_agent(client)
+            preflight.check_networks(mig, vpn.OciSettings.from_env())
         repl = ensure_repl_account(mig.run_id)
         preflight.check_job_secrets(job_secrets(creds, repl))
-        client = agent or _default_agent()
         result = run_migration(
             mig.run_id, mig.source.model_dump(), mig.target.model_dump(),
             agent=client, steps=_build_steps(mig, creds, repl, client, log), ctx=ctx,

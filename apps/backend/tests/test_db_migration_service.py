@@ -19,6 +19,11 @@ from .test_db_migration_vpn import INPUT, JOB_ID, RUN_ID
 
 ADMIN_PASSWORD = "admin-password-marker"
 SINK_PASSWORD = "sink-password-marker"
+OCI_ENV = {
+    "CDC_OCI_REGION": "oci-1", "CDC_OCI_COMPARTMENT_ID": "c", "CDC_OCI_DRG_ID": "d",
+    "CDC_TFSTATE_BUCKET": "b", "CDC_TFSTATE_NAMESPACE": "n",
+    "CDC_OCI_VCN_CIDR": "10.250.0.0/16", "CDC_NODE_SUBNET_CIDR": "10.250.1.0/24",
+}
 
 
 class FakeAgent:
@@ -29,6 +34,7 @@ class FakeAgent:
         self.request = None
         self.abort_status = None
         self.reachable = True
+        self.health = {"kafka": True, "connect": True, "plugins_missing": []}
 
     def client(self) -> CdcAgentClient:
         return CdcAgentClient(AgentSettings(url="https://cdc.example"), transport=httpx.MockTransport(self.handle))
@@ -36,6 +42,8 @@ class FakeAgent:
     def handle(self, request: httpx.Request) -> httpx.Response:
         method, path = request.method, request.url.path
         self.calls.append(f"{method} {path}")
+        if method == "GET" and path == "/status":
+            return httpx.Response(200, json=self.health)
         if method == "POST" and path == "/probe":
             body = json.loads(request.content)
             return httpx.Response(200, json=[{**e, "ok": self.reachable, "error": None} for e in body])
@@ -74,6 +82,8 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(db_workflow, "_stop_requested", set())
     monkeypatch.setenv("ALPHA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("ALPHA_SECRETS_KEY", Fernet.generate_key().decode())
+    for name, value in OCI_ENV.items():
+        monkeypatch.setenv(name, value)
     monkeypatch.setattr(db_workflow.time, "sleep", lambda s: None)
     put_secret(f"{RUN_ID}/source-cloud", {"aws_access_key_id": "k", "aws_secret_access_key": "s"})
     put_secret(f"{RUN_ID}/target-cloud", {"credentials_json": "{}"})
@@ -489,3 +499,59 @@ def test_a_failed_stop_does_not_make_the_run_remove_the_vpn(monkeypatch, vpn_cal
     service.stop(RUN_ID, agent=agent.client())
     thread.join(5)
     assert vpn_calls == ["ensure_vpn", "destroy_vpn"]
+
+
+# ---- before the VPN: it takes 15-20 minutes to build
+
+
+@pytest.fixture
+def vpn_not_reached(monkeypatch):
+    """Fails the run at once if a check let it through, instead of following a job that never ends."""
+
+    def ensure(mig, job_id):
+        raise AssertionError("the VPN must not be built")
+
+    monkeypatch.setattr(vpn, "ensure_vpn", ensure)
+
+
+def test_broken_cluster_stops_the_run_before_the_vpn(vpn_not_reached):
+    agent = FakeAgent()
+    agent.health = {"kafka": True, "connect": False, "plugins_missing": ["debezium"]}
+
+    result = service.run(INPUT, agent=agent.client())
+
+    assert result.state == "failed"
+    assert "connect" in result.message and "debezium" in result.message
+
+
+def test_overlapping_ranges_stop_the_run_before_the_vpn(vpn_not_reached, monkeypatch):
+    source_cidr = copy.deepcopy(INPUT)["source"]["network"]["cidr"]
+    monkeypatch.setenv("CDC_OCI_VCN_CIDR", source_cidr)
+    monkeypatch.setenv("CDC_NODE_SUBNET_CIDR", source_cidr)
+
+    result = service.run(INPUT, agent=FakeAgent().client())
+
+    assert result.state == "failed" and "overlap" in result.message
+
+
+def test_missing_oci_setting_is_named_before_the_vpn(vpn_not_reached, monkeypatch):
+    monkeypatch.delenv("CDC_OCI_VCN_CIDR")
+
+    result = service.run(INPUT, agent=FakeAgent().client())
+
+    assert result.state == "failed" and "CDC_OCI_VCN_CIDR" in result.message
+
+
+def test_checks_for_the_vpn_are_skipped_when_no_vpn_is_built(vpn_calls, monkeypatch):
+    monkeypatch.delenv("CDC_OCI_VCN_CIDR")
+    agent = FakeAgent()
+    agent.health = {"kafka": False, "connect": False}
+    inp = {**copy.deepcopy(INPUT), "options": {"skip_vpn": True}}
+
+    thread, _ = start(agent, inp)
+    wait_created(agent, thread)
+    agent.job = {**agent.job, "state": "aborted"}
+    thread.join()
+
+    assert "GET /status" not in agent.calls
+    assert agent.request is not None

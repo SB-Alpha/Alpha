@@ -417,9 +417,23 @@ def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
     return res
 
 
+def _check_cdc_settings() -> None:
+    """목적지를 만들기 전에 CDC 설정을 봅니다. 빠진 값은 목적지를 다 만든 뒤 db_migration 단계에서야 드러납니다."""
+    from app.features.db_migration.client import AgentSettings
+    from app.features.db_migration.vpn import OciSettings
+
+    try:
+        if AgentSettings.from_env().is_simulation:
+            return  # 모의 에이전트로는 실제 VPN 을 만들지 않습니다.
+    except KeyError:
+        raise RuntimeError("CDC_AGENT_URL 환경변수가 설정되지 않아 CDC 를 시작할 수 없습니다") from None
+    OciSettings.from_env()
+
+
 def run_provisioning(run: RunStatus, ctx: RunContext) -> Any:
     # planning 출력의 target_infra 로 목적지 인프라(VPC, Cloud SQL)를 프로비저닝합니다 (PR #40).
     target_infra = _extract_plan_target_infra(run)
+    _check_cdc_settings()
     res = adapter_for(run.request).provision(run.run_id, target_infra, run.request.target_infra, ctx)
     metrics = _private_ip_metric(res)
     if ctx is not None and metrics:
