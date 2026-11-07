@@ -158,3 +158,57 @@ def test_approve_refuses_failures_even_when_acknowledged(store):
 def test_plan_approval_is_not_gated_by_cutover_checks(store):
     run = store.create(make_run({"mismatch": 9}).model_copy(update={"waiting_gate": "plan", "approvals": []}))
     assert Engine(store).approve(run.run_id, "plan").state == WorkflowState.RUNNING
+
+
+# s5 (mig-20261107-a333af6e): 승인 순간 실제 지연은 48,555,488 bytes 였는데, 30초 전 400 bytes 값으로 "가능"이 나왔습니다.
+MEASURED = datetime(2026, 11, 7, 17, 0, 0, tzinfo=timezone.utc)
+
+
+def _lag_at(lag: int, measured_at: str | None):
+    metrics = {**GOOD_METRICS, "replication_lag_bytes": lag}
+    if measured_at is not None:
+        metrics["measured_at"] = measured_at
+    return make_run(metrics)
+
+
+def test_a_stale_lag_value_is_not_counted_as_pass():
+    from datetime import timedelta
+
+    from app.features.workflows.readiness import MAX_LAG_AGE_S
+
+    run = _lag_at(400, MEASURED.isoformat())
+    stale = cutover_readiness(run, now=MEASURED + timedelta(seconds=30))
+    lag = next(c for c in stale.checks if c.id == "lag")
+    assert lag.status == "unknown"
+    assert "30초 전" in lag.detail
+    assert stale.decision == "needs_confirmation"
+
+    fresh = cutover_readiness(run, now=MEASURED + timedelta(seconds=MAX_LAG_AGE_S - 1))
+    assert next(c for c in fresh.checks if c.id == "lag").status == "pass"
+    assert fresh.decision == "go"
+
+
+def test_a_lag_over_the_limit_still_fails_even_when_stale():
+    from datetime import timedelta
+
+    run = _lag_at(48_555_488, MEASURED.isoformat())
+    readiness = cutover_readiness(run, now=MEASURED + timedelta(seconds=120))
+    assert next(c for c in readiness.checks if c.id == "lag").status == "fail"
+    assert readiness.decision == "no_go"
+
+
+@pytest.mark.parametrize("measured_at", [None, "not-a-time", "2026-11-07T17:00:00"])
+def test_lag_without_a_usable_measured_at_keeps_the_value_check(measured_at):
+    readiness = cutover_readiness(_lag_at(400, measured_at), now=MEASURED)
+    lag = next(c for c in readiness.checks if c.id == "lag")
+    assert lag.status == "pass"
+    assert "측정 시각 미제공" in lag.detail
+
+
+def test_measured_at_from_another_stage_is_not_used_for_the_lag():
+    from datetime import timedelta
+
+    run = _lag_at(400, None)
+    run = with_stage(run, StageName.PROVISIONING, metrics={"measured_at": MEASURED.isoformat()})
+    lag = next(c for c in cutover_readiness(run, now=MEASURED + timedelta(seconds=300)).checks if c.id == "lag")
+    assert lag.status == "pass"

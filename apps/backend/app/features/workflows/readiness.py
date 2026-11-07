@@ -6,12 +6,17 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any
 
 from .schemas import CheckStatus, CutoverDecision, CutoverReadiness, ReadinessCheck, RunStatus, StageName
 
 # 임시 기준값입니다. 팀 합의 후 바꿉니다.
 MAX_REPLICATION_LAG_BYTES = 1024 * 1024
+# 복제 지연 값이 이보다 오래 갱신되지 않으면 지금 값으로 보지 않습니다 (확인 중).
+# 에이전트 보고 주기(db_migration log_interval_s, 기본 10초)의 두 번입니다. 한 번 놓쳐도 판정이 흔들리지 않고,
+# a333af6e 처럼 30초 전 값으로 "가능"을 내지는 않습니다.
+MAX_LAG_AGE_S = 20.0
 
 _NOT_PROVIDED = "미제공"
 
@@ -27,6 +32,24 @@ def _find_metric(run: RunStatus, key: str) -> Any:
     return None
 
 
+def _find_with_stage(run: RunStatus, key: str) -> tuple[Any, dict[str, Any]]:
+    """_find_metric 과 같은 순서로 찾고, 값을 보고한 단계의 지표도 함께 돌려줍니다."""
+    for stage in reversed(run.stages):
+        if stage.stage != StageName.CUTOVER and key in stage.metrics:
+            return stage.metrics[key], stage.metrics
+    return None, {}
+
+
+def _aware_time(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
 def _as_number(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
@@ -40,14 +63,32 @@ def _as_number(value: Any) -> float | None:
     return None
 
 
-def _lag_check(run: RunStatus) -> ReadinessCheck:
+def _lag_check(run: RunStatus, now: datetime) -> ReadinessCheck:
+    """지연 값과 같은 보고에 실린 measured_at 을 함께 봅니다.
+
+    단계 지표는 마지막 보고 값이 남아 있어, 갱신이 끊긴 사이 지연이 커져도 예전 값으로 통과할 수 있습니다
+    (s5 a333af6e: 30초 전 400 bytes 로 통과, 승인 순간 실제 48,555,488 bytes). 오래된 값은 통과로 치지 않고
+    확인 중(unknown)으로 둡니다. 기준을 넘는 값은 오래됐어도 막습니다. measured_at 이 없는 예전 보고는 값만 봅니다.
+    """
     base = {"id": "lag", "title": "복제 지연"}
-    value = _as_number(_find_metric(run, "replication_lag_bytes"))
+    raw, stage_metrics = _find_with_stage(run, "replication_lag_bytes")
+    value = _as_number(raw)
     if value is None:
         return ReadinessCheck(**base, status="unknown", detail=_NOT_PROVIDED)
-    status: CheckStatus = "pass" if value <= MAX_REPLICATION_LAG_BYTES else "fail"
     detail = f"{value:,.0f} bytes (기준 {MAX_REPLICATION_LAG_BYTES:,} 이하, 임시)"
-    return ReadinessCheck(**base, status=status, detail=detail)
+    if value > MAX_REPLICATION_LAG_BYTES:
+        return ReadinessCheck(**base, status="fail", detail=detail)
+    measured = _aware_time(stage_metrics.get("measured_at"))
+    if measured is None:
+        return ReadinessCheck(**base, status="pass", detail=f"{detail} · 측정 시각 미제공")
+    age = (now - measured).total_seconds()
+    if age > MAX_LAG_AGE_S:
+        return ReadinessCheck(
+            **base,
+            status="unknown",
+            detail=f"확인 중: 마지막 측정 {age:.0f}초 전 ({value:,.0f} bytes, 기준 {MAX_LAG_AGE_S:.0f}초 이내 값만 통과)",
+        )
+    return ReadinessCheck(**base, status="pass", detail=f"{detail} · {max(age, 0):.0f}초 전 측정")
 
 
 def _is_verified_by_agent(run: RunStatus) -> bool:
@@ -117,11 +158,12 @@ def _decision(checks: list[ReadinessCheck]) -> CutoverDecision:
     return "needs_confirmation" if "unknown" in statuses else "go"
 
 
-def cutover_readiness(run: RunStatus) -> CutoverReadiness:
+def cutover_readiness(run: RunStatus, *, now: datetime | None = None) -> CutoverReadiness:
+    now = now or datetime.now(timezone.utc)
     checks = [
         _cdc_check(run),
         _copy_check(run),
-        _lag_check(run),
+        _lag_check(run, now),
         _mismatch_check(run),
         _app_health_check(run),
     ]
