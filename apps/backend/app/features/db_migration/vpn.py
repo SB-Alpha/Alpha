@@ -1,4 +1,6 @@
-"""Create and remove the OCI↔AWS and OCI↔GCP VPN by running Terraform.
+"""VPN 공개 입구. VpnPlan은 역할 기반 공통 절차(vpn_workflow.py)로 넘긴다.
+
+아래 구현은 기존 DbMigrationInput과 기존 state 정리를 위한 AWS→GCP 호환 경로다.
 
 Each side needs the other's public IP, so the roots are applied in this order:
   a. gcp      no tunnels yet                → GCP HA VPN IPs
@@ -27,6 +29,7 @@ from app.core.secrets import put_secret, resolve
 
 from .schemas import DbMigrationInput
 from .settings import required, tunables
+from .vpn_plan import VpnPlan, VpnError
 
 GCP, AWS, OCI = "gcp", "aws-vpn", "oci-vpn"
 # Must match the defaults of the Terraform modules, which take no input for them.
@@ -214,6 +217,8 @@ class VpnContext:
     @classmethod
     def load(cls, run_id: str) -> "VpnContext":
         data = json.loads(resolve(f"secret://{run_id}/vpn-context")["json"])
+        if data.get("version") == 2:
+            raise VpnError("context_version", "this run uses the role-based VPN flow; legacy input must not overwrite it")
         return cls(**{**data, "source": {"db_port": OLD_CONTEXT_DB_PORT, **data["source"]}})
 
 
@@ -322,9 +327,15 @@ def _existing_tunnels(tf: Terraform, ctx: VpnContext, saved: VpnContext | None, 
     return status if _tunnels_up(status, active_keys(ctx.pass_onprem)) else None
 
 
-def ensure_vpn(mig: DbMigrationInput, job_id: str, *, terraform: Terraform | None = None,
+def ensure_vpn(mig: DbMigrationInput | VpnPlan, job_id: str, *, terraform: Terraform | None = None,
                sleep: Callable[[float], None] = time.sleep) -> dict:
     """Safe to call again: a healthy VPN is reused as it is; otherwise Terraform leaves what exists."""
+    if isinstance(mig, VpnPlan):
+        from .vpn_workflow import ensure_vpn as ensure_role_vpn
+
+        if job_id != mig.job_id:
+            raise VpnError("invalid_plan", "VPN job ID does not match the plan")
+        return ensure_role_vpn(mig, terraform=terraform, sleep=sleep)
     ctx = VpnContext.from_input(mig, job_id)
     saved = _saved_context(mig.run_id)
     ctx.save()
@@ -375,6 +386,14 @@ def _wait_tunnels(tf: Terraform, oci_vars: dict, sleep: Callable[[float], None])
 
 def destroy_vpn(run_id: str, *, terraform: Terraform | None = None) -> bool:
     """Remove the VPN of a run. False when this run never made one. Safe to call again."""
+    try:
+        version = json.loads(resolve(f"secret://{run_id}/vpn-context")["json"]).get("version")
+    except KeyError:
+        return False
+    if version == 2:
+        from .vpn_workflow import destroy_vpn as destroy_role_vpn
+
+        return destroy_role_vpn(run_id, terraform=terraform)
     try:
         ctx = VpnContext.load(run_id)
     except KeyError:

@@ -23,7 +23,7 @@ variable "drg_id" {
 }
 
 variable "tunnels" {
-  description = "키 이름: aws-0, aws-1, gcp-0, gcp-1"
+  description = "상대 구간별 터널. 새 실행은 source-0/1, target-0/1 키를 사용한다"
   type = map(object({
     cpe_ip        = string
     peer_cidrs    = list(string)

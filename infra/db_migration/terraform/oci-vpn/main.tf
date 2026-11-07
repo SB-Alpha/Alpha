@@ -35,7 +35,7 @@ module "vpn" {
 }
 
 output "oracle_tunnel_ips" {
-  description = "AWS 고객 게이트웨이 IP, GCP 외부 게이트웨이 IP로 넘기는 값"
+  description = "상대 구간에 넘길 OCI 터널 공인 IP. 입력의 터널 키를 그대로 유지한다"
   value       = { for k, v in module.vpn : k => v.oracle_tunnel_ip }
 }
 
