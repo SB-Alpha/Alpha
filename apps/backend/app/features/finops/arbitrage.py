@@ -84,12 +84,14 @@ def _egress(req: ArbitrageRequest, aws: AwsPrices | None, gcp: GcpPrices | None,
 
 
 def _decide(req: ArbitrageRequest, lag_fenced: bool, read_rps: float, baseline_usd: float,
-            target_app_usd: float, egress_usd: float | None) -> _Decision:
+            target_app_usd: float, egress_usd: float | None, lag_unknown: bool = False) -> _Decision:
     """IDLE·복제 지연 펜싱은 egress 와 상관없이 정해지고, 그 밖의 판단은 egress 를 알 때만 합니다."""
     keep = (0.0, 1.0, 0.0, 0.0, baseline_usd)
     if read_rps <= 0:
         return _Decision(*keep, "IDLE: 활성 요청(RPS=0)이 없어 차익거래 대상이 없습니다.",
                          ["유휴 상태(RPS 0)에서는 상시 인스턴스 기본 비용이 유지되며 차익거래 우회가 불필요합니다."])
+    if lag_unknown:
+        return _Decision(*keep, "미제공: 복제 지연을 받지 못해 읽기 우회를 하지 않고 원본 마스터에 고정했습니다.", [])
     if lag_fenced:
         return _Decision(*keep, "FENCED_PRIMARY: 복제 지연으로 인해 모든 트래픽이 원본 마스터에 고정되었습니다.", [])
     if egress_usd is None:
@@ -161,8 +163,12 @@ def calculate_arbitrage(
     ) * HOURS_PER_MONTH
 
     # 2. 복제 지연(Replication Lag) 세이프가드 검사
-    lag_fenced = req.replication_lag_bytes is not None and req.replication_lag_bytes > req.max_safe_lag_bytes
-    if lag_fenced:
+    # 지연을 모르면(None) 안전하다고 보지 않고 읽기 우회를 하지 않습니다. 모르는 값을 0 으로 채우지 않는 원칙과 같습니다.
+    lag_unknown = req.replication_lag_bytes is None
+    lag_fenced = lag_unknown or req.replication_lag_bytes > req.max_safe_lag_bytes
+    if lag_unknown:
+        reasons.append("미제공: 복제 지연을 받지 못해 읽기 우회를 하지 않고 원본 마스터로 100% 펜싱했습니다.")
+    elif lag_fenced:
         reasons.append(
             f"복제 지연({req.replication_lag_bytes:,} B)이 안전 임계치({req.max_safe_lag_bytes:,} B)를 "
             f"초과하여 데이터 일관성 보호를 위해 읽기 우회를 차단하고 원본 마스터로 100% 펜싱했습니다."
@@ -185,7 +191,7 @@ def calculate_arbitrage(
     egress_usd = None if egress.net_per_gb is None else egress_gb * egress.net_per_gb
 
     # 5. 차익거래 분기 판정
-    decision = _decide(req, lag_fenced, read_rps, baseline_usd, target_app_usd, egress_usd)
+    decision = _decide(req, lag_fenced, read_rps, baseline_usd, target_app_usd, egress_usd, lag_unknown)
     reasons += decision.notes + egress.notes
     reasons.append("쓰기 트래픽(Write)은 데이터 정합성 보장을 위해 Active Master로 100% 펜싱됩니다.")
     reasons.append(

@@ -20,6 +20,20 @@ export const STAGE_ORDER: StageName[] = ["discovery", "planning", "provisioning"
 
 export const GATE_BEFORE: Partial<Record<StageName, Gate>> = { provisioning: "plan", cutover: "cutover" };
 
+/** 원본 클라우드. aws 는 기존 조회, gcp·azure 는 cloud_source 위치의 앱·DB 를 클라우드 API 로 조회합니다. */
+export type SourceKind = "aws" | "gcp" | "azure";
+
+/** 원본이 GCP·Azure 일 때 원본 위치. 비밀은 secret:// 이름표만 받습니다. */
+export interface CloudSourceRequest {
+  region: string;
+  app_name: string;
+  db_instance: string;
+  credentials_ref?: string | null;
+  project_id?: string | null; // GCP
+  subscription_id?: string | null; // Azure
+  resource_group?: string | null; // Azure
+}
+
 export interface MigrationRequest {
   github_repo_url?: string | null;
   service_name?: string | null;
@@ -32,6 +46,8 @@ export interface MigrationRequest {
   db_admin_ref?: string | null;
   target_region?: string;
   target_infra?: TargetInfraConfig | null;
+  source_kind?: SourceKind | "manual";
+  cloud_source?: CloudSourceRequest | null;
 }
 
 /** 화면에 보이는 run 이름. 예전 요청에는 저장소 주소만 있습니다. */

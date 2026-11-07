@@ -101,6 +101,25 @@ def test_egress_lookup_without_a_regional_sku_is_not_guessed():
 
 # -- 판단 ----------------------------------------------------------------------------------------
 
+MEASURED_LAG_B = 6760  # 2026-11-07 실제 RDS→Cloud SQL 이전에서 전환 순간 잰 복제 지연
+
+
+def test_unknown_lag_is_not_treated_as_safe():
+    """지연을 모르면(None) 0 으로 보지 않고 읽기 우회를 하지 않습니다."""
+    result = _calc(replication_lag_bytes=None, rps=10.0, idle_percent=50.0)
+    assert result.lag_fenced is True
+    assert (result.read_weight_target, result.read_weight_source) == (0.0, 1.0)
+    assert any(r.startswith("미제공: 복제 지연") for r in result.reasons)
+    assert result.recommendation.startswith("미제공: 복제 지연")  # FENCED_PRIMARY(지연 초과)와 구분
+
+
+def test_measured_lag_from_a_real_migration_is_below_the_threshold():
+    """실측 지연(수백 B~수십 KB)은 전환 점검과 같은 1 MiB 기준 아래라 펜싱되지 않습니다."""
+    for lag in (152, MEASURED_LAG_B, 56_584):
+        assert _calc(replication_lag_bytes=lag, rps=10.0, idle_percent=50.0).lag_fenced is False
+    assert _calc(replication_lag_bytes=2 * 1024 * 1024, rps=10.0, idle_percent=50.0).lag_fenced is True
+
+
 def test_arbitrage_replication_lag_fencing():
     """복제 지연이 임계치(1024 B)를 초과하면 egress 단가와 상관없이 원본으로 펜싱합니다."""
     result = _calc(replication_lag_bytes=2048, max_safe_lag_bytes=1024, rps=10.0, idle_percent=50.0)
@@ -220,7 +239,8 @@ def fake_prices(monkeypatch):
 def test_arbitrage_router_api(fake_prices):
     """FastAPI POST /finops/arbitrage 는 가격 API 객체를 넘겨 egress 단가를 받습니다."""
     payload = {"source_cloud": "aws", "target_cloud": "gcp", "app_vcpu": 1.0, "app_memory_mib": 2048,
-               "app_instances": 1, "rps": 2.0, "read_ratio": 0.8, "idle_percent": 70.0, "currency": "USD"}
+               "app_instances": 1, "rps": 2.0, "read_ratio": 0.8, "idle_percent": 70.0, "currency": "USD",
+               "replication_lag_bytes": MEASURED_LAG_B}
     resp = client.post("/finops/arbitrage", json=payload)
     assert resp.status_code == 200
     data = resp.json()
@@ -238,7 +258,8 @@ def test_estimate_includes_arbitrage_when_traffic_present(monkeypatch, fake_pric
         azure=estimate.AzurePrices(fake_azure_query), today=TODAY))
     payload = {"source_region": "ap-northeast-2", "app_vcpu": 1.0, "app_memory_mib": 2048, "app_instances": 1,
                "candidates": [{"cloud": "gcp", "region": "asia-northeast3"}],
-               "traffic": {"idle_percent": 70.0, "rps": 2.0, "avg_latency_ms": 100.0}}
+               "traffic": {"idle_percent": 70.0, "rps": 2.0, "avg_latency_ms": 100.0,
+                           "replication_lag_bytes": MEASURED_LAG_B}}
     resp = client.post("/finops/estimate", json=payload)
     assert resp.status_code == 200
     arb = resp.json()["arbitrage"]
@@ -256,12 +277,29 @@ def test_estimate_with_an_odd_region_reports_egress_as_not_provided(monkeypatch,
         azure=estimate.AzurePrices(fake_azure_query), today=TODAY))
     payload = {"source_region": "AP-NORTHEAST-2", "app_vcpu": 1.0, "app_memory_mib": 2048,
                "candidates": [{"cloud": "gcp", "region": "asia-northeast3"}],
-               "traffic": {"idle_percent": 70.0, "rps": 2.0, "avg_latency_ms": 100.0}}
+               "traffic": {"idle_percent": 70.0, "rps": 2.0, "avg_latency_ms": 100.0,
+                           "replication_lag_bytes": MEASURED_LAG_B}}
     resp = client.post("/finops/estimate", json=payload)
     assert resp.status_code == 200
     arb = resp.json()["arbitrage"]
     assert arb["recommendation"] == arbitrage.NO_EGRESS and arb["monthly_savings"] is None
     assert any("ValueError" in r for r in arb["reasons"])
+
+
+def test_estimate_without_lag_fences_instead_of_assuming_zero(monkeypatch, fake_prices):
+    """/finops/estimate 에 복제 지연이 없으면 0(안전)으로 바꾸지 않고 미제공으로 펜싱합니다."""
+    real_build = estimate.build_input
+    monkeypatch.setattr(estimate, "build_input", lambda req: real_build(
+        req, aws=AwsPrices(FakePricingClient()), gcp=GcpPrices(GCP_SKUS.__getitem__),
+        azure=estimate.AzurePrices(fake_azure_query), today=TODAY))
+    payload = {"source_region": "ap-northeast-2", "app_vcpu": 1.0, "app_memory_mib": 2048, "app_instances": 1,
+               "candidates": [{"cloud": "gcp", "region": "asia-northeast3"}],
+               "traffic": {"idle_percent": 70.0, "rps": 2.0, "avg_latency_ms": 100.0}}
+    resp = client.post("/finops/estimate", json=payload)
+    assert resp.status_code == 200
+    arb = resp.json()["arbitrage"]
+    assert arb["lag_fenced"] is True and arb["read_weight_target"] == 0.0
+    assert any(r.startswith("미제공: 복제 지연") for r in arb["reasons"])
 
 
 def test_estimate_without_a_gcp_candidate_has_no_arbitrage(monkeypatch, fake_prices):
@@ -272,7 +310,8 @@ def test_estimate_without_a_gcp_candidate_has_no_arbitrage(monkeypatch, fake_pri
         azure=estimate.AzurePrices(fake_azure_query), today=TODAY))
     payload = {"source_region": "ap-northeast-2", "app_vcpu": 1.0, "app_memory_mib": 2048,
                "candidates": [{"cloud": "azure", "region": "koreacentral"}],
-               "traffic": {"idle_percent": 70.0, "rps": 2.0, "avg_latency_ms": 100.0}}
+               "traffic": {"idle_percent": 70.0, "rps": 2.0, "avg_latency_ms": 100.0,
+                           "replication_lag_bytes": MEASURED_LAG_B}}
     resp = client.post("/finops/estimate", json=payload)
     assert resp.status_code == 200
     assert resp.json()["arbitrage"] is None
@@ -284,3 +323,55 @@ def test_egress_skus_do_not_disturb_cloud_run_compute_prices():
     one = GcpPrices(GCP_WITH_EGRESS.__getitem__).app_instance_month(
         estimate.CostRequest(source_region="ap-northeast-2", app_vcpu=1, app_memory_mib=2048), "asia-northeast3")
     assert one == pytest.approx(730 * 3600 * (0.0000216 + 2 * 0.0000024))
+
+
+# -- 복제 지연: 모르면 None 그대로, 기준은 전환 승인 ② 와 같은 값 ------------------------------------------
+
+def test_lag_threshold_matches_cutover_readiness():
+    """차익거래 펜싱 기준과 전환 승인 ② 의 복제 지연 기준이 같아야 화면끼리 판단이 어긋나지 않습니다."""
+    from app.features.finops.schemas import MAX_SAFE_LAG_BYTES, Traffic
+    from app.features.workflows.readiness import MAX_REPLICATION_LAG_BYTES
+
+    assert MAX_SAFE_LAG_BYTES == MAX_REPLICATION_LAG_BYTES
+    assert ArbitrageRequest().max_safe_lag_bytes == MAX_SAFE_LAG_BYTES
+    assert Traffic(idle_percent=0).max_safe_lag_bytes == MAX_SAFE_LAG_BYTES
+
+
+def test_unknown_lag_is_not_treated_as_zero():
+    """지연을 모르면(None, 기본값) 원본에 고정하고, 잰 값 0 은 안전으로 보고 읽기 우회를 계산합니다."""
+    assert ArbitrageRequest().replication_lag_bytes is None
+    unknown = _calc(_prices(), **{**LOW_TRAFFIC, "replication_lag_bytes": None})
+    assert unknown.lag_fenced is True and unknown.read_weight_target == 0.0
+    measured_zero = _calc(_prices(), **LOW_TRAFFIC)
+    assert measured_zero.lag_fenced is False and measured_zero.read_weight_target == 1.0
+    assert not any(r.startswith("미제공: 복제 지연") for r in measured_zero.reasons)
+
+
+def _estimate_with_lag(monkeypatch, lag: int | None) -> dict:
+    real_build = estimate.build_input
+    monkeypatch.setattr(estimate, "build_input", lambda req: real_build(
+        req, aws=AwsPrices(FakePricingClient()), gcp=GcpPrices(GCP_SKUS.__getitem__),
+        azure=estimate.AzurePrices(fake_azure_query), today=TODAY))
+    traffic = {"idle_percent": 70.0, "rps": 2.0, "avg_latency_ms": 100.0}
+    if lag is not None:
+        traffic["replication_lag_bytes"] = lag
+    payload = {"source_region": "ap-northeast-2", "app_vcpu": 1.0, "app_memory_mib": 2048, "app_instances": 1,
+               "candidates": [{"cloud": "gcp", "region": "asia-northeast3"}], "traffic": traffic}
+    resp = client.post("/finops/estimate", json=payload)
+    assert resp.status_code == 200
+    return resp.json()["arbitrage"]
+
+
+def test_estimate_passes_unknown_lag_as_none(monkeypatch, fake_prices):
+    """/estimate 는 traffic 에 지연이 없으면 0 으로 바꾸지 않고 None 으로 넘겨 원본에 고정합니다."""
+    arb = _estimate_with_lag(monkeypatch, None)
+    assert arb["lag_fenced"] is True and arb["read_weight_target"] == 0.0
+    assert arb["recommendation"].startswith("미제공: 복제 지연")
+
+
+@pytest.mark.parametrize(("lag", "fenced"), [(6_760, False), (1024 * 1024 + 1, True)])
+def test_estimate_fences_on_measured_lag(monkeypatch, fake_prices, lag, fenced):
+    """실측 지연(예: 전환 순간 6,760 B)은 1 MiB 기준 아래라 펜싱하지 않고, 기준을 넘으면 펜싱합니다."""
+    arb = _estimate_with_lag(monkeypatch, lag)
+    assert arb["lag_fenced"] is fenced
+    assert not any(r.startswith("미제공: 복제 지연") for r in arb["reasons"])

@@ -23,6 +23,10 @@ SOURCE_CLOUD = "aws"  # /estimate 의 원본은 항상 AWS 입니다
 MAX_APP_VCPU = 64
 MAX_APP_MEMORY_MIB = 512 * 1024
 MAX_APP_INSTANCES = 1000
+
+# 읽기 분산을 막는 복제 지연 기준. 전환 승인 ② 판정(workflows/readiness.py 의 MAX_REPLICATION_LAG_BYTES)과
+# 같은 값을 씁니다. 다른 화면과 판단이 어긋나지 않게 테스트가 두 값이 같은지 확인합니다
+MAX_SAFE_LAG_BYTES = 1024 * 1024
 MAX_DB_VCPU = 128
 MAX_DB_MEMORY_GIB = 4096
 MAX_DB_STORAGE_GB = 64 * 1024
@@ -161,8 +165,9 @@ class Traffic(BaseModel):
     rps: float = Field(default=0, ge=0, le=100_000, allow_inf_nan=False)  # 요청이 있는 시간의 초당 평균 요청 수
     # 요청 하나를 처리하는 평균 시간. RPS 교차점(필요한 Cloud Run 인스턴스 수)에만 씁니다. 모르면 None
     avg_latency_ms: float | None = Field(default=None, gt=0, le=60_000, allow_inf_nan=False)
+    # 실행에서 잰 복제 지연(바이트). 모르면 None 이고, 차익거래는 지연 안전 판단을 하지 않았다고 적습니다 (0 으로 채우지 않음)
     replication_lag_bytes: int | None = Field(default=None, ge=0)
-    max_safe_lag_bytes: int = Field(default=1024, ge=0)
+    max_safe_lag_bytes: int = Field(default=MAX_SAFE_LAG_BYTES, ge=0)
 
 
 class CostRequest(BaseModel):
@@ -219,8 +224,8 @@ class ArbitrageRequest(BaseModel):
     idle_percent: float = Field(default=40.0, ge=0.0, le=95.0, allow_inf_nan=False)
     avg_latency_ms: float = Field(default=150.0, gt=0, le=60_000, allow_inf_nan=False)
     avg_response_kb: float = Field(default=4.0, gt=0, le=10_000, allow_inf_nan=False)
-    replication_lag_bytes: int | None = Field(default=0, ge=0)
-    max_safe_lag_bytes: int = Field(default=1024, ge=0)
+    replication_lag_bytes: int | None = Field(default=None, ge=0)  # 모르면 None. 0 은 "지연 없음"을 잰 값입니다
+    max_safe_lag_bytes: int = Field(default=MAX_SAFE_LAG_BYTES, ge=0)
     read_after_write_fence_sec: float = Field(default=5.0, ge=0.0, le=300.0, allow_inf_nan=False)
     currency: str = Field(default="USD", pattern=r"^(USD|JPY|KRW)$")
     custom_fx_rate: float | None = Field(default=None, gt=0, le=10_000_000, allow_inf_nan=False)
