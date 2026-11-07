@@ -16,7 +16,7 @@ VPN_KEY = "FAKE-VPN-KEY-DO-NOT-LEAK"
 
 
 def sample_outputs() -> dict:
-    return json.loads(FIXTURE.read_text())
+    return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
 def outputs_without(*names: str) -> dict:
