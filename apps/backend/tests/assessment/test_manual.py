@@ -65,6 +65,14 @@ def test_manual_env_secrets_are_dropped():
     assert len(dropped) == 2 and not any("u:p@" in g for g in out.gaps)
 
 
+def test_manual_pgpassword_is_dropped_without_a_gap_but_other_secrets_still_warn():
+    app = {**MANUAL["app"], "env_vars": {"LOG_LEVEL": "INFO", "PGPASSWORD": "sentinel", "API_KEY": "k2"}}
+    out = service.run(_inp(app=app))
+    text = " ".join(out.gaps)
+    assert "PGPASSWORD" not in text and "API_KEY" in text
+    assert "sentinel" not in out.model_dump_json() and "k2" not in out.model_dump_json()
+
+
 def test_unknown_manual_values_are_not_invented():
     out = service.run(_inp(app={"service_name": "svc"}, db={}))
     checks = {c.id: c.result for c in out.plan.checks}

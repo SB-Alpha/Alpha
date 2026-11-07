@@ -10,7 +10,7 @@ AWS 조회와 같은 형식의 조사 결과(DbAssessment · AppAssessment)를 �
 
 from __future__ import annotations
 
-from .app import has_secret_value, looks_secret
+from .app import PROVISIONING_INJECTED_ENV, has_secret_value, looks_secret
 from .schemas import AppAssessment, AppInfo, AssessmentInput, DbAssessment, DbInfo, SourceDb
 
 FARGATE_UNITS_PER_VCPU = 1024  # AppInfo.cpu_units 단위에 맞춤
@@ -25,7 +25,9 @@ def collect(inp: AssessmentInput) -> tuple[DbAssessment, AppAssessment]:
     env_vars: dict[str, str] = {}
     for name, value in m.app.env_vars.items():
         if looks_secret(name) or has_secret_value(value):
-            gaps.append(f"직접 입력한 환경 변수 {name} 가 비밀로 보여 값을 넘기지 않음 (비밀 저장소로 옮겨야 함)")
+            # provisioning 이 채우는 이름(PGPASSWORD 등)은 목적지에서 따로 만들어지므로 알릴 필요가 없습니다 (app.py 와 같은 규칙)
+            if not (looks_secret(name) and name in PROVISIONING_INJECTED_ENV):
+                gaps.append(f"직접 입력한 환경 변수 {name} 가 비밀로 보여 값을 넘기지 않음 (비밀 저장소로 옮겨야 함)")
             continue
         env_vars[name] = value
 

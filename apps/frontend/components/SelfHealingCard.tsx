@@ -72,7 +72,11 @@ export function SelfHealingCard({ run, isBusy, onApplySimulationInput }: Props) 
         <div className="flex flex-wrap items-center gap-2">
           {diagnosis && (
             <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800">
-              {diagnosis.diagnosed_by === "ai" ? "Claude AI 진단" : "규칙 기반 진단"}
+              {diagnosis.diagnosed_by === "reasoning_bank"
+                ? "ReasoningBank 검증됨"
+                : diagnosis.diagnosed_by === "ai"
+                  ? "Claude AI 진단"
+                  : "규칙 기반 진단"}
             </span>
           )}
           <button
@@ -96,6 +100,15 @@ export function SelfHealingCard({ run, isBusy, onApplySimulationInput }: Props) 
 
       {diagnosis && (
         <div className="mt-3 space-y-3 text-sm">
+          {diagnosis.memory_hit && (
+            <p className="rounded border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs text-emerald-900">
+              전에 같은 장애를 진단하고 실제로 해결한 기록이 있어 그 조치를 먼저 보여줍니다
+              {typeof diagnosis.prior_success_rate === "number"
+                ? ` (과거 성공률 ${Math.round(diagnosis.prior_success_rate * 100)}%)`
+                : ""}
+              . 다르게 보이면 [AI 재진단]으로 새로 진단하세요.
+            </p>
+          )}
           <div>
             <span className="font-semibold text-amber-900">근본 원인</span>
             <p className="mt-1 rounded border border-amber-200/50 bg-white/80 p-2.5 font-medium text-ink/90">

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 
-from .app import has_secret_value, looks_secret
+from .app import PROVISIONING_INJECTED_ENV, has_secret_value, looks_secret
 from .schemas import (
     InventoryForPlanning,
     PlanCheck,
@@ -31,10 +31,6 @@ DEFAULT_HEALTH_PATH = "/health/ready"
 DEFAULT_CPU = 1  # vCPU
 DEFAULT_MEMORY = 512  # MiB
 
-# provisioning 이 직접 채우는 환경 변수 (DB 접속은 Terraform 출력, PORT 는 Cloud Run 이 넣음)
-PROVISIONING_INJECTED_ENV = {
-    "PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGSSLMODE", "APP_ENV", "PORT",
-}
 
 # RDS 인스턴스 클래스 → 메모리(GiB). MVP 대상 크기만 둡니다.
 RDS_MEMORY_GIB = {

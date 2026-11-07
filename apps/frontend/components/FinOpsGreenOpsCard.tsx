@@ -77,7 +77,9 @@ function useFinOpsInputs(run: RunStatus) {
   const memoryMb = sizing.memoryMb ?? FINOPS_DEFAULTS.memoryMb;
   const planDbTier = sizing.dbTier;
 
-  const initialProvider: TargetProvider = run.request.target_infra?.provider === "azure" ? "azure" : "gcp";
+  const reqProvider = run.request.target_infra?.provider;
+  const initialProvider: TargetProvider =
+    reqProvider === "azure" ? "azure" : reqProvider === "aws" ? "aws" : "gcp";
   const [targetProvider, setTargetProvider] = useState<TargetProvider>(initialProvider);
   const [rps, setRps] = useState<number>(FINOPS_DEFAULTS.rps);
   const [idlePercent, setIdlePercent] = useState<number>(FINOPS_DEFAULTS.idlePercent);
@@ -236,6 +238,7 @@ function CardHeader({ report, setters }: { report: CostReportInput; setters: Inp
         <div className="inline-flex rounded-lg border border-ink/20 bg-paper p-0.5 text-xs font-mono">
           <ProviderButton label="GCP (Seoul)" isActive={targetProvider === "gcp"} onClick={() => setters.setTargetProvider("gcp")} />
           <ProviderButton label="Azure (Korea)" isActive={targetProvider === "azure"} onClick={() => setters.setTargetProvider("azure")} />
+          <ProviderButton label="AWS (Seoul)" isActive={targetProvider === "aws"} onClick={() => setters.setTargetProvider("aws")} />
         </div>
         <CopyReportButton input={report} />
       </div>
@@ -410,8 +413,8 @@ function FinOpsCardBody({ run }: Props) {
       <CardHeader report={report} setters={setters} />
       <HeroStats metrics={metrics} params={params} />
       <DbBasisRows bases={bases} planDbTier={params.planDbTier} />
-      {params.targetProvider === "azure" && (
-        <p className="mt-2 text-xs text-ink/70">Azure 는 이 브랜치에 배포 어댑터가 없어 공시가 비교만 합니다.</p>
+      {params.targetProvider === "aws" && (
+        <p className="mt-2 text-xs text-ink/70">AWS 목적지는 ECS Fargate + RDS 공시가 기준으로 비교합니다.</p>
       )}
 
       <div className="mt-5 grid gap-4 md:grid-cols-2">

@@ -1,3 +1,5 @@
+import pytest
+
 from app.features.assessment import app as app_part
 from app.features.assessment.schemas import AssessmentInput
 
@@ -148,3 +150,74 @@ def test_two_running_versions_are_not_pinned():
 def test_no_running_task_falls_back_to_tag_lookup():
     res = app_part.collect(_inp(), session())
     assert res.facts.image_digest == DIGEST
+
+
+# -- 비밀 이름 환경 변수: provisioning 이 채우는 이름만 조용히, 나머지는 승인자에게 알림 (#79) ----------------
+
+INJECTED_SECRET_NAMES = ["PGPASSWORD"]
+OTHER_SECRET_NAMES = [
+    "DB_PASSWORD", "DB_PASSWD", "CLIENT_SECRET", "ACCESS_TOKEN", "SIGNING_KEY", "KEY", "PASSPHRASE",
+    "SSH_PRIVATE_KEY", "SERVICE_API_KEY", "AWS_ACCESS_KEY_ID", "GOOGLE_APPLICATION_CREDENTIALS", "API_KEY",
+]
+
+
+def _with_env(name: str, value: str):
+    c = container()
+    c["environment"].append({"name": name, "value": value})
+    return c
+
+
+@pytest.mark.parametrize("name", INJECTED_SECRET_NAMES)
+def test_injected_secret_name_is_dropped_without_a_gap(name):
+    res = app_part.collect(_inp(), session(_with_env(name, "sentinel-value")))
+    assert name not in res.facts.env_vars
+    assert "sentinel-value" not in res.model_dump_json()
+    assert not any(name in g for g in res.gaps)
+
+
+@pytest.mark.parametrize("name", OTHER_SECRET_NAMES)
+def test_other_secret_names_keep_their_warning_and_never_leak_the_value(name):
+    res = app_part.collect(_inp(), session(_with_env(name, "sentinel-value")))
+    assert name not in res.facts.env_vars
+    assert "sentinel-value" not in res.model_dump_json()
+    assert any(name in g and "Secrets Manager" in g for g in res.gaps)
+
+
+def test_credentials_in_a_value_keep_their_warning_even_for_a_plain_name():
+    res = app_part.collect(_inp(), session(_with_env("DATABASE_URL", "postgres://u:pl41n@h/db")))
+    assert "DATABASE_URL" not in res.facts.env_vars
+    assert any("DATABASE_URL" in g for g in res.gaps)
+    assert "pl41n" not in res.model_dump_json()
+
+
+def test_dropping_an_injected_secret_does_not_hide_a_real_failure():
+    res = app_part.collect(
+        _inp(), session(_with_env("PGPASSWORD", "sentinel-value"), ecr={"describe_images": FakeAwsError("AccessDeniedException")})
+    )
+    assert not any("PGPASSWORD" in g for g in res.gaps)
+    assert any("AccessDeniedException" in g for g in res.gaps)
+
+
+def test_secret_refs_are_untouched():
+    c = _with_env("PGPASSWORD", "sentinel-value")
+    res = app_part.collect(_inp(), session(c))
+    assert res.facts.secret_refs == {item["name"]: item["valueFrom"] for item in c["secrets"]}
+
+
+def test_the_plan_tells_the_approver_about_dropped_secrets_but_not_about_pgpassword():
+    """승인자가 보는 계획 단위로 확인: 이 경고가 계획에서 사라지면 안 됩니다."""
+    from app.features.assessment import plan as plan_part
+    from app.features.assessment.schemas import DbInfo, InventoryForPlanning, PlanningInput, TargetSelection
+
+    c = _with_env("PGPASSWORD", "x")
+    c["environment"] += [{"name": "API_KEY", "value": "k"}, {"name": "DB_PASSWORD", "value": "p"}]
+    res = app_part.collect(_inp(), session(c))
+    db = DbInfo(engine="postgres", engine_version="16.4", database_name="app", logical_replication=True,
+                username="alpha", tables=[{"name": "t", "has_primary_key": True}])
+    plan = plan_part.build(PlanningInput(
+        inventory=InventoryForPlanning(app=res.facts, db=db, gaps=res.gaps),
+        target=TargetSelection(region="asia-northeast3"),
+    ))
+    text = " ".join(r.title + " " + r.detail for r in plan.risks)
+    assert "API_KEY" in text and "DB_PASSWORD" in text
+    assert "PGPASSWORD" not in text

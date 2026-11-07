@@ -129,7 +129,11 @@ export interface SelfHealingDiagnosis {
   root_cause: string;
   action_plan: string[];
   suggested_manual_input?: Record<string, unknown> | null;
-  diagnosed_by: "ai" | "rule";
+  diagnosed_by: "ai" | "rule" | "reasoning_bank";
+  /** 과거에 풀린 같은 장애의 기억으로 낸 진단인지 (ReasoningBank, #77) */
+  memory_hit?: boolean;
+  /** 그 기억의 과거 성공률 (0~1). 기억이 아니면 없음 */
+  prior_success_rate?: number | null;
 }
 
 export class ApiError extends Error {
