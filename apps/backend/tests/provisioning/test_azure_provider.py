@@ -93,7 +93,8 @@ def test_azure_config_values():
 
 
 def test_gcp_only_variables_are_not_passed_to_azure():
-    for name in ("db_tier", "db_user", "db_logical_decoding", "db_disk_size_gb", "project_id", "create_vpn_key"):
+    # db_tier 와 db_disk_size_gb 는 이제 Azure 규칙으로 바꿔서 넘긴다 (azure_adapt). GCP 전용 값만 넘기지 않는다.
+    for name in ("db_user", "db_logical_decoding", "project_id", "create_vpn_key"):
         assert name not in AZURE.known_variables
 
 
@@ -178,12 +179,11 @@ def test_translation_does_not_modify_the_callers_dictionary():
 
 
 def test_tfvars_use_azure_names_and_drop_gcp_values():
-    values = build_tfvars(
-        {"service_name": "target-app", "db_tier": "db-g1-small", "db_user": "app", "cpu": 1.0},
-        project_id="sub-1", deploy_app=False, provider="azure",
-    )
+    # GCP 등급 이름은 azure_adapt 가 버린다 (build_tfvars 앞 단계). 여기서는 Azure 가 선언하지 않은 값(db_user)이 걸러지는지 본다.
+    infra, _ = azure_adapt({"service_name": "target-app", "db_tier": "db-g1-small", "db_user": "app", "cpu": 1.0})
+    values = build_tfvars(infra, project_id="sub-1", deploy_app=False, provider="azure")
 
-    assert values == {"service_name": "target-app", "cpu": 1.0, "subscription_id": "sub-1", "deploy_app": False}
+    assert values == {"service_name": "target-app", "cpu": 1.0, "memory": 2048, "subscription_id": "sub-1", "deploy_app": False}
 
 
 def test_azure_provisioning_writes_translated_variables_and_builds_the_target():
@@ -196,6 +196,7 @@ def test_azure_provisioning_writes_translated_variables_and_builds_the_target():
         "db_name": "workitems",
         "cpu": 1.0,
         "memory": 2048,
+        "db_disk_size_gb": 32,
         "subscription_id": "00000000-0000-0000-0000-000000000000",
         "deploy_app": False,
     }

@@ -28,6 +28,15 @@
 - Azure 실제 push는 아직 시험하지 못했습니다(단위 테스트만).
 - 복사 후 digest 가 원본에 지정된 digest 와 다르면 실패합니다(사람이 목적지에 잘못된 이미지를 넣은 경우도 같습니다).
 
+## DB 등급·디스크 변환 (Azure·AWS)
+조사 결과의 `db_tier`는 GCP 등급 이름(`db-g1-small`)이라 Azure·AWS는 받지 못합니다. 그래서 두 목적지의 설정 카드(`azure_adapt`, `aws_adapt`)가 클라우드 중립 값 `db_memory_gib`(원본 DB 메모리)로 등급을 다시 고릅니다.
+
+- 규칙: 원본 메모리 **이상인 가장 작은 등급** (GCP의 `_db_tier`와 같은 규칙). 메모리를 모르면 `db_vcpu`로, 둘 다 모르면 등급을 넘기지 않아 Terraform 기본값(Azure `B_Standard_B1ms`, AWS `db.t4g.small`)을 씁니다. 표의 가장 큰 등급으로도 모자라면 그 등급으로 맞추고 안내합니다.
+- Azure 등급: `B_Standard_B1ms`(2 GiB), `B2s`(4), `B2ms`(8), `GP_Standard_D4ds_v5`(16), `D8ds_v5`(32), `D16ds_v5`(64), `D32ds_v5`(128). AWS 등급: `db.t4g.micro`(1 GiB)~`2xlarge`(32), `db.m6g.4xlarge`(64), `8xlarge`(128). 이름과 크기는 2026-11-08에 `az postgres flexible-server list-skus`와 `aws rds`·`aws ec2 describe-instance-types`로 직접 조회한 값이며, 새 등급을 넣을 때도 같은 명령으로 확인합니다.
+- 디스크: Azure는 허용 크기(32, 64, 128 ... 32768)로 올림, AWS는 최소 20 GB(gp3) 이상으로 맞춥니다. 크기를 모르면 Terraform 기본값입니다.
+- Azure는 최대 연결 수가 서버를 만들 때 등급으로 정해지므로, 구축 단계와 앱 배포 단계에서 같은 등급이 나와야 합니다(같은 입력이면 같은 결과).
+- 한계: 조사 쪽 RDS 클래스 메모리 표(`RDS_MEMORY_GIB`)에 지금 `micro`·`small`만 있어서, 그보다 큰 원본은 `db_memory_gib`를 모르는 값으로 두고 기본 등급을 씁니다. HA, 고가용성, 읽기 복제본은 변환하지 않습니다.
+
 ## 미정 사항 (합의 필요)
 - Terraform 실행 방식 (CLI 호출 등)과 상태 저장 위치
 - 장시간 작업의 상태 보고 방식

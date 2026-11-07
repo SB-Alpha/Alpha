@@ -81,15 +81,96 @@ def _number(value: Any, name: str) -> float:
         raise ProvisioningError(f"{name} 값이 숫자가 아닙니다") from None
 
 
+# DB 등급 변환 (클라우드 중립 값 db_memory_gib · db_vcpu 를 목적지 등급으로)
+# 원본 인스턴스의 메모리(GiB)를 덮는 가장 작은 등급을 고른다. 크기를 모르면 등급을 넘기지 않아 Terraform 기본값을 쓴다.
+# (이름, 메모리 GiB, vCPU), 작은 것부터. 새 등급을 넣을 때는 위 두 CLI 로 이름과 크기를 다시 확인한다.
+AZURE_DB_TIERS: tuple[tuple[str, float, int], ...] = (
+    ("B_Standard_B1ms", 2, 1),
+    ("B_Standard_B2s", 4, 2),
+    ("B_Standard_B2ms", 8, 2),
+    ("GP_Standard_D4ds_v5", 16, 4),
+    ("GP_Standard_D8ds_v5", 32, 8),
+    ("GP_Standard_D16ds_v5", 64, 16),
+    ("GP_Standard_D32ds_v5", 128, 32),
+)
+AWS_DB_CLASSES: tuple[tuple[str, float, int], ...] = (
+    ("db.t4g.micro", 1, 2),
+    ("db.t4g.small", 2, 2),
+    ("db.t4g.medium", 4, 2),
+    ("db.t4g.large", 8, 2),
+    ("db.t4g.xlarge", 16, 4),
+    ("db.t4g.2xlarge", 32, 8),
+    ("db.m6g.4xlarge", 64, 16),
+    ("db.m6g.8xlarge", 128, 32),
+)
+# infra/azure 의 db_disk_size_gb 검증 목록과 같아야 한다 (가드 테스트가 비교한다)
+AZURE_DISK_SIZES_GB = (32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768)
+AWS_MIN_DISK_GB = 20  # gp3 최소 크기
+
+
+def _pick_db_tier(
+    sizes: tuple[tuple[str, float, int], ...], memory_gib: float | None, vcpu: float | None
+) -> tuple[str | None, bool]:
+    """원본 메모리를 덮는 가장 작은 등급과 '가장 큰 등급으로도 모자랐는지'. 메모리를 모르면 vCPU 로, 둘 다 모르면 (None, False)."""
+    if memory_gib is None and vcpu is None:
+        return None, False
+    for name, mem, cpu in sizes:
+        enough = mem >= memory_gib if memory_gib is not None else cpu >= (vcpu or 0)
+        if enough:
+            return name, False
+    return sizes[-1][0], True
+
+
+def _translate_db(
+    infra: dict[str, Any],
+    notes: list[str],
+    *,
+    sizes: tuple[tuple[str, float, int], ...],
+    tier_key: str,
+    pick_disk: Callable[[float, list[str]], int],
+) -> None:
+    """infra 를 직접 고친다: 등급(tier_key)과 디스크 크기를 목적지 규칙으로 바꾼다."""
+    infra.pop("db_tier", None)  # GCP 등급 이름은 어느 경우에도 넘기지 않는다
+    memory = infra.get("db_memory_gib")
+    vcpu = infra.get("db_vcpu")
+    memory = _number(memory, "db_memory_gib") if memory is not None else None
+    vcpu = _number(vcpu, "db_vcpu") if vcpu is not None else None
+    tier, capped = _pick_db_tier(sizes, memory, vcpu)
+    if tier:
+        infra[tier_key] = tier
+        source = f"메모리 {memory:g} GiB" if memory is not None else f"vCPU {vcpu:g}개"
+        if capped:
+            notes.append(f"원본 DB({source})가 가장 큰 등급 {tier} 로도 모자라 그 등급으로 맞췄습니다. 확인이 필요합니다")
+        else:
+            notes.append(f"DB 등급을 원본({source}) 이상인 가장 작은 등급 {tier} 로 정했습니다")
+    disk = infra.get("db_disk_size_gb")
+    if disk is not None:
+        infra["db_disk_size_gb"] = pick_disk(_number(disk, "db_disk_size_gb"), notes)
+
+
+def _azure_disk(wanted_gb: float, notes: list[str]) -> int:
+    for size in AZURE_DISK_SIZES_GB:
+        if size >= wanted_gb:
+            return size
+    notes.append(f"원본 DB 디스크({wanted_gb:g} GB)가 Azure 최대 {AZURE_DISK_SIZES_GB[-1]} GB 를 넘어 그 크기로 맞췄습니다")
+    return AZURE_DISK_SIZES_GB[-1]
+
+
+def _aws_disk(wanted_gb: float, notes: list[str]) -> int:
+    return max(AWS_MIN_DISK_GB, math.ceil(wanted_gb))
+
+
 # 조사 결과의 앱 크기를 Azure 가 받는 조합으로 바꾸는 함수
 # 조사 결과는 보통 cpu 1, memory 512 처럼 나오는데, Azure 는 vCPU 1개에 메모리 2048 이어야 해서 그대로 넘기면 거부됨.
 # 원본이 필요로 하는 만큼을 덮는 가장 작은 조합을 고름. 한도 넘으면 한도 맞추고 알림.
 # db 등급은 현재 넘기지 않음 (known_variables 에 없음). Terraform 은 GCP 등급 이름(db-g1-small 등)을 받지 못함.
 def azure_adapt(target_infra: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
     infra = dict(target_infra)
+    db_notes: list[str] = []
+    _translate_db(infra, db_notes, sizes=AZURE_DB_TIERS, tier_key="db_tier", pick_disk=_azure_disk)
     cpu, memory = infra.get("cpu"), infra.get("memory")
     if cpu is None and memory is None:
-        return infra, []
+        return infra, db_notes
 
     wanted_cpu = _number(cpu, "cpu") if cpu is not None else 0.0
     wanted_memory = _number(memory, "memory") if memory is not None else 0.0
@@ -100,7 +181,7 @@ def azure_adapt(target_infra: Mapping[str, Any]) -> tuple[dict[str, Any], list[s
     new_memory = int(new_cpu * AZURE_MEMORY_PER_VCPU_MIB)
     infra["cpu"], infra["memory"] = new_cpu, new_memory
 
-    notes: list[str] = []
+    notes = db_notes
     if needed > max_cpu:
         notes.append(
             f"원본 앱 크기(cpu {cpu}, memory {memory} MiB)가 Azure 한도를 넘어 cpu {new_cpu}, memory {new_memory} MiB 로 맞췄습니다"
@@ -132,6 +213,8 @@ AZURE = ProviderConfig(
             "secret_refs",
             "db_version",
             "db_name",
+            "db_tier",
+            "db_disk_size_gb",
         }
     ),
     default_region="koreacentral",
@@ -170,6 +253,7 @@ LIVENESS_PATH = "/health/live"
 def aws_adapt(target_infra: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
     infra = dict(target_infra)
     notes: list[str] = []
+    _translate_db(infra, notes, sizes=AWS_DB_CLASSES, tier_key="db_instance_class", pick_disk=_aws_disk)
     if infra.get("health_check_path") == READINESS_PATH:
         infra["health_check_path"] = LIVENESS_PATH
         notes.append(
@@ -229,6 +313,8 @@ AWS = ProviderConfig(
             "secret_refs",
             "db_version",
             "db_name",
+            "db_instance_class",
+            "db_disk_size_gb",
         }
     ),
     default_region="ap-northeast-2",

@@ -88,7 +88,8 @@ def test_aws_config_values():
 
 
 def test_gcp_only_variables_are_not_passed_to_aws():
-    for name in ("db_tier", "db_user", "db_logical_decoding", "db_disk_size_gb", "project_id", "create_vpn_key"):
+    # db_disk_size_gb 와 db_instance_class 는 이제 목적지 규칙으로 바꿔서 넘긴다. GCP 등급 이름(db_tier)만 넘기지 않는다.
+    for name in ("db_tier", "db_user", "db_logical_decoding", "project_id", "create_vpn_key"):
         assert name not in AWS.known_variables
 
 
@@ -219,6 +220,7 @@ def test_aws_provisioning_writes_translated_variables_and_builds_the_target():
         "db_name": "postgres",
         "cpu": 1.0,
         "memory": 2048,
+        "db_disk_size_gb": 20,
         "aws_account_id": ACCOUNT,
         "deploy_app": False,
     }
