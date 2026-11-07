@@ -38,6 +38,10 @@ export function PipelineDrivingScene({
 }: Props) {
   const { camera } = useThree();
   const stageReports = useMemo(() => extractStageReports(run), [run]);
+  const stageStateSignature = useMemo(
+    () => run.stages.map((s) => `${s.stage}:${s.state}`).join("|"),
+    [run.stages],
+  );
 
   const worldRef = useRef<CANNON.World | null>(null);
   const vehicleRef = useRef<CANNON.RaycastVehicle | null>(null);
@@ -230,7 +234,8 @@ export function PipelineDrivingScene({
     // 성공(succeeded)한 단계에는 차량이 치고 지나갈 수 있는 가벼운 Dynamic 블록을 놓고,
     // 실패(failed)나 미승인(waiting_approval/pending) 단계에는 실제 차단 바리케이드(Static)를 세웁니다.
     const dynBlocks: DynamicBlock[] = [];
-    stageReports.forEach((sr, idx) => {
+    const currentStageReports = extractStageReports(run);
+    currentStageReports.forEach((sr, idx) => {
       const z = STAGE_Z_POSITIONS[idx] ?? -4 - idx * 9;
       if (sr.state === "succeeded") {
         for (const x of [-0.45, 0.45]) {
@@ -258,7 +263,9 @@ export function PipelineDrivingScene({
       vehicle.removeFromWorld(world);
       worldRef.current = null;
     };
-  }, [stageReports]);
+    // 2초마다 일어나는 run 폴링 시 물리 월드가 리셋되지 않도록 실제 스테이지 상태 시그니처만 의존합니다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stageStateSignature]);
 
   // 위치 리셋 시그널 처리
   useEffect(() => {

@@ -119,7 +119,7 @@ export function CutoverTimeline({ run }: Props) {
 
   return (
     <section
-      id="cutover-section"
+      id="cutover-timeline-section"
       aria-labelledby="cutover-timeline-heading"
       className="rounded-xl border border-ink/15 bg-white p-5"
     >

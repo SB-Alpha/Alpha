@@ -96,7 +96,7 @@ export function CutoverApprovalPanel({ run, runId, readiness, isBusy, isTrafficU
   };
 
   return (
-    <div id="cutover-section" className="rounded-xl border-2 border-amber-400 bg-white p-5">
+    <div id="cutover-approval-section" className="rounded-xl border-2 border-amber-400 bg-white p-5">
       <h3 className="text-lg font-semibold">{GATE_LABEL.cutover}</h3>
       <p className="mt-1 text-sm text-ink/70">
         {isTrafficUncertain

@@ -145,7 +145,15 @@ export function extractCdcArcData(run: RunStatus): CdcArcData {
 
 export function extractTargetNodeData(run: RunStatus): TargetNodeData {
   const provOut = isRecord(run.outputs.provisioning) ? run.outputs.provisioning : null;
+  const provTarget = isRecord(provOut?.target) ? provOut.target : null;
+  const provNetwork = isRecord(provTarget?.network) ? provTarget.network : null;
+  const provDb = isRecord(provTarget?.db) ? provTarget.db : null;
+  const provApp = isRecord(provTarget?.app) ? provTarget.app : null;
+
   const deployOut = isRecord(run.outputs.app_deploy) ? run.outputs.app_deploy : null;
+  const deployTarget = isRecord(deployOut?.target) ? deployOut.target : null;
+  const deployApp = isRecord(deployTarget?.app) ? deployTarget.app : null;
+
   const planningOut = isRecord(run.outputs.planning) ? run.outputs.planning : null;
   const planObj = planningOut && isRecord(planningOut.plan) ? planningOut.plan : null;
   const targetInfra = planObj && isRecord(planObj.target_infra) ? planObj.target_infra : null;
@@ -157,12 +165,16 @@ export function extractTargetNodeData(run: RunStatus): TargetNodeData {
 
   return {
     providerSummary: targetSummary(run.request),
-    region: strOrNull(run.request.target_region) ?? strOrNull(targetInfra?.region),
-    vpcId: strOrNull(provOut?.vpc_id),
-    dbInstanceId: strOrNull(provOut?.db_instance_id),
-    cloudSqlIp: strOrNull(provOut?.cloud_sql_ip),
-    dbName: strOrNull(provOut?.db_name) ?? strOrNull(targetInfra?.db_name),
-    cloudRunUrl: strOrNull(deployOut?.cloud_run_url),
+    region: strOrNull(run.request.target_region) ?? strOrNull(provTarget?.region) ?? strOrNull(targetInfra?.region),
+    vpcId: strOrNull(provNetwork?.vpc_name) ?? strOrNull(provOut?.vpc_id),
+    dbInstanceId: strOrNull(provDb?.instance) ?? strOrNull(provOut?.db_instance_id),
+    cloudSqlIp: strOrNull(provDb?.private_ip) ?? strOrNull(provOut?.cloud_sql_ip),
+    dbName: strOrNull(provDb?.database) ?? strOrNull(provOut?.db_name) ?? strOrNull(targetInfra?.db_name),
+    cloudRunUrl:
+      strOrNull(deployApp?.url) ??
+      strOrNull(provApp?.url) ??
+      strOrNull(deployOut?.app_url) ??
+      strOrNull(deployOut?.cloud_run_url),
     healthCheck: strOrNull(deployOut?.health_check) ?? strOrNull(targetInfra?.health_check_path),
     cpuMemory: cpu !== null && memory !== null ? `${cpu} vCPU / ${memory} MiB` : null,
     targetRows: rows?.target ?? null,

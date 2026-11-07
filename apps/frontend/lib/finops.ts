@@ -436,9 +436,21 @@ function sliderValues({ min, max, step }: { min: number; max: number; step: numb
 }
 
 function firstSignChange(values: number[], deltaAt: (value: number) => number): [number, number] | null {
-  const signs = values.map((value) => Math.sign(deltaAt(value)));
-  const index = signs.findIndex((sign, i) => i > 0 && sign !== signs[i - 1]);
-  return index === -1 ? null : [values[index - 1], values[index]];
+  let prevVal: number | null = null;
+  let prevSign: number | null = null;
+
+  for (const value of values) {
+    const delta = deltaAt(value);
+    const sign = Math.sign(delta);
+    if (sign === 0) continue;
+
+    if (prevSign !== null && sign !== prevSign && prevVal !== null) {
+      return [prevVal, value];
+    }
+    prevVal = value;
+    prevSign = sign;
+  }
+  return null;
 }
 
 /** 슬라이더 값을 차례로 넣어 증감 방향이 처음 바뀌는 구간을 찾습니다. 등급이 가격표에 없으면 빈 배열입니다. */

@@ -15,7 +15,7 @@ interface Props {
 
 export function StageCutover({ run, activeIdx, onSelectStage }: Props) {
   const serving = servingSide(run);
-  const isTargetServing = serving === "gcp" || run.state === "succeeded";
+  const isTargetServing = serving === "gcp";
 
   const appDeployStage = run.stages.find((s) => s.stage === "app_deploy");
   const isAppDeployed = appDeployStage?.state === "succeeded";

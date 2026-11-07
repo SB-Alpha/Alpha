@@ -295,7 +295,10 @@ export function SourceTargetNodes({
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    onNavigateSection("cutover-section");
+                    const targetId = document.getElementById("cutover-approval-section")
+                      ? "cutover-approval-section"
+                      : "cutover-timeline-section";
+                    onNavigateSection(targetId);
                   }}
                   className="pointer-events-auto mt-1.5 w-full rounded border border-ink/20 bg-paper py-0.5 text-center font-mono text-[10px] font-medium text-ink hover:border-ink active:bg-ink/5"
                 >
