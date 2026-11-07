@@ -44,6 +44,7 @@ from app.core.secrets import delete_secret, has_secret, put_secret, resolve
 from . import cloud_lookup, preflight, redact, vpn
 from .client import AgentError, AgentSettings, CdcAgentClient
 from .cloud_guides import credential_next_steps
+from .execution_model import ExecutionModel, ExecutionModelError, build_execution_model
 from .input_secrets import INPUT_SECRETS
 from .progress_log import ProgressLog
 from .run_input import InjectedRun, InvalidInput, inject, parse, saved_clouds
@@ -90,7 +91,7 @@ BUSY_MESSAGE = "run {run_id} is already running or being cleaned up"
 # 이 run 밖에 저장된 입력의 이름표. 값은 담지 않는다.
 OTHER_REFS = "other-refs"
 
-NEXT_STEP_NOT_BUILT = "DB 주소·네트워크 조회까지 완료했습니다. 다음 단계(실행 모델 변환·VPN 연결)는 아직 연결되지 않았습니다."
+NEXT_STEP_NOT_BUILT = "DB 주소·네트워크 조회까지 완료하고 실행 모델로 변환했습니다. 다음 단계(시작 전 검사·VPN 연결)는 아직 연결되지 않았습니다."
 
 # [이전 입력 앞단] run_input.py로 대체했다. 조회 단계 연결이 끝나면 지운다.
 # Discover = Callable[[SourceLookup], Any]
@@ -130,6 +131,7 @@ class _Progress:
     job_registered: bool = False
     target_network: str | None = None
     lookup: cloud_lookup.FoundRoute | None = None
+    execution: ExecutionModel | None = None
 
 
 _active: set[str] = set()
@@ -146,7 +148,7 @@ _active_lock = threading.Lock()
 
 
 def run(inp: Any, *, agent: CdcAgentClient | None = None, ctx: Reporter | None = None) -> str:
-    """입력 주입 후 DB·네트워크를 백그라운드에서 조회한다. 이후 미구현 단계는 failed로 표시한다."""
+    """입력 주입 후 DB·네트워크 조회와 실행 모델 변환을 진행한다. 미연결 후속 단계는 failed로 표시한다."""
     parsed = parse(inp)
     if parsed.run_id:
         _refuse_ended_run(parsed.run_id, agent)
@@ -172,6 +174,7 @@ def run(inp: Any, *, agent: CdcAgentClient | None = None, ctx: Reporter | None =
 
 def _lookup_in_background(injected: InjectedRun, ctx: Reporter | None) -> None:
     run_id = injected.run_id
+    converting = False
     try:
         _set_progress(run_id, message="DB 주소·네트워크 조회 중")
         if ctx is not None:
@@ -182,12 +185,25 @@ def _lookup_in_background(injected: InjectedRun, ctx: Reporter | None) -> None:
             if not stopped:
                 _runs[run_id].lookup = found
                 _runs[run_id].target_network = cloud_lookup.network_exposure(found.target.db)
+        if not stopped:
+            converting = True
+            _set_progress(run_id, message="실행 모델로 변환 중")
+            execution = build_execution_model(injected, found)
+            with _active_lock:
+                stopped = run_id in _stop_requested
+                if not stopped:
+                    _runs[run_id].execution = execution
         state = "aborted" if stopped else "failed"
-        message = "DB 조회 후 중단했습니다." if stopped else NEXT_STEP_NOT_BUILT
+        message = "작업 등록 전에 중단했습니다." if stopped else NEXT_STEP_NOT_BUILT
         _set_progress(run_id, state=state, message=message)
         _end(ctx, state, 0, message)
     except Exception as exc:  # noqa: BLE001 - API 원문은 상태나 로그에 쓰지 않는다
-        message = str(exc) if isinstance(exc, cloud_lookup.LookupFailed) else "DB 조회를 완료하지 못했습니다. 권한과 클라우드 API 상태를 확인하세요."
+        if isinstance(exc, (cloud_lookup.LookupFailed, ExecutionModelError)):
+            message = str(exc)
+        elif converting:
+            message = "실행 모델로 변환하지 못했습니다. 입력과 조회 결과를 확인하세요."
+        else:
+            message = "DB 조회를 완료하지 못했습니다. 권한과 클라우드 API 상태를 확인하세요."
         _set_progress(run_id, state="failed", message=message)
         _end(ctx, "failed", 0, message)
     finally:

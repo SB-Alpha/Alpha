@@ -9,6 +9,7 @@ import pytest
 from app.core.secrets import has_secret
 from app.features.db_migration import cloud_lookup, db_workflow
 from app.features.db_migration.client import AgentError
+from app.features.db_migration.start_checks import StartCheckInput
 
 from .test_cloud_lookup import REGIONS, SECRET, request_input, world  # noqa: F401 - 공통 API fixture
 
@@ -50,9 +51,17 @@ def test_run_reaches_lookup_on_all_six_routes(world, source, target):
     wait_until(lambda: run_id not in db_workflow._active)
     found = db_workflow._runs[run_id].lookup
     assert (found.source.cloud, found.target.cloud) == (source, target)
+    execution = db_workflow._runs[run_id].execution
+    assert execution.run_id == run_id
+    assert (execution.source.cloud, execution.target.cloud) == (source, target)
+    assert execution.source.db.host == found.source.db.host
+    assert execution.target.db.host == found.target.db.host
+    assert execution.source.credentials_ref.cloud == f"secret://cloud/{source}"
+    assert execution.target.credentials_ref.cloud == f"secret://cloud/{target}"
+    assert StartCheckInput.from_route(execution).source_database is None
     status = db_workflow.status(run_id, agent=agent)
     assert status.state == "failed" and status.message == db_workflow.NEXT_STEP_NOT_BUILT
-    assert "조회까지 완료" in status.message and "실행 모델" in status.message
+    assert "실행 모델로 변환했습니다" in status.message and "시작 전 검사" in status.message
     assert status.metrics["target_db_network"] == "PRIVATE"
     assert not status.ready_for_cutover
     assert SECRET not in status.model_dump_json()
@@ -66,6 +75,7 @@ def test_api_permission_failure_is_recorded_with_cleanup_remaining(world):
     status = db_workflow.status(run_id, agent=agent)
     assert status.state == "failed" and "target (gcp)" in status.message and "403" in status.message
     assert db_workflow._runs[run_id].lookup is None
+    assert db_workflow._runs[run_id].execution is None
     assert status.cleanup_required and has_secret(f"secret://{run_id}/source-db-admin")
     assert SECRET not in status.model_dump_json()
 
@@ -116,6 +126,7 @@ def test_stop_during_lookup_prevents_handoff(world, monkeypatch):
     assert not stopper.is_alive() and results
     assert db_workflow._runs[run_id].state == "aborted"
     assert db_workflow._runs[run_id].lookup is None
+    assert db_workflow._runs[run_id].execution is None
     assert not has_secret(f"secret://{run_id}/source-db-admin")
 
 
@@ -139,3 +150,63 @@ def test_thread_start_failure_releases_reservation(world, monkeypatch):
         db_workflow.run(request_input(), agent=NoJobAgent())
     assert not db_workflow._active
     assert db_workflow._runs["mig-lookup"].state == "failed"
+
+
+def test_conversion_rejects_mismatched_lookup_without_partial_execution(world, monkeypatch):
+    from dataclasses import replace
+    find_route = cloud_lookup.find_route
+
+    def mismatched(inp):
+        found = find_route(inp)
+        return replace(found, target=replace(found.target, region="another-region"))
+
+    monkeypatch.setattr(cloud_lookup, "find_route", mismatched)
+    agent = NoJobAgent()
+    run_id = db_workflow.run(request_input(), agent=agent)
+    wait_until(lambda: not db_workflow._active)
+    status = db_workflow.status(run_id, agent=agent)
+    assert status.state == "failed" and "target: lookup does not match" in status.message
+    assert db_workflow._runs[run_id].lookup is not None
+    assert db_workflow._runs[run_id].execution is None
+    assert status.cleanup_required
+
+
+def test_unexpected_conversion_error_is_sanitized(world, monkeypatch, caplog):
+    def broken(*args):
+        raise ValueError(SECRET)
+
+    monkeypatch.setattr(db_workflow, "build_execution_model", broken)
+    agent = NoJobAgent()
+    run_id = db_workflow.run(request_input(), agent=agent)
+    wait_until(lambda: not db_workflow._active)
+    status = db_workflow.status(run_id, agent=agent)
+    assert status.state == "failed" and "실행 모델로 변환하지 못했습니다" in status.message
+    assert db_workflow._runs[run_id].execution is None
+    assert SECRET not in status.model_dump_json() + caplog.text
+
+
+def test_stop_during_conversion_prevents_execution_handoff(world, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    build = db_workflow.build_execution_model
+
+    def blocked(*args):
+        entered.set()
+        assert release.wait(5)
+        return build(*args)
+
+    monkeypatch.setattr(db_workflow, "build_execution_model", blocked)
+    agent = NoJobAgent()
+    run_id = db_workflow.run(request_input(), agent=agent)
+    assert entered.wait(2)
+    results = []
+    stopper = threading.Thread(target=lambda: results.append(db_workflow.stop(run_id, agent=agent)))
+    try:
+        stopper.start()
+        wait_until(lambda: run_id in db_workflow._stop_requested)
+    finally:
+        release.set()
+        stopper.join(5)
+    assert not stopper.is_alive() and results
+    assert db_workflow._runs[run_id].state == "aborted"
+    assert db_workflow._runs[run_id].execution is None
+    assert not has_secret(f"secret://{run_id}/source-db-admin")

@@ -66,7 +66,9 @@ def _run_and_wait(*args, **kwargs):
 def _found_route(injected):
     def endpoint(side):
         return SimpleNamespace(cloud=side.cloud, region=side.region,
-                               db=SimpleNamespace(host="10.20.0.5", port=5432, publicly_accessible=False),
+                               scope_id="scope", network={},
+                               db=SimpleNamespace(instance="db", host="10.20.0.5", port=5432, version=None,
+                                                  publicly_accessible=False, logical_replication=None),
                                cidrs=("10.20.0.0/24",))
     return SimpleNamespace(source=endpoint(injected.source), target=endpoint(injected.target))
 
