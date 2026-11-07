@@ -414,7 +414,7 @@ function FinOpsCardBody({ run }: Props) {
       <HeroStats metrics={metrics} params={params} />
       <DbBasisRows bases={bases} planDbTier={params.planDbTier} />
       {params.targetProvider === "aws" && (
-        <p className="mt-2 text-xs text-ink/70">AWS 목적지는 백엔드 어댑터 연결 전이라 공시가 비교만 합니다.</p>
+        <p className="mt-2 text-xs text-ink/70">AWS 목적지는 ECS Fargate + RDS 공시가 기준으로 비교합니다.</p>
       )}
 
       <div className="mt-5 grid gap-4 md:grid-cols-2">

@@ -169,7 +169,13 @@ export default function HomePage() {
               <select
                 id="target_preset"
                 value={form.target_preset}
-                onChange={(e) => setForm({ ...form, target_preset: e.target.value as TargetInfraType })}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    target_preset: e.target.value as TargetInfraType,
+                    target_project_id: "",
+                  })
+                }
                 className={`${INPUT} mt-1`}
               >
                 {TARGET_ADAPTERS.map((option) => (
@@ -189,7 +195,13 @@ export default function HomePage() {
                 },
                 false,
               )}
-              <p className="mt-1 min-h-[1.25rem] text-xs text-ink/50">{adapter.projectIdHint}</p>
+              {form.target_preset === "aws" && form.target_project_id.trim().length > 0 && !/^\d{12}$/.test(form.target_project_id.trim()) ? (
+                <p className="mt-1 min-h-[1.25rem] text-xs font-medium text-amber-600">
+                  ⚠️ AWS 계정 ID는 12자리 숫자여야 합니다 (현재 {form.target_project_id.trim().length}자리).
+                </p>
+              ) : (
+                <p className="mt-1 min-h-[1.25rem] text-xs text-ink/50">{adapter.projectIdHint}</p>
+              )}
             </div>
           </div>
 

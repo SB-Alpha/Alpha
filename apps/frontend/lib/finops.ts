@@ -279,14 +279,12 @@ function resolveTargetDb({ targetProvider, dbClass, dbBasis, planDbTier }: FinOp
       ? (planDbTier ?? TERRAFORM_DEFAULT_DB_TIER)
       : targetProvider === "azure"
         ? AZURE_DEFAULT_DB_SKU
-        : (planDbTier ?? AWS_DEFAULT_DB_CLASS);
+        : AWS_DEFAULT_DB_CLASS;
   const deployedOrigin: TierOrigin =
     targetProvider === "azure"
       ? "Azure 기본값"
       : targetProvider === "aws"
-        ? planDbTier !== null
-          ? "계획값"
-          : "AWS 기본값"
+        ? "AWS 기본값"
         : planDbTier !== null
           ? "계획값"
           : "Terraform 기본값";
