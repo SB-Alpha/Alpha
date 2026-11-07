@@ -7,7 +7,7 @@ import { StateBadge } from "@/components/StateBadge";
 import { TARGET_ADAPTERS, adapterFor, GcpTargetAdapter, type TargetInfraType } from "@/lib/adapters/types";
 import { STAGE_LABEL, formatTime } from "@/lib/labels";
 import { BUTTON_PRIMARY, INPUT } from "@/lib/ui";
-import { runTitle, workflows, type MigrationRequest, type RunStatus } from "@/lib/workflows";
+import { runTitle, workflows, type MigrationRequest, type RunStatus, type SourceKind } from "@/lib/workflows";
 
 const DEFAULT_AWS_REGION = "ap-northeast-2";
 
@@ -23,9 +23,16 @@ type TextField =
   | "db_credentials_ref"
   | "target_region"
   | "target_project_id"
-  | "github_repo_url";
+  | "github_repo_url"
+  | "src_project_id"
+  | "src_subscription_id"
+  | "src_resource_group"
+  | "src_region"
+  | "src_app_name"
+  | "src_db_instance"
+  | "src_credentials_ref";
 
-type FormState = Record<TextField, string> & { target_preset: TargetInfraType };
+type FormState = Record<TextField, string> & { target_preset: TargetInfraType; source_kind: SourceKind };
 
 type FieldSpec = { key: TextField; label: string; placeholder: string };
 
@@ -42,6 +49,14 @@ const INITIAL: FormState = {
   db_credentials_ref: "",
   target_region: "",
   github_repo_url: "",
+  source_kind: "aws",
+  src_project_id: "",
+  src_subscription_id: "",
+  src_resource_group: "",
+  src_region: "",
+  src_app_name: "",
+  src_db_instance: "",
+  src_credentials_ref: "",
 };
 
 const SERVICE_FIELD: FieldSpec = { key: "service_name", label: "서비스 이름", placeholder: "target-app" };
@@ -51,6 +66,37 @@ const AWS_CREDENTIALS_FIELD: FieldSpec = {
   placeholder: "secret://aws/default",
 };
 const DB_ADMIN_FIELD: FieldSpec = { key: "db_admin_ref", label: "원본 DB 관리자 참조", placeholder: "secret://db/admin" };
+
+const SOURCE_OPTIONS: { kind: SourceKind; label: string }[] = [
+  { kind: "aws", label: "AWS (ECS Fargate · RDS)" },
+  { kind: "gcp", label: "Google Cloud (Cloud Run · Cloud SQL)" },
+  { kind: "azure", label: "Azure (Container Apps · PostgreSQL Flexible)" },
+];
+
+// 원본이 GCP·Azure 일 때 입력. 서비스 이름과 별도로 클라우드 쪽 이름(앱·DB 인스턴스)을 받습니다.
+const GCP_SOURCE_FIELDS: FieldSpec[] = [
+  { key: "src_project_id", label: "원본 GCP 프로젝트 ID", placeholder: "my-project-123" },
+  { key: "src_region", label: "원본 리전", placeholder: "asia-northeast3" },
+  { key: "src_app_name", label: "Cloud Run 서비스 (비우면 서비스 이름)", placeholder: "target-app" },
+  { key: "src_db_instance", label: "Cloud SQL 인스턴스", placeholder: "target-db" },
+];
+const AZURE_SOURCE_FIELDS: FieldSpec[] = [
+  { key: "src_subscription_id", label: "원본 구독 ID", placeholder: "00000000-0000-0000-0000-000000000000" },
+  { key: "src_resource_group", label: "리소스 그룹", placeholder: "my-rg" },
+  { key: "src_region", label: "원본 위치", placeholder: "koreacentral" },
+  { key: "src_app_name", label: "Container App (비우면 서비스 이름)", placeholder: "target-app" },
+  { key: "src_db_instance", label: "PostgreSQL Flexible Server", placeholder: "target-db" },
+];
+const GCP_CREDENTIALS_FIELD: FieldSpec = {
+  key: "src_credentials_ref",
+  label: "원본 서비스 계정 키 참조 (비우면 서버 로그인)",
+  placeholder: "secret://gcp/source",
+};
+const AZURE_CREDENTIALS_FIELD: FieldSpec = {
+  key: "src_credentials_ref",
+  label: "원본 서비스 주체 참조",
+  placeholder: "secret://azure/source",
+};
 
 const ADVANCED_FIELDS: FieldSpec[] = [
   { key: "aws_region", label: "원본 AWS 리전", placeholder: DEFAULT_AWS_REGION },
@@ -67,19 +113,38 @@ function toRequest(form: FormState): MigrationRequest {
   const adapter = adapterFor(form.target_preset);
   const serviceName = form.service_name.trim();
   const targetRegion = form.target_region.trim() || adapter.defaultRegion;
-  return {
+  const common = {
     service_name: serviceName,
     github_repo_url: optional(form.github_repo_url),
     aws_region: form.aws_region.trim() || DEFAULT_AWS_REGION,
+    db_admin_ref: optional(form.db_admin_ref),
+    target_region: targetRegion,
+    target_infra: adapter.toConfig(targetRegion, optional(form.target_project_id)),
+  };
+  if (form.source_kind !== "aws") {
+    // 원본이 GCP·Azure: AWS 조회용 값은 보내지 않고 cloud_source 로 원본 위치를 보냅니다.
+    return {
+      ...common,
+      source_kind: form.source_kind,
+      cloud_source: {
+        region: form.src_region.trim(),
+        app_name: optional(form.src_app_name) ?? serviceName,
+        db_instance: form.src_db_instance.trim(),
+        credentials_ref: optional(form.src_credentials_ref),
+        project_id: form.source_kind === "gcp" ? optional(form.src_project_id) : null,
+        subscription_id: form.source_kind === "azure" ? optional(form.src_subscription_id) : null,
+        resource_group: form.source_kind === "azure" ? optional(form.src_resource_group) : null,
+      },
+    };
+  }
+  return {
+    ...common,
     aws_role_ref: optional(form.aws_role_ref),
     aws_credentials_ref: optional(form.aws_credentials_ref),
     ecs_service: optional(form.ecs_service) ?? serviceName,
     // 비우면 assessment 가 계정의 RDS 가 하나뿐일 때 고릅니다. 여러 개면 지정하라고 안내합니다.
     rds_instance_id: optional(form.rds_instance_id),
     db_credentials_ref: optional(form.db_credentials_ref),
-    db_admin_ref: optional(form.db_admin_ref),
-    target_region: targetRegion,
-    target_infra: adapter.toConfig(targetRegion, optional(form.target_project_id)),
   };
 }
 
@@ -92,6 +157,10 @@ export default function HomePage() {
 
   const adapter = adapterFor(form.target_preset);
   const ecsPreview = form.ecs_service.trim() || form.service_name.trim();
+  const isAwsSource = form.source_kind === "aws";
+  const sourceLabel = form.source_kind === "gcp" ? "Google Cloud" : "Azure";
+  const credentialsRefLooksWrong =
+    form.src_credentials_ref.trim().length > 0 && !form.src_credentials_ref.trim().startsWith("secret://");
 
   useEffect(() => {
     workflows
@@ -143,7 +212,26 @@ export default function HomePage() {
 
         <form onSubmit={handleSubmit} className="mt-6 space-y-5 rounded-xl border border-ink/15 bg-white p-5">
           <div>
+            <label htmlFor="source_kind" className="text-xs font-semibold text-ink/60">
+              원본 클라우드
+            </label>
+            <select
+              id="source_kind"
+              value={form.source_kind}
+              onChange={(e) => setForm({ ...form, source_kind: e.target.value as SourceKind, src_credentials_ref: "" })}
+              className={`${INPUT} mt-1`}
+            >
+              {SOURCE_OPTIONS.map((option) => (
+                <option key={option.kind} value={option.kind}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
             {field(SERVICE_FIELD, true)}
+            {isAwsSource ? (
             <p className="mt-1 text-xs text-ink/50">
               {ecsPreview ? (
                 <>
@@ -155,12 +243,39 @@ export default function HomePage() {
               RDS 는 {form.rds_instance_id.trim() ? <span className="font-mono">{form.rds_instance_id.trim()}</span> : "계정에 하나뿐이면 자동으로 고릅니다"}
               {form.rds_instance_id.trim() ? " 를 씁니다." : "."}
             </p>
+            ) : (
+              <p className="mt-1 text-xs text-ink/50">
+                {sourceLabel} 의 앱과 DB 를 클라우드 API 로 읽기만 합니다. 아래에 원본 위치를 적어 주세요.
+              </p>
+            )}
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            {field(AWS_CREDENTIALS_FIELD, true)}
-            {field(DB_ADMIN_FIELD, form.db_credentials_ref.trim() === "")}
-          </div>
+          {isAwsSource ? (
+            <div className="grid gap-4 sm:grid-cols-2">
+              {field(AWS_CREDENTIALS_FIELD, true)}
+              {field(DB_ADMIN_FIELD, form.db_credentials_ref.trim() === "")}
+            </div>
+          ) : (
+            <>
+              <div className="grid gap-4 sm:grid-cols-2">
+                {(form.source_kind === "gcp" ? GCP_SOURCE_FIELDS : AZURE_SOURCE_FIELDS).map((f) =>
+                  field(f, f.key !== "src_app_name"),
+                )}
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  {field(
+                    form.source_kind === "gcp" ? GCP_CREDENTIALS_FIELD : AZURE_CREDENTIALS_FIELD,
+                    form.source_kind === "azure",
+                  )}
+                  {credentialsRefLooksWrong && (
+                    <p className="mt-1 text-xs font-medium text-amber-600">⚠️ secret://… 형식의 참조만 받습니다.</p>
+                  )}
+                </div>
+                {field(DB_ADMIN_FIELD, true)}
+              </div>
+            </>
+          )}
 
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
@@ -206,40 +321,12 @@ export default function HomePage() {
             </div>
           </div>
 
-          <div>
-            <label htmlFor="target_project_id" className="text-xs font-semibold text-ink/60">
-              {form.target_preset === "azure"
-                ? "목적지 구독 ID (선택)"
-                : form.target_preset === "aws"
-                ? "목적지 계정 ID (선택)"
-                : "목적지 프로젝트 ID (선택)"}
-            </label>
-            <input
-              id="target_project_id"
-              value={form.target_project_id}
-              onChange={(e) => setForm({ ...form, target_project_id: e.target.value })}
-              placeholder={
-                form.target_preset === "azure"
-                  ? "00000000-0000-0000-0000-000000000000"
-                  : form.target_preset === "aws"
-                  ? "12자리 숫자 (예: 123456789012)"
-                  : "alpha-target-513617"
-              }
-              className={`${INPUT} mt-1 font-mono text-xs`}
-            />
-            <p className="mt-1 min-h-[1.25rem] text-xs text-ink/50">
-              {form.target_preset === "aws"
-                ? "비워둘 시 백엔드 환경변수를 사용하며, 값과 환경변수가 모두 없으면 시작 전 오류('AWS 계정 ID가 없습니다')로 중단됩니다."
-                : "비워둘 시 백엔드 기본 환경변수를 사용합니다."}
-            </p>
-          </div>
-
           <p className="text-xs text-ink/50">비밀번호·키 원문은 넣지 않습니다. Secret 경로 같은 참조만 넣으세요.</p>
 
           <details className="rounded-lg border border-ink/10 bg-paper/50 px-4 py-3">
             <summary className="cursor-pointer text-sm font-medium text-ink/70 hover:text-ink">고급 클라우드 설정</summary>
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
-              {ADVANCED_FIELDS.map((f) => field(f, false))}
+              {ADVANCED_FIELDS.filter((f) => isAwsSource || f.key === "github_repo_url").map((f) => field(f, false))}
               {field({ key: "target_region", label: `목적지 ${adapter.cloudName} 리전`, placeholder: adapter.defaultRegion }, false)}
             </div>
           </details>

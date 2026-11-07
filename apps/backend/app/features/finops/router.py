@@ -54,6 +54,8 @@ async def make_estimate(req: CostRequest) -> FinopsEstimate:
             read_ratio=0.8,
             idle_percent=req.traffic.idle_percent,
             avg_latency_ms=req.traffic.avg_latency_ms or 150.0,
+            replication_lag_bytes=req.traffic.replication_lag_bytes,  # 모르면 None 그대로 (0 으로 바꾸면 "지연 0, 안전"이 됩니다)
+            max_safe_lag_bytes=req.traffic.max_safe_lag_bytes,
         )
         arb_result = await run_in_threadpool(_arbitrage, arb_req)
 

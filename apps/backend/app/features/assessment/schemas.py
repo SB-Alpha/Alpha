@@ -12,9 +12,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 
 # ---------------------------------------------------------------------------
 # 입력
@@ -225,22 +226,62 @@ class ManualSource(BaseModel):
     db: ManualDb = Field(default_factory=ManualDb)
 
 
+class CloudSource(BaseModel):
+    """source_kind="gcp" / "azure" 일 때 원본 위치. 비밀은 이름표만 받습니다.
+
+    - GCP: project_id · region · app_name(Cloud Run 서비스) · db_instance(Cloud SQL 인스턴스).
+      credentials_ref 는 서비스 계정 키 JSON 이름표, 비우면 서버의 ADC 로그인을 씁니다.
+    - Azure: subscription_id · resource_group · app_name(Container App) · db_instance(Flexible Server).
+      credentials_ref 는 {tenant_id, client_id, client_secret} 이름표 (필수).
+    """
+
+    region: str  # GCP 리전 / Azure 위치. 예: "asia-northeast3", "koreacentral"
+    app_name: str
+    db_instance: str
+    credentials_ref: str | None = None
+    project_id: str | None = None  # GCP
+    subscription_id: str | None = None  # Azure
+    resource_group: str | None = None  # Azure
+
+    @field_validator("region", "app_name", "db_instance", "project_id", "subscription_id", "resource_group")
+    @classmethod
+    def _url_safe_name(cls, value: str | None) -> str | None:
+        """클라우드 API 주소 경로에 그대로 들어가는 값이라 /·?·#·% 와 공백, '.'·'..' 은 받지 않습니다."""
+        if value is None:
+            return value
+        if not value or value in (".", "..") or re.search(r"[/?#\%\s]", value):
+            raise ValueError("이름에는 / ? # % 공백을 쓸 수 없고 비어 있거나 '.'·'..' 일 수 없습니다")
+        return value
+
+    @field_validator("credentials_ref")
+    @classmethod
+    def _ref_shape(cls, value: str | None) -> str | None:
+        """비우면 GCP 는 서버 로그인(ADC)을 씁니다. 값이 있으면 secret://… 이름표여야 하고, 아니면 거부합니다."""
+        if value is None or value == "":
+            return None
+        if not value.startswith("secret://"):
+            raise ValueError("credentials_ref 는 secret://… 이름표여야 합니다 (비우면 GCP 는 서버 로그인을 씁니다)")
+        return value
+
+
 class AssessmentInput(BaseModel):
     """workflows → assessment. 비밀은 원문이 아니라 이름표(secret://...)만 받습니다.
 
     source_kind 로 원본을 읽는 방법을 고릅니다. 어느 쪽이든 결과(AssessmentOutput)는 같은 형식입니다.
     - "aws"(기본): AWS 계정을 조회합니다. aws_credentials_ref · aws_region 이 필요합니다.
     - "manual": 사람이 입력한 manual 값으로 만듭니다. 원본에서 확인한 값이 아니라 gaps 에 남깁니다.
+    - "gcp" / "azure": cloud_source 위치의 앱·DB 를 클라우드 API 로 조회합니다 (cloud_source.py).
     """
 
     run_id: str | None = None
-    source_kind: Literal["aws", "manual"] = "aws"
+    source_kind: Literal["aws", "manual", "gcp", "azure"] = "aws"
     github_repo_url: str | None = None
     aws_credentials_ref: str | None = None  # 원본 AWS 키 이름표. source_kind="aws" 면 필수
     db_admin_ref: str | None = None  # 원본 DB 관리자 계정 이름표 (db.py 가 PG 카탈로그 조회에 씀)
     aws_region: str | None = None  # 원본 AWS 리전. 예: "ap-northeast-2". source_kind="aws" 면 필수
     target_region: str  # 목적지 리전. 예: "asia-northeast3"
     manual: ManualSource | None = None  # source_kind="manual" 이면 필수
+    cloud_source: CloudSource | None = None  # source_kind="gcp"·"azure" 면 필수
     # 원본 계정에 후보가 여러 개일 때만 지정. 비우면 하나뿐일 때 자동으로 고릅니다.
     ecs_cluster: str | None = None
     ecs_service: str | None = None
@@ -252,8 +293,18 @@ class AssessmentInput(BaseModel):
             missing = [n for n in ("aws_credentials_ref", "aws_region") if not getattr(self, n)]
             if missing:
                 raise ValueError(f"source_kind=aws 에는 {', '.join(missing)} 가 필요합니다")
-        elif self.manual is None:
-            raise ValueError("source_kind=manual 에는 manual 이 필요합니다")
+        elif self.source_kind == "manual":
+            if self.manual is None:
+                raise ValueError("source_kind=manual 에는 manual 이 필요합니다")
+        else:
+            src = self.cloud_source
+            if src is None:
+                raise ValueError(f"source_kind={self.source_kind} 에는 cloud_source 가 필요합니다")
+            need = ("project_id",) if self.source_kind == "gcp" else ("subscription_id", "resource_group",
+                                                                     "credentials_ref")
+            missing = [n for n in need if not getattr(src, n)]
+            if missing:
+                raise ValueError(f"source_kind={self.source_kind} 의 cloud_source 에 {', '.join(missing)} 가 필요합니다")
         return self
 
 

@@ -79,6 +79,15 @@ async function control(request, url, gate, env) {
     return respond(await gate.setArbitrage(body));
   }
 
+  // 보안 침해 노드 격리 제어 명령: GET 조회, POST 설정
+  if (command === "quarantine") {
+    if (request.method === "GET") return respond(await gate.getQuarantine());
+    if (request.method !== "POST") return error(405, "method not allowed");
+    const body = await readJson(request);
+    if (!body) return error(400, "invalid json");
+    return respond(await gate.setQuarantine(body));
+  }
+
   if (!["hold", "switch", "release", "reset"].includes(command)) return error(404, "not found");
   if (request.method !== "POST") return error(405, "method not allowed");
   if (command === "reset") return respond(await gate.reset());
@@ -123,10 +132,22 @@ export default {
       request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ||
       "default";
     let isFailure = true; // 원본 응답을 받기 전에 끝나면 실패로 센다
-    const { origin, ticket, target, viaArbitrage } = await gate.enter({ isWrite, lagBytes, clientIp });
+    const { origin, ticket, target, viaArbitrage, viaQuarantine, isBlocked, blockReason } = await gate.enter({ isWrite, lagBytes, clientIp });
+
+    if (isBlocked) {
+      return error(503, `request blocked: primary node is under security quarantine (${blockReason || "write_blocked"})`);
+    }
+
     try {
       // TARGET 이면 제어 명령으로 정한 주소(target)를 먼저 쓰고, 없으면 설정값 UPSTREAM_TARGET 을 쓴다
-      const base = origin === "TARGET" ? target || env.UPSTREAM_TARGET : env.UPSTREAM_SOURCE;
+      let base = origin === "TARGET" ? target || env.UPSTREAM_TARGET : env.UPSTREAM_SOURCE;
+
+      // [Juho 리뷰 반영]: 격리 중인데 TARGET 주소가 미설정된 경우 원본(SOURCE)으로 폴백하여
+      // 침해된 인스턴스에서 응답하고 가짜 X-Quarantine: true 헤더를 달지 않고,
+      // 정직하게 503 Service Unavailable 로 요청을 거절합니다.
+      if (!base && viaQuarantine) {
+        return error(503, "quarantine target unconfigured: destination target is required to safely reroute traffic");
+      }
       if (!base) return error(500, `upstream for ${origin} is not configured`);
 
       // 경로를 new URL(경로, base) 로 합치면 "//호스트/경로" 를 다른 호스트로 해석해서 요청이 엉뚱한 곳으로 나간다.
@@ -150,6 +171,9 @@ export default {
       out.headers.set("X-Gate-Origin", origin);
       if (viaArbitrage) {
         out.headers.set("X-Arbitrage", "true");
+      }
+      if (viaQuarantine) {
+        out.headers.set("X-Quarantine", "true");
       }
       return out;
     } catch (cause) {

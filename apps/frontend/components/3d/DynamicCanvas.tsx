@@ -21,9 +21,17 @@ const CanvasView = dynamic(() => import("./CanvasView"), {
   ),
 });
 
+import { securityApi } from "@/lib/securityApi";
+
 export function DynamicCanvas({ run, onNavigateSection }: Props) {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [selectedNode, setSelectedNode] = useState<"source" | "cdc" | "target" | null>(null);
+  const [isCompromised, setIsCompromised] = useState(false);
+  const [isQuarantined, setIsQuarantined] = useState(false);
+  const [isRerouting, setIsRerouting] = useState(false);
+  const [riskScore, setRiskScore] = useState<number>(0.85);
+  const [showFullTopology, setShowFullTopology] = useState(false);
+  const [rerouteNotice, setRerouteNotice] = useState<string | null>(null);
   const controlsRef = useRef<OrbitControlsHandle | null>(null);
 
   const source = extractSourceNodeData(run);
@@ -33,6 +41,103 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
   const handleResetView = () => {
     setSelectedNode(null);
     controlsRef.current?.reset();
+  };
+
+  const handleToggleCompromised = () => {
+    setIsCompromised((prev) => {
+      const next = !prev;
+      if (!next) {
+        setIsQuarantined(false);
+        setRerouteNotice(null);
+      } else {
+        // 실제 백엔드 blast radius 계산 API 연동
+        securityApi.computeBlastRadius("aws-ecs-workitems")
+          .then((res) => {
+            if (res?.max_risk_score) {
+              setRiskScore(res.max_risk_score);
+            }
+          })
+          .catch(() => {
+            // 실패 시 기본 위험도 유지
+          });
+      }
+      return next;
+    });
+  };
+
+  const handleReroute = async () => {
+    if (isRerouting) return;
+
+    // 전환(Cutover) 진행 중에는 임의 우회 방지
+    if (run.state === "running" && run.current_stage === "cutover") {
+      alert("전환(Cutover) 작업이 진행 중일 때는 수동 보안 우회를 실행할 수 없습니다.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "보안 위협 노드(CVE-2026-4192)를 즉시 격리(Quarantine)하고 안전 타깃(GCP Cloud Run)으로 트래픽을 우회하시겠습니까?\n\n※ 데이터 정합성 보호를 위해 원본 쓰기는 503 차단되며 읽기 트래픽만 우회됩니다."
+    );
+    if (!confirmed) return;
+
+    setIsRerouting(true);
+    try {
+      const res = await fetch("/api/security/reroute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          compromised_node_id: "aws-ecs-workitems",
+          target_reroute_id: "gcp-cloud-run",
+          quarantine: true,
+          run_id: run.run_id,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setIsQuarantined(true);
+        const prefix = data.cloudflare_synced ? "Cloudflare 에지: " : "데모 시뮬레이션: ";
+        setRerouteNotice(`${prefix}${data.message}`);
+      } else {
+        const errData = await res.json().catch(() => null);
+        const errDetail = errData?.detail || `HTTP ${res.status}`;
+        setIsQuarantined(false);
+        setRerouteNotice(`⚠️ 우회 실패: ${errDetail}`);
+      }
+    } catch (cause) {
+      setIsQuarantined(false);
+      setRerouteNotice(`⚠️ 우회 실패: 네트워크 오류 (${cause instanceof Error ? cause.message : "unknown"})`);
+    } finally {
+      setIsRerouting(false);
+    }
+  };
+
+  const handleReleaseQuarantine = async () => {
+    if (isRerouting) return;
+    const confirmed = window.confirm("보안 격리를 해제하고 정상 원본 트래픽(AWS)으로 롤백 복원하시겠습니까?");
+    if (!confirmed) return;
+
+    setIsRerouting(true);
+    try {
+      const res = await fetch("/api/security/release", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ node_id: "aws-ecs-workitems" }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setIsQuarantined(false);
+        const prefix = data.cloudflare_synced ? "Cloudflare 에지: " : "데모 시뮬레이션: ";
+        setRerouteNotice(`${prefix}${data.message}`);
+      } else {
+        const errData = await res.json().catch(() => null);
+        setRerouteNotice(`⚠️ 해제 실패: ${errData?.detail || `HTTP ${res.status}`}`);
+      }
+    } catch (cause) {
+      setRerouteNotice(`⚠️ 해제 실패: 네트워크 오류 (${cause instanceof Error ? cause.message : "unknown"})`);
+    } finally {
+      setIsRerouting(false);
+    }
   };
 
   return (
@@ -90,6 +195,41 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
                     {item.label}
                   </button>
                 ))}
+                <button
+                  type="button"
+                  onClick={handleToggleCompromised}
+                  className={`rounded border px-2 py-0.5 font-mono text-[11px] transition-all active:scale-[0.96] ${
+                    isCompromised
+                      ? "border-red-600 bg-red-600 text-white shadow-xs animate-pulse"
+                      : "border-ink/20 bg-paper text-ink/75 hover:border-red-500 hover:text-red-600"
+                  }`}
+                  title="AWS GuardDuty 침해 알림 (시뮬레이션 데모 데이터) 및 3D Blast Radius 활성화"
+                >
+                  {isCompromised ? "🚨 GuardDuty 시뮬레이션 활성" : "🛡️ 보안 위협 시뮬레이션"}
+                </button>
+                {isQuarantined && (
+                  <button
+                    type="button"
+                    onClick={handleReleaseQuarantine}
+                    disabled={isRerouting}
+                    className="rounded border border-amber-600 bg-amber-500 px-2 py-0.5 font-mono text-[11px] font-semibold text-white shadow-xs transition-all hover:bg-amber-600 active:scale-[0.96] disabled:opacity-50"
+                    title="격리 상태를 해제하고 원본 트래픽(AWS)으로 롤백 복원"
+                  >
+                    {isRerouting ? "해제 중..." : "↩️ 격리 해제 (Rollback)"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowFullTopology((prev) => !prev)}
+                  className={`rounded border px-2 py-0.5 font-mono text-[11px] transition-all active:scale-[0.96] ${
+                    showFullTopology
+                      ? "border-sky-700 bg-sky-700 text-white shadow-xs"
+                      : "border-ink/20 bg-paper text-ink/75 hover:border-sky-600 hover:text-sky-700"
+                  }`}
+                  title="AWS · GCP · Azure · On-Prem 4대 인프라 및 Cloudflare 에지 라우팅 전체 조감도"
+                >
+                  {showFullTopology ? "🌐 4대 클라우드 켜짐" : "🌐 4대 클라우드 전체"}
+                </button>
               </div>
             </>
           )}
@@ -111,6 +251,19 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
         </div>
       </div>
 
+      {rerouteNotice && (
+        <div className="flex items-center justify-between border-b border-amber-300 bg-amber-50 px-4 py-1.5 text-xs font-mono text-amber-900">
+          <span>⚡ {rerouteNotice}</span>
+          <button
+            type="button"
+            onClick={() => setRerouteNotice(null)}
+            className="text-amber-700 hover:underline"
+          >
+            닫기 ✕
+          </button>
+        </div>
+      )}
+
       {/* 컴팩트 3D 뷰포트 (Step 1) */}
       {!isCollapsed && (
         <div className="relative h-60 w-full bg-paper">
@@ -120,6 +273,11 @@ export function DynamicCanvas({ run, onNavigateSection }: Props) {
             selectedNode={selectedNode}
             onSelectNode={setSelectedNode}
             onNavigateSection={onNavigateSection}
+            isCompromised={isCompromised}
+            isQuarantined={isQuarantined}
+            riskScore={isCompromised ? riskScore : 0.0}
+            onReroute={handleReroute}
+            showFullTopology={showFullTopology}
           />
 
           {/* 하단 실측 데이터 요약 바 */}

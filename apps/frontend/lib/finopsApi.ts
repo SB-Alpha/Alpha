@@ -76,7 +76,11 @@ const DB_T3_VCPU = 2;
 const SOURCE_REGION_FALLBACK = "ap-northeast-2";
 
 /** 화면 입력값을 /finops/estimate 요청으로. 원본 앱 크기는 미제공이라 목적지 계획 크기를 씁니다 (화면에 "가정"). */
-export function estimateRequest(params: FinOpsInputParams, sourceRegion: string | undefined) {
+export function estimateRequest(
+  params: FinOpsInputParams,
+  sourceRegion: string | undefined,
+  replicationLagBytes?: number | null,
+) {
   const db = DB_CLASSES[params.dbClass];
   return {
     source_region: sourceRegion || SOURCE_REGION_FALLBACK,
@@ -88,7 +92,14 @@ export function estimateRequest(params: FinOpsInputParams, sourceRegion: string 
     db_memory_gib: db.memoryGb,
     db_storage_gb: params.dbSizeGb,
     candidates: ESTIMATE_CANDIDATES,
-    traffic: { idle_percent: params.idlePercent, rps: params.rps, avg_latency_ms: params.avgRequestMs },
+    traffic: {
+      idle_percent: params.idlePercent,
+      rps: params.rps,
+      avg_latency_ms: params.avgRequestMs,
+      ...(typeof replicationLagBytes === "number" && Number.isFinite(replicationLagBytes) && replicationLagBytes >= 0
+        ? { replication_lag_bytes: Math.round(replicationLagBytes) }
+        : {}),
+    },
   };
 }
 

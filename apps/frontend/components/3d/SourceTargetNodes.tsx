@@ -6,6 +6,7 @@ import { useRef, useState } from "react";
 import * as THREE from "three";
 import { extractSourceNodeData, extractTargetNodeData } from "@/lib/topology3d";
 import type { RunStatus } from "@/lib/workflows";
+import { BlastRadiusMesh } from "./BlastRadiusMesh";
 
 interface Props {
   run: RunStatus;
@@ -14,6 +15,10 @@ interface Props {
   onNavigateSection?: (sectionId: string) => void;
   sourceRef?: React.RefObject<THREE.Group | null>;
   targetRef?: React.RefObject<THREE.Group | null>;
+  isCompromised?: boolean;
+  isQuarantined?: boolean;
+  riskScore?: number;
+  onReroute?: () => void;
 }
 
 export function SourceTargetNodes({
@@ -23,6 +28,10 @@ export function SourceTargetNodes({
   onNavigateSection,
   sourceRef,
   targetRef,
+  isCompromised,
+  isQuarantined,
+  riskScore,
+  onReroute,
 }: Props) {
   const source = extractSourceNodeData(run);
   const target = extractTargetNodeData(run);
@@ -309,6 +318,15 @@ export function SourceTargetNodes({
           </Html>
         )}
       </group>
+
+      {/* 3D 보안 침해 영향 반경 (Blast Radius) 및 0.4초 우회 제스처/클릭 트리거 */}
+      <BlastRadiusMesh
+        position={[-3.1, 0.45, 0]}
+        isCompromised={Boolean(isCompromised)}
+        isQuarantined={Boolean(isQuarantined)}
+        riskScore={riskScore ?? 0.85}
+        onReroute={onReroute ?? (() => {})}
+      />
     </group>
   );
 }
