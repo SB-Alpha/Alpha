@@ -95,3 +95,16 @@ services:
     command: tunnel --no-autoupdate run
     environment:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+
+  # 온프렘 목적지: 터널의 DB 호스트명을 노드 로컬 포트로 연다. 나가는 443만 쓴다.
+  # 에이전트와 JDBC Sink는 목적지를 127.0.0.1:<로컬 포트>로 지정한다.
+  onprem-db-tunnel:
+    image: cloudflare/cloudflared:2024.12.2
+    network_mode: host
+    restart: unless-stopped
+    profiles: ["onprem-target"]
+    command: access tcp --hostname ${ONPREM_DB_HOSTNAME:-} --url 127.0.0.1:${ONPREM_DB_LOCAL_PORT:-15432}
+    # Access 서비스 토큰. 값은 push-secrets.sh onprem-db가 node.env에 넣는다. 없으면 빈 값 없이 넘어간다.
+    environment:
+      TUNNEL_SERVICE_TOKEN_ID:
+      TUNNEL_SERVICE_TOKEN_SECRET:

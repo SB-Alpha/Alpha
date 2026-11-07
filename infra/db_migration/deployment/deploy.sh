@@ -22,7 +22,16 @@ ssh -i "$key" $target 'sudo tee /opt/alpha-cdc/docker-compose.yml >/dev/null' < 
 # shellcheck disable=SC2086
 tar -C "$here/.." --exclude '__pycache__' --exclude 'tests' -czf - agent connectors \
   | ssh -i "$key" $target 'sudo rm -rf /opt/alpha-cdc/src && sudo mkdir -p /opt/alpha-cdc/src && sudo tar -xzf - -C /opt/alpha-cdc/src'
-# node.env에 TUNNEL_TOKEN이 있으면 cloudflared도 띄운다.
+# 온프렘 목적지: ONPREM_DB_HOSTNAME을 주고 실행하면 node.env에 넣는다. 레포가 공개라 값은 코드에 두지 않는다.
+if [ -n "${ONPREM_DB_HOSTNAME:-}" ]; then
+  # shellcheck disable=SC2086
+  ssh -i "$key" $target "sudo sed -i '/^ONPREM_DB_/d' /etc/alpha-cdc/node.env &&
+    printf 'ONPREM_DB_HOSTNAME=%s\nONPREM_DB_LOCAL_PORT=%s\n' '$ONPREM_DB_HOSTNAME' '${ONPREM_DB_LOCAL_PORT:-15432}' | sudo tee -a /etc/alpha-cdc/node.env >/dev/null"
+fi
+# node.env에 TUNNEL_TOKEN이 있으면 cloudflared도, ONPREM_DB_HOSTNAME이 있으면 온프렘 터널도 띄운다.
+# grep이 못 찾아도 up까지 가도록 치환 끝에 true를 둔다.
 # shellcheck disable=SC2086
-ssh -i "$key" $target 'cd /opt/alpha-cdc && p=$(sudo grep -q "^TUNNEL_TOKEN=." /etc/alpha-cdc/node.env && echo "--profile tunnel") &&
-  sudo docker compose --env-file /etc/alpha-cdc/node.env $p up -d --build && sudo docker compose --env-file /etc/alpha-cdc/node.env $p ps'
+ssh -i "$key" $target 'cd /opt/alpha-cdc &&
+  p=$(sudo grep -q "^TUNNEL_TOKEN=." /etc/alpha-cdc/node.env && echo "--profile tunnel"; true) &&
+  o=$(sudo grep -q "^ONPREM_DB_HOSTNAME=." /etc/alpha-cdc/node.env && echo "--profile onprem-target"; true) &&
+  sudo docker compose --env-file /etc/alpha-cdc/node.env $p $o up -d --build && sudo docker compose --env-file /etc/alpha-cdc/node.env $p $o ps'

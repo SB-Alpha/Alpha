@@ -4,6 +4,7 @@
 #   ./push-secrets.sh worker-token <파일>              Worker 제어 토큰
 #   ./push-secrets.sh tunnel-token                     terraform/cloudflare 출력값을 node.env에
 #   ./push-secrets.sh secrets-key                      작업 비밀 암호화 키를 새로 만들어 node.env에 (도는 작업이 없을 때만)
+#   ./push-secrets.sh onprem-db <파일>                 온프렘 터널 Access 서비스 토큰을 node.env에
 set -euo pipefail
 
 key="${SSH_KEY:-$HOME/.ssh/alpha-cdc}"
@@ -59,6 +60,20 @@ case "${1:-}" in
         sudo chmod 600 /etc/alpha-cdc/node.env'
     done
     echo "SECRETS_KEY → ${#ports[@]} nodes (deploy.sh를 다시 돌리면 적용된다)"
+    ;;
+  onprem-db)
+    # 파일에는 TUNNEL_SERVICE_TOKEN_ID=, TUNNEL_SERVICE_TOKEN_SECRET= 두 줄이 있어야 한다.
+    for k in TUNNEL_SERVICE_TOKEN_ID TUNNEL_SERVICE_TOKEN_SECRET; do
+      [ "$(grep -cE "^$k=[^[:space:]]+$" "${2:?토큰 파일을 주어야 한다}")" = 1 ] || { echo "$2 에 $k 한 줄이 없다" >&2; exit 2; }
+    done
+    for p in "${ports[@]}"; do
+      grep -E '^TUNNEL_SERVICE_TOKEN_(ID|SECRET)=' "$2" |
+        ssh -i "$key" -p "$p" ubuntu@localhost 'vals=$(cat) &&
+          sudo sed -i "/^TUNNEL_SERVICE_TOKEN_/d" /etc/alpha-cdc/node.env &&
+          printf "%s\n" "$vals" | sudo tee -a /etc/alpha-cdc/node.env >/dev/null &&
+          sudo chmod 600 /etc/alpha-cdc/node.env'
+    done
+    echo "TUNNEL_SERVICE_TOKEN → ${#ports[@]} nodes (deploy.sh를 다시 돌리면 적용된다)"
     ;;
   *)
     sed -n '2,7p' "$0" >&2; exit 2
