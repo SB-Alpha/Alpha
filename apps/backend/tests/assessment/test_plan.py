@@ -195,3 +195,14 @@ def test_image_move_step_names_the_real_source_registry(uri, label):
     # AWS 가 아닌 원본(#56 manual)에서도 "ECR" 이라고 쓰지 않게 합니다
     step = rules.build_steps(uri)[1]
     assert step.action == f"이미지 이동 {label} → Artifact Registry"
+
+
+def test_plan_endpoint_filters_secret_env_like_the_collectors():
+    # /assessment/plan 은 사실을 직접 받으므로 계획 생성 단계에서도 같은 비밀 필터를 거쳐야 함
+    inp = _ready_input()
+    inp.inventory.app.env_vars.update({"API_TOKEN": "tok-123", "DATABASE_URL": "postgres://u:p@h/db"})
+    plan = run(inp)
+    assert "API_TOKEN" not in plan.target_infra.env_vars and "DATABASE_URL" not in plan.target_infra.env_vars
+    assert plan.target_infra.env_vars == {"LOG_LEVEL": "INFO"}
+    assert sum(r.title == "비밀로 보이는 평문 환경 변수 제외" for r in plan.risks) == 2
+    assert "tok-123" not in plan.model_dump_json()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 
+from .app import has_secret_value, looks_secret
 from .schemas import (
     InventoryForPlanning,
     PlanCheck,
@@ -221,6 +222,17 @@ def build_target_infra(inv: InventoryForPlanning, target: TargetSelection) -> tu
     source_name = image_repo_name(app.image_uri) or app.service_name
     service_name = gcp_name(source_name)
 
+    # 수집기(app.py·manual.py)가 이미 거르지만, /assessment/plan 처럼 사실을 직접 넣는 경로도 같은 규칙을 거칩니다
+    plain_env: dict[str, str] = {}
+    for k, v in app.env_vars.items():
+        if k in PROVISIONING_INJECTED_ENV:
+            continue
+        if looks_secret(k) or has_secret_value(v):
+            risks.append(Risk(level="high", title="비밀로 보이는 평문 환경 변수 제외",
+                              detail=f"{k} 는 값이 비밀로 보여 target_infra 에 넣지 않았습니다. Secrets Manager 로 옮겨 주세요."))
+            continue
+        plain_env[k] = v
+
     infra = TargetInfra(
         region=target.region,
         service_name=service_name,
@@ -230,7 +242,7 @@ def build_target_infra(inv: InventoryForPlanning, target: TargetSelection) -> tu
         cpu=fallback(_cloud_run_cpu(app.cpu_units), DEFAULT_CPU, "CPU"),
         memory=fallback(_cloud_run_memory(app.memory_mib), DEFAULT_MEMORY, "메모리(MiB)"),
         health_check_path=fallback(app.health_check_path, DEFAULT_HEALTH_PATH, "상태 확인 경로"),
-        env_vars={k: v for k, v in app.env_vars.items() if k not in PROVISIONING_INJECTED_ENV},
+        env_vars=plain_env,
         secret_refs={k: _secret_name(service_name, k)
                      for k in app.secret_refs if k not in PROVISIONING_INJECTED_ENV},
         db_version=str(TARGET_PG_MAJOR),

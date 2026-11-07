@@ -73,7 +73,8 @@ def run(inp: AssessmentInput, ctx: Reporter | None = None,
         network=db_res.network,
         app=SourceApp(db_user=app_res.db_user),
         tables=[f"{t.schema_name}.{t.name}" for t in db_facts.tables],
-        credentials_ref=SourceCredentials(cloud=inp.aws_credentials_ref, db_admin=inp.db_admin_ref),
+        credentials_ref=SourceCredentials(cloud=_ref_or_none(inp.aws_credentials_ref, "aws_credentials_ref", gaps),
+                                          db_admin=_ref_or_none(inp.db_admin_ref, "db_admin_ref", gaps)),
     )
 
     # 단계 성공은 run() 반환으로 workflows 가 정합니다. report 는 진행 중 상태만 (PR #22 RunContext)
@@ -109,6 +110,17 @@ def _collect_aws(inp: AssessmentInput, session: AwsSession | None, report, gaps:
             db_res = db_job.result()
         gaps += db_gaps + app_gaps  # 순서는 예전(DB → 앱)과 같게
     return db_res, app_res
+
+
+# 결과로 내보내도 되는 이름표 모양. 이 밖의 문자열은 비밀 원문일 수 있어 그대로 돌려주지 않습니다
+REF_PREFIXES = ("secret://", "env://", "profile:")
+
+
+def _ref_or_none(ref: str | None, field: str, gaps: list[str]) -> str | None:
+    if ref is None or ref.startswith(REF_PREFIXES):
+        return ref
+    gaps.append(f"{field} 가 이름표 형식(secret://…)이 아니라 결과에 남기지 않음")
+    return None
 
 
 def _safe(what: str, fn, fallback, gaps: list[str]):
