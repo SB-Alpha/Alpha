@@ -261,6 +261,12 @@ def _gcp_token(key: dict) -> str:
     return credentials.token
 
 
+def check_credentials(cloud: str, credentials: dict[str, str]) -> None:
+    """키를 쓰기 전에 형식만 본다. 권한이 맞는지는 실제 조회에서 드러난다."""
+    if cloud == "gcp":
+        _gcp_key(credentials)
+
+
 def _gcp_key(credentials: dict[str, str]) -> dict:
     try:
         key = json.loads(credentials["credentials_json"])

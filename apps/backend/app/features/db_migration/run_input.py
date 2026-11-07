@@ -178,6 +178,14 @@ def inject(run_id: str, inp: RunInput) -> InjectedRun:
     )
 
 
+def credentials_registered(cloud: str) -> bool:
+    try:
+        _credentials_ref(cloud)
+    except (MissingCredentials, RuntimeError):  # RuntimeError: 지금 키로 복호화할 수 없다
+        return False
+    return True
+
+
 def saved_clouds(run_id: str) -> tuple[str, str] | None:
     """이 입구로 시작한 run의 (원본, 목적지) 클라우드. 다른 경로로 시작했으면 None."""
     try:

@@ -8,7 +8,12 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Request
 from fastapi.responses import JSONResponse
 
 from app.core.local_access import require_local_access
-from app.features.db_migration import db_workflow, input_secrets, run_input
+from app.features.db_migration import (
+    cloud_credentials,
+    db_workflow,
+    input_secrets,
+    run_input,
+)
 from app.features.db_migration.client import AgentError, AgentSettings, CdcAgentClient
 from app.features.db_migration.schemas import (
     RUN_ID_PATTERN,
@@ -22,6 +27,7 @@ from app.features.db_migration.settings import MissingSetting
 
 router = APIRouter(prefix="/db-migration", tags=["db_migration"], dependencies=[Depends(require_local_access)])
 router.include_router(input_secrets.router)
+router.include_router(cloud_credentials.router)
 
 
 @lru_cache

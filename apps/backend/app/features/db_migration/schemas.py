@@ -233,6 +233,12 @@ class RunStatus(BaseModel):
     remaining: list[str] = []
 
 
+class CloudStatus(BaseModel):
+    cloud: str
+    registered: bool
+    required_keys: list[str]
+
+
 class CutoverResult(BaseModel):
     run_id: str
     job_id: str
