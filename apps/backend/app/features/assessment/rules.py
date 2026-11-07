@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 
+from .app import has_secret_value, looks_secret
 from .schemas import (
     InventoryForPlanning,
     PlanCheck,
@@ -15,7 +16,11 @@ from .schemas import (
 )
 
 TARGET_PG_MAJOR = 16  # 목적지 Cloud SQL PostgreSQL 16 고정 (MVP 범위)
-MIN_SOURCE_PG_MAJOR = 10  # pgoutput 논리 복제 최소 버전
+# CDC 에이전트 사전 검사와 같은 기준 (infra/db_migration/agent/cdc_agent/db.py precheck_source:
+# server_version_num >= 160000). 더 낮은 버전을 통과시키면 승인 뒤 CDC 단계에서 막힙니다.
+MIN_SOURCE_PG_MAJOR = 16
+# CDC 에이전트가 받는 테이블 이름 형식 (cdc_agent/models.py TABLE_PATTERN 과 같음). 소문자 schema.table 만
+CDC_TABLE_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$")
 
 # 원본이 값을 안 줬을 때 쓰는 기본값. 쓰이면 risks 에 남깁니다.
 DEFAULT_PORT = 8080
@@ -31,6 +36,11 @@ PROVISIONING_INJECTED_ENV = {
 # RDS 인스턴스 클래스 → 메모리(GiB). MVP 대상 크기만 둡니다.
 RDS_MEMORY_GIB = {
     "db.t3.micro": 1, "db.t4g.micro": 1,
+    "db.t3.small": 2, "db.t4g.small": 2,
+}
+# RDS 인스턴스 클래스 → vCPU. 위 표와 같은 범위만 둡니다.
+RDS_VCPU = {
+    "db.t3.micro": 2, "db.t4g.micro": 2,
     "db.t3.small": 2, "db.t4g.small": 2,
 }
 CLOUD_SQL_MIN_DISK_GB = 10
@@ -69,7 +79,7 @@ def run_checks(inv: InventoryForPlanning) -> list[PlanCheck]:
     elif major < MIN_SOURCE_PG_MAJOR:
         checks.append(PlanCheck(
             id="pg_version_compatible", title="PostgreSQL 버전 호환", result="fail",
-            detail=f"원본 {major} 은 논리 복제(pgoutput)를 지원하지 않습니다 (최소 {MIN_SOURCE_PG_MAJOR}).",
+            detail=f"원본 {major} 은 CDC 가 지원하지 않습니다 (원본 PostgreSQL {MIN_SOURCE_PG_MAJOR} 이상 필요).",
         ))
     else:
         checks.append(PlanCheck(
@@ -77,17 +87,29 @@ def run_checks(inv: InventoryForPlanning) -> list[PlanCheck]:
             detail=f"원본 {db.engine_version} → 목적지 {TARGET_PG_MAJOR}",
         ))
 
-    # 2. 논리 복제 가능
-    if db.logical_replication is True or (db.wal_level or "").lower() == "logical":
+    # 2. 논리 복제 가능. 실제로 조회한 wal_level 이 있으면 그 값이 우선입니다
+    #    (rds.logical_replication=1 이어도 재시작 전이면 wal_level 은 아직 replica 일 수 있음).
+    wal = (db.wal_level or "").strip().lower() or None
+    if wal == "logical":
         checks.append(PlanCheck(
             id="logical_replication_enabled", title="논리 복제 설정", result="pass",
-            detail="rds.logical_replication 또는 wal_level=logical 확인",
+            detail="wal_level=logical 확인",
         ))
-    elif db.logical_replication is False or db.wal_level is not None:
+    elif wal is not None:
+        pending = " rds.logical_replication 은 켜져 있지만 아직 적용되지 않았습니다." if db.logical_replication else ""
         checks.append(PlanCheck(
             id="logical_replication_enabled", title="논리 복제 설정", result="fail",
-            detail=f"논리 복제가 꺼져 있습니다 (wal_level={db.wal_level or '미제공'}). "
-                   "켜려면 원본 DB 재시작이 필요합니다.",
+            detail=f"wal_level={wal} 입니다 (logical 필요).{pending} 켜려면 원본 DB 재시작이 필요합니다.",
+        ))
+    elif db.logical_replication is True:
+        checks.append(PlanCheck(
+            id="logical_replication_enabled", title="논리 복제 설정", result="pass",
+            detail="rds.logical_replication=1 확인 (wal_level 은 조회하지 못함)",
+        ))
+    elif db.logical_replication is False:
+        checks.append(PlanCheck(
+            id="logical_replication_enabled", title="논리 복제 설정", result="fail",
+            detail="논리 복제가 꺼져 있습니다 (rds.logical_replication=0). 켜려면 원본 DB 재시작이 필요합니다.",
         ))
     else:
         checks.append(PlanCheck(
@@ -120,6 +142,27 @@ def run_checks(inv: InventoryForPlanning) -> list[PlanCheck]:
                 detail=f"{len(db.tables)}개 테이블 모두 PK 있음",
             ))
 
+    # 3-1. 테이블 이름이 CDC 가 받는 형식인지 (목록이 없으면 PK 검사가 이미 unknown 으로 막음)
+    if db.tables:
+        bad = [f"{t.schema_name}.{t.name}" for t in db.tables
+               if not CDC_TABLE_PATTERN.match(f"{t.schema_name}.{t.name}")]
+        checks.append(PlanCheck(
+            id="table_names_supported", title="CDC 가 받는 테이블 이름", result="fail" if bad else "pass",
+            detail=("소문자·숫자·_ 로만 된 schema.table 이 아닌 테이블: " + ", ".join(bad)) if bad
+            else "모든 테이블 이름이 CDC 형식과 맞음",
+        ))
+
+    # 3-2. 복제 슬롯 여유. 조회한 값이 있을 때만 판정합니다 (직접 입력 원본은 값이 없을 수 있어 risks 로 남김)
+    if db.max_replication_slots is not None and db.replication_slots_in_use is not None:
+        free = db.max_replication_slots - db.replication_slots_in_use
+        detail = f"사용 중 {db.replication_slots_in_use} / 최대 {db.max_replication_slots}"
+        if free < 1:
+            detail += ". CDC 가 슬롯을 만들 수 없습니다 (max_replication_slots 를 늘리거나 안 쓰는 슬롯 정리)"
+        checks.append(PlanCheck(
+            id="replication_slot_available", title="복제 슬롯 여유", result="pass" if free >= 1 else "fail",
+            detail=detail,
+        ))
+
     # 4. 이미지 확보 가능 (주소가 있는지까지만. 실제 pull 은 provisioning 이 확인)
     if app.image_uri:
         checks.append(PlanCheck(
@@ -147,9 +190,8 @@ def _cloud_run_memory(memory_mib: int | None) -> int | None:
     return max(DEFAULT_MEMORY, memory_mib)
 
 
-def _db_tier(instance_class: str | None) -> str | None:
-    """원본 메모리 이상인 가장 작은 Cloud SQL 등급. 표에 없거나 공유 코어보다 크면 None."""
-    gib = RDS_MEMORY_GIB.get((instance_class or "").lower())
+def _db_tier(gib: float | None) -> str | None:
+    """원본 메모리 이상인 가장 작은 Cloud SQL 등급. 메모리를 모르거나 공유 코어보다 크면 None."""
     if gib is None:
         return None
     tier, tier_gb = SHARED_CORE_TIER
@@ -199,33 +241,53 @@ def build_target_infra(inv: InventoryForPlanning, target: TargetSelection) -> tu
             return default
         return value
 
-    db_tier = _db_tier(db.instance_class)
+    instance_class = (db.instance_class or "").lower()
+    # 직접 입력은 메모리·vCPU 를 바로 받고, AWS 조회는 인스턴스 클래스 표로 구합니다
+    db_memory_gib = db.memory_gib if db.memory_gib is not None else RDS_MEMORY_GIB.get(instance_class)
+    db_vcpu = db.vcpu if db.vcpu is not None else RDS_VCPU.get(instance_class)
+    db_tier = _db_tier(db_memory_gib)
     if db_tier is None:
         risks.append(Risk(
             level="low", title="DB 등급은 provisioning 기본값",
-            detail=f"원본 인스턴스 클래스 {db.instance_class or '미제공'} 은 자동 매핑 범위 밖이라 "
+            detail=f"원본 DB 크기({db.instance_class or (f'{db_memory_gib:g}GiB' if db_memory_gib else '미제공')}) 는 "
+                   "자동 매핑 범위 밖이라 "
                    "db_tier 를 넘기지 않습니다.",
         ))
     disk = max(CLOUD_SQL_MIN_DISK_GB, db.allocated_storage_gb) if db.allocated_storage_gb else None
     # ECS 서비스 이름은 "target-app-task-service-xxxx" 처럼 자동 생성 접미사가 붙어서,
     # 이미지 저장소 이름을 우선 씁니다. provisioning 의 GCP 자원 이름이 여기서 파생됨 (#27 리뷰)
-    service_name = gcp_name(image_repo_name(app.image_uri) or app.service_name)
+    source_name = image_repo_name(app.image_uri) or app.service_name
+    service_name = gcp_name(source_name)
+
+    # 수집기(app.py·manual.py)가 이미 거르지만, /assessment/plan 처럼 사실을 직접 넣는 경로도 같은 규칙을 거칩니다
+    plain_env: dict[str, str] = {}
+    for k, v in app.env_vars.items():
+        if k in PROVISIONING_INJECTED_ENV:
+            continue
+        if looks_secret(k) or has_secret_value(v):
+            risks.append(Risk(level="high", title="비밀로 보이는 평문 환경 변수 제외",
+                              detail=f"{k} 는 값이 비밀로 보여 target_infra 에 넣지 않았습니다. Secrets Manager 로 옮겨 주세요."))
+            continue
+        plain_env[k] = v
 
     infra = TargetInfra(
         region=target.region,
         service_name=service_name,
+        source_service_name=source_name,
         source_image=pinned_image(app.image_uri, app.image_digest),
         container_port=fallback(app.container_port, DEFAULT_PORT, "컨테이너 포트"),
         cpu=fallback(_cloud_run_cpu(app.cpu_units), DEFAULT_CPU, "CPU"),
         memory=fallback(_cloud_run_memory(app.memory_mib), DEFAULT_MEMORY, "메모리(MiB)"),
         health_check_path=fallback(app.health_check_path, DEFAULT_HEALTH_PATH, "상태 확인 경로"),
-        env_vars={k: v for k, v in app.env_vars.items() if k not in PROVISIONING_INJECTED_ENV},
+        env_vars=plain_env,
         secret_refs={k: _secret_name(service_name, k)
                      for k in app.secret_refs if k not in PROVISIONING_INJECTED_ENV},
         db_version=str(TARGET_PG_MAJOR),
         db_name=db.database_name,
         db_user=db.username,
         db_tier=db_tier,
+        db_memory_gib=db_memory_gib,
+        db_vcpu=db_vcpu,
         db_disk_size_gb=disk,
     )
     return infra, risks
@@ -254,6 +316,10 @@ def collect_risks(inv: InventoryForPlanning, checks: list[PlanCheck]) -> list[Ri
     if inv.db.database_name is None:
         risks.append(Risk(level="medium", title="DB 이름 미제공", detail="목적지 DB 이름을 정할 수 없습니다."))
 
+    if inv.db.max_replication_slots is None or inv.db.replication_slots_in_use is None:
+        risks.append(Risk(level="medium", title="복제 슬롯 여유 미확인",
+                          detail="원본에 빈 복제 슬롯이 없으면 CDC 시작 단계에서 실패합니다."))
+
     if inv.db.publicly_accessible is True:
         risks.append(Risk(
             level="high", title="원본 DB 퍼블릭 액세스 켜짐",
@@ -268,10 +334,27 @@ def collect_risks(inv: InventoryForPlanning, checks: list[PlanCheck]) -> list[Ri
     return risks
 
 
-def build_steps() -> list[PlanStep]:
+def image_registry_label(uri: str | None) -> str:
+    """이미지 이동 단계에 보일 원본 저장소 이름. AWS ECR 주소면 "ECR", 아니면 주소의 호스트.
+
+    첫 경로 조각에 `.`·`:` 이 있거나 `localhost` 일 때만 호스트로 봅니다 (docker 와 같은 규칙).
+    `library/nginx`, `bitnami/postgresql` 처럼 계정 이름만 있으면 Docker Hub 입니다.
+    """
+    if not uri:
+        return "원본 저장소(미제공)"
+    first, sep, _ = uri.partition("/")
+    if not sep or not ("." in first or ":" in first or first == "localhost"):
+        return "Docker Hub"
+    if ".dkr.ecr." in first:
+        return "ECR"
+    return first
+
+
+def build_steps(image_uri: str | None = None) -> list[PlanStep]:
     return [
         PlanStep(order=1, module="workflows", action="계획 승인 ①", needs_approval=True),
-        PlanStep(order=2, module="provisioning", action="이미지 이동 ECR → Artifact Registry"),
+        PlanStep(order=2, module="provisioning",
+                 action=f"이미지 이동 {image_registry_label(image_uri)} → Artifact Registry"),
         PlanStep(order=3, module="provisioning",
                  action="terraform apply: VPC, Cloud SQL(논리 디코딩), Artifact Registry, Cloud Run, Secret Manager"),
         PlanStep(order=4, module="provisioning", action="Cloud Run 상태 확인 경로 성공 확인 → TargetEnv 반환"),

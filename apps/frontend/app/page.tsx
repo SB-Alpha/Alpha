@@ -4,51 +4,79 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import { StateBadge } from "@/components/StateBadge";
+import { TARGET_ADAPTERS, adapterFor, GcpTargetAdapter, type TargetInfraType } from "@/lib/adapters/types";
 import { STAGE_LABEL, formatTime } from "@/lib/labels";
 import { BUTTON_PRIMARY, INPUT } from "@/lib/ui";
-import { workflows, type MigrationRequest, type RunStatus } from "@/lib/workflows";
+import { runTitle, workflows, type MigrationRequest, type RunStatus } from "@/lib/workflows";
 
-type FieldKey = keyof MigrationRequest;
+const DEFAULT_AWS_REGION = "ap-northeast-2";
 
-const REQUIRED_FIELDS: { key: FieldKey; label: string; placeholder: string }[] = [
-  { key: "github_repo_url", label: "GitHub 저장소", placeholder: "https://github.com/org/target-app" },
-  { key: "aws_region", label: "원본 AWS 리전", placeholder: "ap-northeast-2" },
-  { key: "target_region", label: "목적지 GCP 리전", placeholder: "asia-northeast3" },
-];
+type TextField =
+  | "service_name"
+  | "aws_credentials_ref"
+  | "db_admin_ref"
+  | "aws_region"
+  | "aws_role_ref"
+  | "ecs_service"
+  | "rds_instance_id"
+  | "db_credentials_ref"
+  | "target_region"
+  | "github_repo_url";
 
-const REFERENCE_FIELDS: { key: FieldKey; label: string; placeholder: string }[] = [
-  { key: "aws_credentials_ref", label: "AWS 자격증명 참조", placeholder: "secret://aws/default 또는 profile:default" },
-  { key: "aws_role_ref", label: "AWS 조회 역할 ARN", placeholder: "arn:aws:iam::<account>:role/<name>" },
-  { key: "ecs_service", label: "ECS 서비스", placeholder: "target-app" },
-  { key: "rds_instance_id", label: "RDS 식별자", placeholder: "target-db" },
-  { key: "db_credentials_ref", label: "DB 접속 정보 참조", placeholder: "arn:aws:secretsmanager:..." },
-  { key: "db_admin_ref", label: "DB 관리자 계정 참조", placeholder: "secret://db/admin" },
-];
+type FormState = Record<TextField, string> & { target_preset: TargetInfraType };
 
-const INITIAL: Record<FieldKey, string> = {
-  github_repo_url: "",
-  aws_region: "ap-northeast-2",
-  target_region: "asia-northeast3",
-  aws_role_ref: "",
+type FieldSpec = { key: TextField; label: string; placeholder: string };
+
+const INITIAL: FormState = {
+  service_name: "",
   aws_credentials_ref: "",
+  db_admin_ref: "",
+  target_preset: GcpTargetAdapter.provider,
+  aws_region: DEFAULT_AWS_REGION,
+  aws_role_ref: "",
   ecs_service: "",
   rds_instance_id: "",
   db_credentials_ref: "",
-  db_admin_ref: "",
+  target_region: "",
+  github_repo_url: "",
 };
 
-function toRequest(form: Record<FieldKey, string>): MigrationRequest {
-  const optional = (v: string) => (v.trim() === "" ? null : v.trim());
+const SERVICE_FIELD: FieldSpec = { key: "service_name", label: "서비스 이름", placeholder: "target-app" };
+const AWS_CREDENTIALS_FIELD: FieldSpec = {
+  key: "aws_credentials_ref",
+  label: "원본 AWS 자격증명 참조",
+  placeholder: "secret://aws/default",
+};
+const DB_ADMIN_FIELD: FieldSpec = { key: "db_admin_ref", label: "원본 DB 관리자 참조", placeholder: "secret://db/admin" };
+
+const ADVANCED_FIELDS: FieldSpec[] = [
+  { key: "aws_region", label: "원본 AWS 리전", placeholder: DEFAULT_AWS_REGION },
+  { key: "aws_role_ref", label: "AWS 조회 역할 ARN", placeholder: "arn:aws:iam::<account>:role/<name>" },
+  { key: "ecs_service", label: "ECS 서비스 (비우면 서비스 이름)", placeholder: "target-app" },
+  { key: "rds_instance_id", label: "RDS 식별자 (비우면 자동 선택)", placeholder: "target-db" },
+  { key: "db_credentials_ref", label: "DB 접속 정보 참조", placeholder: "arn:aws:secretsmanager:..." },
+  { key: "github_repo_url", label: "GitHub 저장소 (선택)", placeholder: "https://github.com/org/target-app" },
+];
+
+const optional = (value: string) => value.trim() || null;
+
+function toRequest(form: FormState): MigrationRequest {
+  const adapter = adapterFor(form.target_preset);
+  const serviceName = form.service_name.trim();
+  const targetRegion = form.target_region.trim() || adapter.defaultRegion;
   return {
-    github_repo_url: form.github_repo_url.trim(),
-    aws_region: form.aws_region.trim(),
-    target_region: form.target_region.trim() || "asia-northeast3",
+    service_name: serviceName,
+    github_repo_url: optional(form.github_repo_url),
+    aws_region: form.aws_region.trim() || DEFAULT_AWS_REGION,
     aws_role_ref: optional(form.aws_role_ref),
     aws_credentials_ref: optional(form.aws_credentials_ref),
-    ecs_service: optional(form.ecs_service),
+    ecs_service: optional(form.ecs_service) ?? serviceName,
+    // 비우면 assessment 가 계정의 RDS 가 하나뿐일 때 고릅니다. 여러 개면 지정하라고 안내합니다.
     rds_instance_id: optional(form.rds_instance_id),
     db_credentials_ref: optional(form.db_credentials_ref),
     db_admin_ref: optional(form.db_admin_ref),
+    target_region: targetRegion,
+    target_infra: adapter.toConfig(targetRegion),
   };
 }
 
@@ -58,6 +86,9 @@ export default function HomePage() {
   const [runs, setRuns] = useState<RunStatus[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const adapter = adapterFor(form.target_preset);
+  const ecsPreview = form.ecs_service.trim() || form.service_name.trim();
 
   useEffect(() => {
     workflows
@@ -78,7 +109,7 @@ export default function HomePage() {
     }
   };
 
-  const field = ({ key, label, placeholder }: { key: FieldKey; label: string; placeholder: string }, required: boolean) => (
+  const field = ({ key, label, placeholder }: FieldSpec, required: boolean) => (
     <div key={key}>
       <label htmlFor={key} className="text-xs font-semibold text-ink/60">
         {label}
@@ -108,18 +139,55 @@ export default function HomePage() {
         </p>
 
         <form onSubmit={handleSubmit} className="mt-6 space-y-5 rounded-xl border border-ink/15 bg-white p-5">
-          <div className="grid gap-4 sm:grid-cols-2">
-            {REQUIRED_FIELDS.map((f, i) => (
-              <div key={f.key} className={i === 0 ? "sm:col-span-2" : ""}>
-                {field(f, f.key !== "target_region")}
-              </div>
-            ))}
+          <div>
+            {field(SERVICE_FIELD, true)}
+            <p className="mt-1 text-xs text-ink/50">
+              {ecsPreview ? (
+                <>
+                  ECS 서비스 <span className="font-mono">{ecsPreview}</span> 를 조사합니다.
+                </>
+              ) : (
+                "이 이름의 ECS 서비스를 조사합니다."
+              )}{" "}
+              RDS 는 {form.rds_instance_id.trim() ? <span className="font-mono">{form.rds_instance_id.trim()}</span> : "계정에 하나뿐이면 자동으로 고릅니다"}
+              {form.rds_instance_id.trim() ? " 를 씁니다." : "."}
+            </p>
           </div>
-          <fieldset className="border-t border-ink/10 pt-4">
-            <legend className="pr-2 text-xs font-semibold text-ink/60">접근 참조 (선택)</legend>
-            <p className="mb-3 text-xs text-ink/50">비밀번호·키 원문은 넣지 않습니다. ARN·Secret 경로 같은 참조만 넣으세요.</p>
-            <div className="grid gap-4 sm:grid-cols-2">{REFERENCE_FIELDS.map((f) => field(f, false))}</div>
-          </fieldset>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            {field(AWS_CREDENTIALS_FIELD, true)}
+            {field(DB_ADMIN_FIELD, form.db_credentials_ref.trim() === "")}
+          </div>
+
+          <div>
+            <label htmlFor="target_preset" className="text-xs font-semibold text-ink/60">
+              목적지 클라우드
+            </label>
+            <select
+              id="target_preset"
+              value={form.target_preset}
+              onChange={(e) => setForm({ ...form, target_preset: e.target.value as TargetInfraType })}
+              className={`${INPUT} mt-1`}
+            >
+              {TARGET_ADAPTERS.map((option) => (
+                <option key={option.provider} value={option.provider} disabled={!option.isAvailable}>
+                  {option.label}
+                  {option.isAvailable ? "" : " · 어댑터 준비 중"}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <p className="text-xs text-ink/50">비밀번호·키 원문은 넣지 않습니다. Secret 경로 같은 참조만 넣으세요.</p>
+
+          <details className="rounded-lg border border-ink/10 bg-paper/50 px-4 py-3">
+            <summary className="cursor-pointer text-sm font-medium text-ink/70 hover:text-ink">고급 클라우드 설정</summary>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              {ADVANCED_FIELDS.map((f) => field(f, false))}
+              {field({ key: "target_region", label: `목적지 ${adapter.cloudName} 리전`, placeholder: adapter.defaultRegion }, false)}
+            </div>
+          </details>
+
           {error && (
             <p role="alert" className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-800">
               {error}
@@ -151,7 +219,7 @@ export default function HomePage() {
                     <span className="truncate font-mono text-xs">{r.run_id}</span>
                     <StateBadge state={r.state} />
                   </div>
-                  <p className="mt-1 truncate text-sm">{r.request.github_repo_url}</p>
+                  <p className="mt-1 truncate text-sm">{runTitle(r.request)}</p>
                   <p className="mt-0.5 text-xs text-ink/50">
                     {r.current_stage ? STAGE_LABEL[r.current_stage] : "끝"} · {formatTime(r.created_at)}
                   </p>

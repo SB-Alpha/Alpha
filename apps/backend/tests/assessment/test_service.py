@@ -99,3 +99,13 @@ def test_db_and_app_lookups_run_at_the_same_time(monkeypatch):
     out = service.run(INP, session=session())
     assert seen["app_ran_meanwhile"] is True
     assert "db gap" in out.gaps
+
+
+def test_raw_value_in_ref_field_is_not_echoed_back():
+    # 이름표 칸에 실수로 넣은 원문은 형식 오류로 거절되고, 결과에도 복사되지 않아야 함
+    raw = "AKIAEXAMPLEEXAMPLE1234/rawsecretvalue"
+    out = service.run(INP.model_copy(update={"aws_credentials_ref": raw, "db_admin_ref": "postgres:hunter2"}))
+    assert out.source.credentials_ref.cloud is None and out.source.credentials_ref.db_admin is None
+    dumped = out.model_dump_json()
+    assert raw not in dumped and "hunter2" not in dumped
+    assert any("aws_credentials_ref 가 이름표 형식" in g for g in out.gaps)

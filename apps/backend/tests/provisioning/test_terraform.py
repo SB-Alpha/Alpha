@@ -94,7 +94,7 @@ def test_abort_sends_sigint_first_so_terraform_can_clean_up(cli, tmp_path, monke
 
     with pytest.raises(RuntimeError, match="aborted"):
         cli.apply(tmp_path / "p", on_line=_abort_after_first_resource)
-    assert marker.read_text().strip() == "got-sigint"
+    assert marker.read_text(encoding="utf-8").strip() == "got-sigint"
 
 
 def test_abort_force_kills_a_terraform_that_ignores_sigint_after_the_grace_period(tmp_path, monkeypatch):

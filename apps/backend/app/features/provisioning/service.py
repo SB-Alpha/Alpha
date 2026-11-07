@@ -12,34 +12,16 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
+from .image_transfer import TransferResult, load_aws_credentials, parse_ecr_host, parse_image, transfer_image
+from .providers import DEFAULT_PROVIDER, GCP, get_provider, terraform_dir
 from .schemas import AppDeployInput, AppDeployOutput, ProvisioningInput, ProvisioningOutput
 from .target import TargetBuildError, build_target, find_problems
 from .terraform import ProvisioningError, TerraformCli, summarize_plan
 from .worker_client import WorkerClient
 
-DEFAULT_REGION = "asia-northeast3" 
-
-# Terraform 루트 모듈(infra/terraform/gcp)이 선언한 변수들.
-KNOWN_VARIABLES = frozenset(
-    {
-        "region",
-        "service_name",
-        "source_image",
-        "container_image",
-        "container_port",
-        "cpu",
-        "memory",
-        "health_check_path",
-        "env_vars",
-        "secret_refs",
-        "db_version",
-        "db_name",
-        "db_user",
-        "db_tier",
-        "db_disk_size_gb",
-        "db_logical_decoding",
-    }
-)
+# 예전 코드가 이 이름을 읽을 수 있어 GCP 값으로 남겨 둔다. 목적지별 값은 providers.py 에 있다.
+DEFAULT_REGION = GCP.default_region
+KNOWN_VARIABLES = GCP.known_variables
 
 # terraform apply 출력 줄을 알아보는 패턴 (진행률 계산용)
 #   "module.x.y: Creating..."                    → 시작
@@ -52,22 +34,27 @@ class Reporter(Protocol):
     def report(self, state: str, progress: int, metrics: dict[str, Any] | None = None, message: str | None = None) -> None: ...
 
 
-def default_terraform() -> TerraformCli:
-    repo_root = Path(__file__).resolve().parents[5]
-    workdir = Path(os.getenv("PROVISIONING_TF_DIR") or repo_root / "infra" / "terraform" / "gcp")
-    return TerraformCli(workdir, binary=os.getenv("TERRAFORM_BIN", "terraform"))
+def default_terraform(provider: str = DEFAULT_PROVIDER) -> TerraformCli:
+    config = get_provider(provider)
+    return TerraformCli(terraform_dir(config), binary=os.getenv("TERRAFORM_BIN", "terraform"))
 
 
-def resolve_project_id(project_id: str | None) -> str:
-    resolved = project_id or os.getenv("GCP_PROJECT_ID")
+def resolve_project_id(project_id: str | None, provider: str = DEFAULT_PROVIDER) -> str:
+    config = get_provider(provider)
+    resolved = project_id or os.getenv(config.scope_env)
     if not resolved:
-        raise ProvisioningError("GCP 프로젝트 ID 가 없습니다. 입력의 project_id 나 환경변수 GCP_PROJECT_ID 를 지정하세요")
+        raise ProvisioningError(
+            f"{config.scope_label} 가 없습니다. 입력의 project_id 나 환경변수 {config.scope_env} 를 지정하세요"
+        )
     return resolved
 
 
-def build_tfvars(target_infra: Mapping[str, Any], *, project_id: str, deploy_app: bool) -> dict[str, Any]:
-    values = {key: value for key, value in target_infra.items() if key in KNOWN_VARIABLES and value is not None}
-    values.update(project_id=project_id, deploy_app=deploy_app, create_vpn_key=True)
+def build_tfvars(
+    target_infra: Mapping[str, Any], *, project_id: str, deploy_app: bool, provider: str = DEFAULT_PROVIDER
+) -> dict[str, Any]:
+    config = get_provider(provider)
+    values = {key: value for key, value in target_infra.items() if key in config.known_variables and value is not None}
+    values.update({config.scope_variable: project_id, "deploy_app": deploy_app, **config.forced_variables})
     return values
 
 
@@ -94,18 +81,23 @@ def _converge(
     tf: TerraformCli,
     *,
     deploy_app: bool,
+    # init 이 끝난 뒤, 계획을 세우기 전에 부른다. 돌려준 값을 변수에 더한다 (앱 배포의 이미지 복사에 쓴다).
+    prepare: Callable[[TerraformCli], Mapping[str, Any]] | None = None,
 ) -> tuple[str, dict[str, int], bool, dict[str, Any]]:
-    project_id = resolve_project_id(inp.project_id)
-    values = build_tfvars(inp.target_infra, project_id=project_id, deploy_app=deploy_app)
+    project_id = resolve_project_id(inp.project_id, inp.provider)
+    values = build_tfvars(inp.target_infra, project_id=project_id, deploy_app=deploy_app, provider=inp.provider)
 
     # 임시 폴더에 변수 파일과 계획 파일을 두고, 끝나면 폴더째 자동으로 지워진다 (with 블록을 나가는 순간)
     with tempfile.TemporaryDirectory(prefix="alpha-tf-") as tmp:
         var_file = Path(tmp) / "vars.tfvars.json"
         plan_file = Path(tmp) / "plan.tfplan"
-        var_file.write_text(json.dumps(values))
 
         ctx.report("running", 5, message="terraform 초기화")
         tf.init()
+
+        if prepare is not None:
+            values = {**values, **prepare(tf)}  # terraform output 은 init 이 끝나야 읽을 수 있다
+        var_file.write_text(json.dumps(values))
 
         ctx.report("running", 15, message="변경 계획 확인")
         exit_code = tf.plan(var_file, plan_file)  # 0 = 바뀔 것 없음, 2 = 바뀔 것 있음
@@ -134,10 +126,10 @@ def _converge(
 
 def run(inp: ProvisioningInput, ctx: Reporter, *, terraform: TerraformCli | None = None) -> ProvisioningOutput:
     # provisioning 단계: 목적지 인프라를 만들고 target 을 돌려준다.
-    tf = terraform or default_terraform()
+    tf = terraform or default_terraform(inp.provider)
     project_id, counts, applied, outputs = _converge(inp, ctx, tf, deploy_app=False)
 
-    region = inp.target_infra.get("region") or DEFAULT_REGION
+    region = inp.target_infra.get("region") or get_provider(inp.provider).default_region
     try:
         target = build_target(outputs, run_id=inp.run_id, project_id=project_id, region=region)
     except TargetBuildError as exc:
@@ -182,6 +174,58 @@ def _wait_healthy(
         sleep(3)
 
 
+def _output_value(outputs: Mapping[str, Any], name: str) -> Any:
+    entry = outputs.get(name)
+    return entry.get("value") if isinstance(entry, Mapping) else None
+
+
+def _image_step(
+    inp: AppDeployInput, ctx: Reporter, transfer: Callable[..., TransferResult]
+) -> Callable[[TerraformCli], dict[str, Any]] | None:
+    """원본 이미지를 목적지 저장소로 복사하는 단계. 복사할 필요가 없거나 할 수 없으면 None 을 돌려준다.
+
+    복사하지 않는 경우: 원본 이미지가 없을 때, 이미지(container_image)를 이미 지정했을 때, dry_run 일 때,
+    원본이 ECR 인데 원본 AWS 키 이름표가 없을 때 (이전과 같이 목적지 저장소에 이미지가 이미 있다고 본다).
+    """
+    infra = inp.target_infra
+    source_image = infra.get("source_image")
+    if not source_image or infra.get("container_image"):
+        return None
+    if inp.dry_run:
+        ctx.report("running", 2, message="dry_run 이라 이미지 복사를 건너뜁니다")
+        return None
+    needs_aws_key = parse_ecr_host(parse_image(str(source_image)).registry) is not None
+    if needs_aws_key and not inp.source_credentials_ref:
+        ctx.report("running", 2, message="원본 AWS 키가 없어 이미지 복사를 건너뜁니다 (목적지 저장소에 이미지가 이미 있어야 합니다)")
+        return None
+    if needs_aws_key and not str(inp.source_credentials_ref).startswith("secret://"):
+        # 조사 모듈은 로컬 개발용 profile:<이름> 도 받는다. 그 이름표는 서버에서 풀 수 없으니 실패시키지 않고 건너뛴다.
+        ctx.report("running", 2, message="원본 AWS 키 이름표가 secret:// 형식이 아니라 이미지 복사를 건너뜁니다 (목적지 저장소에 이미지가 이미 있어야 합니다)")
+        return None
+    service_name = infra.get("service_name")
+    if not service_name:
+        raise ProvisioningError("service_name 이 없어 복사할 이미지의 목적지 이름을 정할 수 없습니다")
+
+    def prepare(tf: TerraformCli) -> dict[str, Any]:
+        registry_url = _output_value(tf.output_json(), "registry_url")
+        if not registry_url:
+            raise ProvisioningError("registry_url 출력이 없습니다. provisioning 단계가 먼저 끝나 있어야 합니다")
+        credentials = load_aws_credentials(inp.source_credentials_ref) if needs_aws_key else None
+        result = transfer(
+            source_image=str(source_image),
+            service_name=str(service_name),
+            registry_url=str(registry_url),
+            provider=inp.provider,
+            aws_credentials=credentials,
+            report=lambda message: ctx.report("running", 10, message=message),
+        )
+        done = "목적지에 있던 이미지를 사용" if getattr(result, "reused", False) else "이미지 복사 완료"
+        ctx.report("running", 12, message=f"{done} ({result.digest[:19]})")
+        return {"container_image": result.container_image}
+
+    return prepare
+
+
 def deploy_app(
     inp: AppDeployInput,
     ctx: Reporter,
@@ -191,6 +235,7 @@ def deploy_app(
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     worker: WorkerClient | None = None,
+    transfer: Callable[..., TransferResult] = transfer_image,
 ) -> AppDeployOutput:
     # app_deploy 단계: 목적지 앱(Cloud Run)을 배포하고 app_url 을 돌려줌.
     # 앱이 준비되면 Worker 가 그 주소로 보내도록 알림 (update_worker_target).
@@ -202,10 +247,11 @@ def deploy_app(
                 "Worker 주소(환경변수 WORKER_URL)가 없습니다. 지정하거나 입력의 update_worker_target 을 false 로 하세요"
             )
 
-    tf = terraform or default_terraform()
-    project_id, counts, applied, outputs = _converge(inp, ctx, tf, deploy_app=True)
+    prepare = _image_step(inp, ctx, transfer)
+    tf = terraform or default_terraform(inp.provider)
+    project_id, counts, applied, outputs = _converge(inp, ctx, tf, deploy_app=True, prepare=prepare)
 
-    region = inp.target_infra.get("region") or DEFAULT_REGION
+    region = inp.target_infra.get("region") or get_provider(inp.provider).default_region
     try:
         target = build_target(outputs, run_id=inp.run_id, project_id=project_id, region=region)
     except TargetBuildError as exc:

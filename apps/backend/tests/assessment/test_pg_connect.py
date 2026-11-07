@@ -84,3 +84,8 @@ def test_args_validated(bad):
     with pytest.raises(ValueError):
         with m.open_cursor("h", 1, "u", PW, bad):
             pass
+
+
+def test_queries_have_a_statement_timeout():
+    # 접속 뒤 서버가 응답을 멈춰도 터널이 무한히 열려 있지 않게 (psycopg options · psql PGOPTIONS 공통)
+    assert "statement_timeout=" in m.RO_OPTION and "default_transaction_read_only=on" in m.RO_OPTION

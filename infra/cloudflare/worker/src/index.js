@@ -3,6 +3,7 @@ export { Gate } from "./gate.js";
 const DEFAULT_MAX_HOLD_MS = 3_000; 
 const MAX_HOLD_MS_LIMIT = 60_000; 
 const MODES = new Set(["SOURCE", "TARGET"]);
+const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 const DEFAULT_ALLOWED_TARGET_SUFFIXES = [".run.app"];
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1"]);
@@ -105,6 +106,8 @@ export default {
 
     if (url.pathname.startsWith("/control/")) return control(request, url, gate, env);
 
+    const isWrite = !READ_METHODS.has(request.method);
+    let isFailure = true; // 원본 응답을 받기 전에 끝나면 실패로 센다
     const { origin, ticket, target } = await gate.enter();
     try {
       // TARGET 이면 제어 명령으로 정한 주소(target)를 먼저 쓰고, 없으면 설정값 UPSTREAM_TARGET 을 쓴다
@@ -120,6 +123,7 @@ export default {
       upstream.headers.set("X-Forwarded-Host", url.host);
 
       const response = await fetch(upstream, { redirect: "manual" });
+      isFailure = response.status >= 500;
 
       const out = new Response(response.body, response);
       out.headers.set("X-Gate-Origin", origin);
@@ -127,7 +131,7 @@ export default {
     } catch (cause) {
       return error(502, `upstream request failed: ${cause?.message ?? "unknown"}`);
     } finally {
-      await gate.exit(ticket);
+      await gate.exit(ticket, { isWrite, isFailure });
     }
   },
 };

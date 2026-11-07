@@ -23,7 +23,11 @@ from app.features.assessment import pg_tables
 PSQL_TIMEOUT_SEC = 15  # psql 1회 호출 상한(접속 불가 시 최악 시간 단축)
 NULL = "__NULL__"
 SEP = "\x1f"
-RO_OPTION = "-c default_transaction_read_only=on"
+# 읽기 전용 + 쿼리 하나당 15초 제한 (서버가 응답을 멈추면 connect_timeout 만으로는 끝나지 않음)
+STATEMENT_TIMEOUT_MS = 15000
+RO_OPTION = f"-c default_transaction_read_only=on -c statement_timeout={STATEMENT_TIMEOUT_MS}"
+# 네트워크가 끊겨 응답이 아예 오지 않을 때 연결을 끊기 위한 libpq keepalive
+KEEPALIVE = {"keepalives": 1, "keepalives_idle": 10, "keepalives_interval": 5, "keepalives_count": 3}
 _BREW_PSQL = "/opt/homebrew/opt/libpq/bin/psql"
 NEED_DRIVER = "psycopg 또는 psql 필요 — psycopg는 팀 합의 대기"
 
@@ -95,7 +99,7 @@ def open_cursor(host: str, port: int, user: str, password: str,
     if psycopg is not None:
         with psycopg.connect(host=host, port=port, user=user, password=password,
                              dbname=database, sslmode=sslmode, options=RO_OPTION,
-                             autocommit=True, connect_timeout=15) as conn:
+                             autocommit=True, connect_timeout=15, **KEEPALIVE) as conn:
             with conn.cursor() as cur:
                 yield cur
         return

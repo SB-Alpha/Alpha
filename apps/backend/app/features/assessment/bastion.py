@@ -163,7 +163,8 @@ def _stop(proc) -> None:
     except subprocess.TimeoutExpired:
         pass
     if _posix():
-        _signal_group(proc, signal.SIGKILL)  # 이미 없으면 ProcessLookupError(OSError) 무시
+        # 이미 없으면 ProcessLookupError(OSError) 무시. Windows 에는 SIGKILL 이 없어 getattr 로 읽음
+        _signal_group(proc, getattr(signal, "SIGKILL", None))
     try:
         proc.kill()
     except OSError:

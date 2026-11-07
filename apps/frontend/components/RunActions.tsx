@@ -1,29 +1,44 @@
 "use client";
 
-import { useState } from "react";
+import { cutoverOutcome, needsManualCheck } from "@/lib/cutover";
 import { GATE_LABEL } from "@/lib/labels";
-import { BUTTON_DANGER, BUTTON_PRIMARY, BUTTON_SECONDARY, INPUT } from "@/lib/ui";
-import type { RunStatus } from "@/lib/workflows";
+import { BUTTON_DANGER, BUTTON_SECONDARY } from "@/lib/ui";
+import { GATE_BEFORE, type DisplayedPreflight, type RunStatus } from "@/lib/workflows";
+import { CutoverApprovalPanel } from "./CutoverApprovalPanel";
 import { ManualInputForm } from "./ManualInputForm";
 
 type Props = {
   run: RunStatus;
   isBusy: boolean;
-  onApproveCutover: (comment: string) => void;
+  onApproveCutover: (
+    comment: string,
+    approver: string,
+    preflight: DisplayedPreflight,
+    acknowledgeUnknown: boolean,
+  ) => void;
   onManual: (output: Record<string, unknown>, note: string) => void;
   onResume: () => void;
+  onRetryCleanup: () => void;
   onAbort: (reason: string) => void;
 };
 
-export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, onAbort }: Props) {
-  const [cutoverComment, setCutoverComment] = useState("");
-
+export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, onRetryCleanup, onAbort }: Props) {
   const isFinished = run.state === "succeeded" || run.state === "aborted";
-  const canManual = run.state === "paused" || run.state === "failed";
+  const requiredGate = run.current_stage ? GATE_BEFORE[run.current_stage] : undefined;
+  // 승인이 없는 단계의 수동 입력은 백엔드가 항상 거절합니다. 승인이 남아 있으면 결과 불명 전환을 완료로 기록하는 길입니다.
+  const isManualRefused = requiredGate !== undefined && !run.approvals.includes(requiredGate);
   const isWaitingCutover = run.state === "waiting_approval" && run.waiting_gate === "cutover";
+  const isCutoverFailed = run.state === "failed" && run.stages.some((s) => s.stage === "cutover" && s.state === "failed");
+  const isTrafficUncertain = needsManualCheck(run);
+  // 결과를 모르는 전환은 승인 조건이 막아도 사람이 확인한 결과를 기록할 수 있습니다. 전환을 다시 요청하지 않습니다.
+  const canRecordUncertain = isWaitingCutover && isTrafficUncertain;
+  const canManual = canRecordUncertain || ((run.state === "paused" || run.state === "failed") && !isManualRefused);
+  // 전환 후 오류는 에이전트가 다시 받지 않으므로 재시도할 수 없습니다. 수동 입력이나 중단만 남습니다.
+  const canResume = run.state === "failed" && !(isCutoverFailed && cutoverOutcome(run) === "post_switch_failed");
 
   const handleAbort = () => {
-    const reason = window.prompt("이 run 을 중단합니다. 되돌릴 수 없습니다. 사유를 적어 주세요 (선택)");
+    const risk = isTrafficUncertain ? "트래픽이 이미 목적지로 넘어갔을 수 있으니 먼저 확인하세요. " : "";
+    const reason = window.prompt(`${risk}이 run 을 중단합니다. 되돌릴 수 없습니다. 사유를 적어 주세요 (선택)`);
     if (reason !== null) onAbort(reason);
   };
 
@@ -34,28 +49,31 @@ export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, 
       </h2>
 
       {isWaitingCutover && (
-        <div className="rounded-xl border-2 border-amber-400 bg-white p-5">
-          <h3 className="text-lg font-semibold">{GATE_LABEL.cutover}</h3>
-          <p className="mt-1 text-sm text-ink/70">
-            DB 동기화가 끝났습니다. 승인하면 요청 보류 → 최종 반영 확인 → 경로 변경 → 보류 해제 순서로 전환합니다.
-          </p>
-          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-            <input
-              aria-label="전환 승인 메모"
-              value={cutoverComment}
-              onChange={(e) => setCutoverComment(e.target.value)}
-              placeholder="메모 (선택)"
-              className={INPUT}
-            />
-            <button
-              type="button"
-              disabled={isBusy}
-              onClick={() => onApproveCutover(cutoverComment)}
-              className={`${BUTTON_PRIMARY} shrink-0`}
-            >
-              전환 승인
+        <CutoverApprovalPanel
+          key={run.run_id}
+          runId={run.run_id}
+          readiness={run.cutover_readiness ?? null}
+          isBusy={isBusy}
+          isTrafficUncertain={isTrafficUncertain}
+          onApprove={onApproveCutover}
+        />
+      )}
+
+      {run.cleanup_message && (
+        <div
+          role={run.cleanup_state === "failed" ? "alert" : "status"}
+          className={`rounded-lg border p-3 text-sm ${
+            run.cleanup_state === "failed"
+              ? "border-rose-300 bg-rose-50 text-rose-900"
+              : "border-ink/15 bg-stone-50 text-ink/70"
+          }`}
+        >
+          <p>{run.cleanup_message}</p>
+          {run.cleanup_state === "failed" && (
+            <button type="button" disabled={isBusy} onClick={onRetryCleanup} className={`${BUTTON_SECONDARY} mt-2`}>
+              정리 다시 시도
             </button>
-          </div>
+          )}
         </div>
       )}
 
@@ -65,9 +83,16 @@ export function RunActions({ run, isBusy, onApproveCutover, onManual, onResume, 
 
       {!isFinished && (
         <div className="flex flex-wrap gap-2">
-          {run.state === "failed" && (
+          {isCutoverFailed && (
+            <p className="w-full text-sm text-amber-900">
+              {isTrafficUncertain
+                ? "수동 확인 필요: 다시 시도를 권하지 않습니다. 에이전트에서 실제 상태를 확인하고, 전환이 끝났으면 수동 입력으로 완료를 기록하세요."
+                : `다시 시도하려면 ${GATE_LABEL.cutover}을 다시 받아야 합니다.`}
+            </p>
+          )}
+          {canResume && (
             <button type="button" disabled={isBusy} onClick={onResume} className={BUTTON_SECONDARY}>
-              실패 단계 다시 시도
+              {isTrafficUncertain ? `상태 확인 후 ${GATE_LABEL.cutover} 다시 받기` : "실패 단계 다시 시도"}
             </button>
           )}
           <button type="button" disabled={isBusy} onClick={handleAbort} className={BUTTON_DANGER}>

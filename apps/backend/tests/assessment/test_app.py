@@ -99,3 +99,52 @@ def test_value_with_credentials_is_dropped_even_with_plain_name():
 def test_names_ending_in_key_are_secret_but_plain_names_are_not():
     assert app_part.looks_secret("SIGNING_KEY") and app_part.looks_secret("AWS_ACCESS_KEY_ID")
     assert not app_part.looks_secret("KEYCLOAK_REALM") and not app_part.looks_secret("LOG_LEVEL")
+
+
+# --- 조회 정확도 (Codex 검수 11/7) ---
+
+def test_health_path_drops_query_and_fragment():
+    c = container(healthCheck={"command": ["CMD-SHELL", "curl -f http://localhost:8080/health?token=qq-health-tok#x || exit 1"]})
+    res = app_part.collect(_inp(), session(c))
+    assert res.facts.health_check_path == "/health"
+    assert "qq-health-tok" not in res.model_dump_json()
+
+
+def test_load_balancer_port_wins_over_first_port_mapping():
+    c = container(portMappings=[{"containerPort": 9090}, {"containerPort": 8080}])
+    svc = {"serviceName": "target-app", "taskDefinition": "arn:task/x:1",
+           "loadBalancers": [{"targetGroupArn": "arn:tg/x", "containerName": "app", "containerPort": 8080}]}
+    s = session(c, service=svc, elbv2={"describe_target_groups": {"TargetGroups": [{"HealthCheckPath": "/h"}]}})
+    assert app_part.collect(_inp(), s).facts.container_port == 8080
+
+
+def test_many_ports_without_load_balancer_is_reported():
+    c = container(portMappings=[{"containerPort": 9090}, {"containerPort": 8080}])
+    res = app_part.collect(_inp(), session(c))
+    assert res.facts.container_port == 9090
+    assert any("포트가 2개" in g for g in res.gaps)
+
+
+def test_running_task_digest_wins_over_tag_lookup():
+    running = "sha256:" + "b" * 64  # 태그는 이미 새 이미지(DIGEST)로 옮겨졌지만 실제로 도는 건 이전 이미지
+    s = session(ecs={"list_tasks": {"taskArns": ["arn:task/1"]},
+                     "describe_tasks": {"tasks": [{"containers": [{"name": "app", "imageDigest": running}]}]}})
+    res = app_part.collect(_inp(), s)
+    assert res.facts.image_digest == running
+    assert all(name != "describe_images" for name, _ in s.clients["ecr"].calls)
+
+
+def test_two_running_versions_are_not_pinned():
+    s = session(ecs={"list_tasks": {"taskArns": ["arn:task/1", "arn:task/2"]},
+                     "describe_tasks": {"tasks": [
+                         {"containers": [{"name": "app", "imageDigest": "sha256:" + "b" * 64}]},
+                         {"containers": [{"name": "app", "imageDigest": "sha256:" + "c" * 64}]},
+                     ]}})
+    res = app_part.collect(_inp(), s)
+    assert res.facts.image_digest is None
+    assert any("2개 버전" in g for g in res.gaps)
+
+
+def test_no_running_task_falls_back_to_tag_lookup():
+    res = app_part.collect(_inp(), session())
+    assert res.facts.image_digest == DIGEST

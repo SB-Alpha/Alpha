@@ -43,7 +43,7 @@ class FakeTerraform:
     def __init__(self, *, plan_exit=2, plan_json=None, outputs=None):
         self.plan_exit = plan_exit
         self.plan_json = CREATE_PLAN if plan_json is None else plan_json
-        self.outputs = json.loads(FIXTURE.read_text()) if outputs is None else outputs
+        self.outputs = json.loads(FIXTURE.read_text(encoding="utf-8")) if outputs is None else outputs
         self.calls: list[str] = []
         self.var_values: dict | None = None
 
@@ -52,7 +52,7 @@ class FakeTerraform:
 
     def plan(self, var_file, plan_file, on_line=None):
         self.calls.append("plan")
-        self.var_values = json.loads(Path(var_file).read_text())  # 임시 폴더가 사라지기 전에 읽어 둔다
+        self.var_values = json.loads(Path(var_file).read_text(encoding="utf-8"))  # 임시 폴더가 사라지기 전에 읽어 둔다
         return self.plan_exit
 
     def show_plan(self, plan_file):
@@ -186,14 +186,14 @@ def test_progress_never_goes_backwards_and_stays_within_100():
 
 
 def test_missing_terraform_output_becomes_a_provisioning_error():
-    outputs = json.loads(FIXTURE.read_text())
+    outputs = json.loads(FIXTURE.read_text(encoding="utf-8"))
     del outputs["db_private_ip"]
     with pytest.raises(ProvisioningError, match="db_private_ip"):
         run(make_input(), FakeContext(), terraform=FakeTerraform(outputs=outputs))
 
 
 def test_settings_that_would_break_cdc_are_reported_as_problems():
-    outputs = json.loads(FIXTURE.read_text())
+    outputs = json.loads(FIXTURE.read_text(encoding="utf-8"))
     outputs["db_ssl_mode"]["value"] = "ALLOW_UNENCRYPTED_AND_ENCRYPTED"
     ctx = FakeContext()
     result = run(make_input(), ctx, terraform=FakeTerraform(outputs=outputs))
@@ -246,7 +246,7 @@ def fake_clock():
 
 
 def test_deploy_app_turns_the_app_on_and_waits_until_ready():
-    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text())))
+    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text(encoding="utf-8"))))
     statuses = iter([0, 503, 200])  # 아직 연결 안 됨 → 시작 중 → 정상
     asked: list[str] = []
 
@@ -265,7 +265,7 @@ def test_deploy_app_turns_the_app_on_and_waits_until_ready():
 
 
 def test_deploy_app_fails_if_the_app_never_becomes_ready():
-    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text())))
+    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text(encoding="utf-8"))))
     with pytest.raises(ProvisioningError, match="200"):
         deploy_app(
             make_app_input(health_timeout_s=5),
@@ -284,7 +284,7 @@ def test_deploy_app_fails_if_terraform_produced_no_app_url():
 
 
 def test_deploy_app_points_the_worker_at_the_new_app_after_it_is_ready():
-    tf, worker = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text()))), FakeWorker()
+    tf, worker = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text(encoding="utf-8")))), FakeWorker()
     result = deploy_app(
         make_app_input(update_worker_target=True),
         FakeContext(),
@@ -298,7 +298,7 @@ def test_deploy_app_points_the_worker_at_the_new_app_after_it_is_ready():
 
 
 def test_deploy_app_does_not_touch_the_worker_when_the_app_is_not_ready():
-    tf, worker = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text()))), FakeWorker()
+    tf, worker = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text(encoding="utf-8")))), FakeWorker()
     with pytest.raises(ProvisioningError):
         deploy_app(
             make_app_input(update_worker_target=True, health_timeout_s=5),
@@ -314,14 +314,14 @@ def test_deploy_app_does_not_touch_the_worker_when_the_app_is_not_ready():
 
 def test_deploy_app_fails_before_terraform_when_the_worker_is_not_configured(monkeypatch):
     monkeypatch.delenv("WORKER_URL", raising=False)
-    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text())))
+    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text(encoding="utf-8"))))
     with pytest.raises(ProvisioningError, match="WORKER_URL"):
         deploy_app(make_app_input(update_worker_target=True), FakeContext(), terraform=tf, http_get=lambda url: 200)
     assert tf.calls == []  # Cloud Run 을 만들기 전에 멈춘다
 
 
 def test_deploy_app_reports_a_worker_failure_as_an_error():
-    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text())))
+    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text(encoding="utf-8"))))
     with pytest.raises(ProvisioningError, match="409"):
         deploy_app(
             make_app_input(update_worker_target=True),
