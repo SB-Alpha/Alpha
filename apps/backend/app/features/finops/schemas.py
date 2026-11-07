@@ -2,8 +2,7 @@
 
 역할 나누기 (슬랙 11/7 합의):
 - 숫자(사용량·단가·비용·절감률)는 계산 코드가 냅니다. 비용 계산(CloudWatch·가격 API·Infracost)은 박준서님.
-- AI 는 계산된 숫자를 받아 승인자가 읽을 제안 문장과 주의점만 씁니다 (이주호). AI 가 숫자를 만들지 않게
-  ai.py 가 문장 속 숫자를 입력·계산 결과와 대조해서, 없는 숫자가 있으면 규칙 문장으로 돌아갑니다.
+- 금액·증감·추천이 들어가는 문장은 코드가 씁니다. AI 는 숫자 없는 설명 문장만 주의점 뒤에 덧붙입니다 (이주호).
 
 `FinopsInput` 은 박준서님 계산 결과를 받을 자리입니다. 형식이 확정되면 맞춥니다.
 """
@@ -16,8 +15,9 @@ from pydantic import BaseModel, Field
 
 
 class CostLine(BaseModel):
-    item: str  # 예: "앱 컴퓨팅", "DB", "스토리지"
-    monthly_usd: float | None = None  # 모르면 None. 합계에서 빠지고 "미제공" 으로 표시
+    item: str  # 예: "앱 컴퓨팅", "DB", "스토리지". 원본과 후보가 같은 이름을 써야 항목끼리 맞춰집니다
+    # 모르면 None. NaN·무한대·음수는 계산을 망가뜨리므로 입력에서 거절합니다
+    monthly_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     source: str  # 숫자 출처. 예: "aws-pricing-api", "infracost", "cloudwatch", "manual"
 
 
@@ -51,16 +51,17 @@ class Saving(BaseModel):
     """후보 하나의 절감 계산 결과. 전부 계산 코드가 냅니다."""
 
     cloud: str
-    current_monthly_usd: float | None
+    current_monthly_usd: float | None  # 원본 모든 항목에 금액이 있을 때만. 일부만 알면 None
     candidate_monthly_usd: float | None  # 아는 항목만 더한 합계 (complete 가 False 면 일부)
     monthly_saving_usd: float | None  # 양수면 절감, 음수면 증가. 어느 쪽이든 금액이 빠진 항목이 있으면 None
     saving_pct: float | None  # 소수 1자리. 현재 비용이 0 이거나 모르면 None
-    complete: bool  # 양쪽 모든 항목에 금액이 있으면 True. False 면 일부 항목이 빠진 합계
+    complete: bool  # 양쪽 모든 항목에 금액이 있고 후보에 원본 항목이 다 있으면 True
+    missing: list[str] = Field(default_factory=list)  # 금액이 없거나 후보에 없는 항목. 예: "azure DB"
 
 
 class FinopsReport(BaseModel):
     savings: list[Saving]
     best: str | None  # 완전한 합계 중 가장 많이 아끼는 후보. 없으면 None
-    summary: list[str]  # 승인자용 문장
-    notes: list[str] = Field(default_factory=list)  # 주의점
-    summary_source: Literal["rules", "ai"] = "rules"
+    summary: list[str]  # 승인자용 문장. 항상 코드가 씁니다
+    notes: list[str] = Field(default_factory=list)  # 주의점. 규칙 주의점이 먼저, AI 설명은 그 뒤
+    summary_source: Literal["rules", "ai"] = "rules"  # "ai" 면 notes 끝에 AI 설명이 붙었다는 뜻

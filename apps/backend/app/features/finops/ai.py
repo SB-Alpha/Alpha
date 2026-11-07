@@ -1,9 +1,10 @@
-"""AI 보강: 비용 비교 결과를 승인자가 읽을 제안 문장으로 다듬습니다. (이주호)
+"""AI 보강: 비용 비교 결과에 승인자가 알아야 할 설명을 덧붙입니다. (이주호)
 
 - 기본은 꺼져 있습니다. ALPHA_AI_ENABLED=1 일 때만 Claude 를 부릅니다 (assessment AI 와 같은 스위치).
-- AI 는 문장(summary · notes)만 씁니다. savings · best 같은 숫자 결과는 절대 바꾸지 않습니다.
-- **숫자 대조:** AI 문장에 나온 숫자가 입력이나 계산 결과에 없으면 그 결과는 버리고 규칙 문장을 씁니다.
-- 꺼져 있거나, SDK 가 없거나, 호출·검증이 실패해도 규칙 문장을 그대로 돌려줍니다.
+- 금액·증감·추천 문장(summary)과 savings · best 는 코드가 씁니다. AI 는 그 문장을 바꾸지 못합니다.
+- AI 는 주의점 뒤에 붙일 설명만 씁니다. 숫자가 있거나 비용 판단·추천을 하는 설명은 버립니다.
+  입력에 있는 숫자인지 대조하는 방식은 "$15 를 $60 으로" 같은 틀린 조합을 못 막아서, 숫자 자체를 막습니다.
+- 꺼져 있거나, SDK 가 없거나, 호출·검증이 실패해도 규칙 결과를 그대로 돌려줍니다.
 """
 
 from __future__ import annotations
@@ -28,18 +29,22 @@ TIMEOUT_SECONDS = 60.0
 MAX_SENTENCES = 5
 
 SYSTEM = (
-    "너는 클라우드 이전 비용 비교를 승인자에게 설명하는 도우미다. 입력 JSON 의 숫자는 계산 코드가 이미 낸 값이다.\n"
-    "- 숫자를 새로 계산하거나 바꾸지 마라. 문장에 쓰는 숫자는 입력 JSON 에 있는 값을 그대로 옮겨라.\n"
-    "- 입력에 없는 값·단가·기간을 지어내지 마라. 모르는 것은 '미제공' 이라고 써라.\n"
-    "- summary 는 한국어 문장 2~5개: 현재 비용 / 후보별 증감 / 추천 후보 또는 추천할 수 없는 이유.\n"
-    "- notes 는 승인자가 알아야 할 주의점(빠진 항목, 근거 기간, 크기 줄이기 제안의 위험) 최대 5개."
+    "너는 클라우드 이전 비용 비교를 승인자에게 설명하는 도우미다. 금액·증감·추천 문장은 계산 코드가 이미 썼다 "
+    "(입력의 rule_summary · rule_notes).\n"
+    "- 숫자를 쓰지 마라. 금액·비율·기간·개수 모두 쓰지 마라.\n"
+    "- 어느 후보가 싸다·비싸다·아낀다·추천한다 같은 판단을 하지 마라.\n"
+    "- notes 에 승인자가 확인할 점을 한국어 문장 1~5개로 써라: 빠진 항목이 왜 중요한지, 비용 근거의 한계, "
+    "크기 줄이기 제안을 적용할 때의 위험.\n"
+    "- 입력에 없는 사실을 지어내지 마라."
 )
 
-_NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_DIGIT = re.compile(r"\d")
+# 숫자 없이도 비용 판단·추천이 되는 표현. 이런 문장은 코드만 씁니다
+_JUDGEMENT = ("추천", "권장", "저렴", "비싸", "싸게", "싸다", "싼 ", "절감", "아끼", "아낄", "아낍", "줄어", "늘어",
+              "이득", "손해", "선택하", "recommend", "cheap", "expensive", "saving")
 
 
 class AiNotes(BaseModel):
-    summary: list[str]
     notes: list[str] = Field(default_factory=list)
 
 
@@ -50,61 +55,45 @@ def enabled() -> bool:
 def enhance(inp: FinopsInput, report: FinopsReport) -> FinopsReport:
     if not enabled():
         return report
-    facts = _facts_for_prompt(inp, report)
     try:
-        notes = _ask_claude(facts)
+        notes = _ask_claude(_facts_for_prompt(inp, report))
     except Exception as e:  # 어떤 실패든 규칙 결과로 돌아감
         log.warning("finops AI 보강 실패, 규칙 결과 사용 (%s)", type(e).__name__)
         return report
-    if notes is None or not _valid(notes):
+    if notes is None:
         return report
-    unknown = unknown_numbers(notes.summary + notes.notes, facts)
-    if unknown:
-        log.warning("finops AI 문장에 입력에 없는 숫자 %d개, 규칙 결과 사용", len(unknown))
+    problem = check_notes(notes)
+    if problem:
+        log.warning("finops AI 설명을 버림 (%s), 규칙 결과 사용", problem)
         return report
+    # 규칙 주의점(빠진 항목·근거 기간)은 지우지 않고, AI 설명은 그 뒤에 붙입니다
     return report.model_copy(update={
-        "summary": [s.strip() for s in notes.summary],
-        "notes": [n.strip() for n in notes.notes[:MAX_SENTENCES]],
+        "notes": report.notes + [n.strip() for n in notes.notes],
         "summary_source": "ai",
     })
 
 
-def _valid(notes: AiNotes) -> bool:
-    return 2 <= len(notes.summary) <= MAX_SENTENCES and all(s.strip() for s in notes.summary)
+def check_notes(notes: AiNotes) -> str | None:
+    """쓸 수 없는 설명이면 이유를, 쓸 수 있으면 None 을 돌려줍니다."""
+    if not 1 <= len(notes.notes) <= MAX_SENTENCES or not all(n.strip() for n in notes.notes):
+        return "sentence_count"
+    for note in notes.notes:
+        if _DIGIT.search(note):
+            return "number"
+        lowered = note.lower()
+        if any(word in lowered for word in _JUDGEMENT):
+            return "cost_judgement"
+    return None
 
 
 def _facts_for_prompt(inp: FinopsInput, report: FinopsReport) -> str:
     data = {
         "input": inp.model_dump(mode="json", exclude={"run_id"}),
         "computed": {"savings": [s.model_dump(mode="json") for s in report.savings], "best": report.best},
+        "rule_summary": report.summary,
+        "rule_notes": report.notes,
     }
     return json.dumps(data, ensure_ascii=False, sort_keys=True)
-
-
-def _as_number(text: str) -> float | None:
-    try:
-        return float(text.replace(",", ""))
-    except ValueError:
-        return None
-
-
-def unknown_numbers(sentences: list[str], facts: str) -> list[str]:
-    """문장 속 숫자 중 facts(JSON) 에 없는 것. 반올림 표기(소수 0~2자리)와 천 단위 쉼표는 같은 숫자로 봅니다."""
-    allowed: set[float] = set()
-    for token in _NUMBER.findall(facts):
-        value = _as_number(token)
-        if value is None:
-            continue
-        for digits in (0, 1, 2):
-            allowed.add(round(value, digits))
-        allowed.add(abs(value))
-    found = []
-    for sentence in sentences:
-        for token in _NUMBER.findall(sentence):
-            value = _as_number(token)
-            if value is None or value not in allowed:
-                found.append(token)
-    return found
 
 
 def _ask_claude(facts: str) -> AiNotes | None:
