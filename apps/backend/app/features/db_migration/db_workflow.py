@@ -1,7 +1,7 @@
 """DB 이전 모듈의 입구이자 전체 절차. 호출하는 쪽은 이 파일의 다섯 함수만 알면 된다.
 
-    run(입력)                 입력을 검사·주입하고 run_id를 돌려준다 (run_input.py).
-                              지금은 1번까지만 연결돼 있고 이후 단계는 다시 붙이는 중이다.
+    run(입력)                 입력 검사·주입 후 DB·네트워크를 백그라운드에서 조회한다.
+                              실행 모델 변환 이후 단계는 다시 붙이는 중이다.
       1. 입력 검사, 비밀값 저장     입력 비밀값은 이 시점 이후 이름표로만 다룬다.
       2. 에이전트 확인             Kafka, Connect, 플러그인
       3. 원본 확인                source를 받았으면 그대로, 없으면 넘겨받은 조회 함수로
@@ -41,12 +41,12 @@ from pydantic import ValidationError
 
 from app.core.secrets import delete_secret, has_secret, put_secret, resolve
 
-from . import preflight, redact, vpn
+from . import cloud_lookup, preflight, redact, vpn
 from .client import AgentError, AgentSettings, CdcAgentClient
 from .cloud_guides import credential_next_steps
 from .input_secrets import INPUT_SECRETS
 from .progress_log import ProgressLog
-from .run_input import InvalidInput, inject, parse, saved_clouds
+from .run_input import InjectedRun, InvalidInput, inject, parse, saved_clouds
 from .schemas import (
     CutoverResult,
     DbMigrationInput,
@@ -90,7 +90,7 @@ BUSY_MESSAGE = "run {run_id} is already running or being cleaned up"
 # 이 run 밖에 저장된 입력의 이름표. 값은 담지 않는다.
 OTHER_REFS = "other-refs"
 
-NEXT_STEP_NOT_BUILT = "입력 주입까지만 구현되어 있습니다. 다음 단계(원본·목적지 조회)는 아직 연결되지 않았습니다."
+NEXT_STEP_NOT_BUILT = "DB 주소·네트워크 조회까지 완료했습니다. 다음 단계(실행 모델 변환·VPN 연결)는 아직 연결되지 않았습니다."
 
 # [이전 입력 앞단] run_input.py로 대체했다. 조회 단계 연결이 끝나면 지운다.
 # Discover = Callable[[SourceLookup], Any]
@@ -128,6 +128,8 @@ class _Progress:
     message: str | None = None
     source: tuple[str, str] | None = None
     job_registered: bool = False
+    target_network: str | None = None
+    lookup: cloud_lookup.FoundRoute | None = None
 
 
 _active: set[str] = set()
@@ -144,7 +146,7 @@ _active_lock = threading.Lock()
 
 
 def run(inp: Any, *, agent: CdcAgentClient | None = None, ctx: Reporter | None = None) -> str:
-    """입력을 검사하고 권한과 DB 계정을 이름표로 바꾼다. 다음 단계가 없으므로 status에는 failed로 남는다."""
+    """입력 주입 후 DB·네트워크를 백그라운드에서 조회한다. 이후 미구현 단계는 failed로 표시한다."""
     parsed = parse(inp)
     if parsed.run_id:
         _refuse_ended_run(parsed.run_id, agent)
@@ -152,17 +154,44 @@ def run(inp: Any, *, agent: CdcAgentClient | None = None, ctx: Reporter | None =
     if not _reserve(run_id):
         raise NotAllowed(BUSY_MESSAGE.format(run_id=run_id))
     try:
-        inject(run_id, parsed)
+        injected = inject(run_id, parsed)
     except BaseException:
         with _active_lock:
             _runs.pop(run_id, None)
+        _release(run_id)
         raise
-    else:
-        _set_progress(run_id, state="failed", message=NEXT_STEP_NOT_BUILT)
-        _end(ctx, "failed", 0, NEXT_STEP_NOT_BUILT)
+    try:
+        threading.Thread(target=_lookup_in_background, args=(injected, ctx), daemon=True,
+                         name=f"db-lookup-{run_id}").start()
+    except BaseException:
+        _set_progress(run_id, state="failed", message="DB 조회 작업을 시작하지 못했습니다. 다시 실행하세요.")
+        _release(run_id)
+        raise
+    return run_id
+
+
+def _lookup_in_background(injected: InjectedRun, ctx: Reporter | None) -> None:
+    run_id = injected.run_id
+    try:
+        _set_progress(run_id, message="DB 주소·네트워크 조회 중")
+        if ctx is not None:
+            ctx.report("running", 0, None, "DB 주소·네트워크 조회 중")
+        found = cloud_lookup.find_route(injected)
+        with _active_lock:
+            stopped = run_id in _stop_requested
+            if not stopped:
+                _runs[run_id].lookup = found
+                _runs[run_id].target_network = cloud_lookup.network_exposure(found.target.db)
+        state = "aborted" if stopped else "failed"
+        message = "DB 조회 후 중단했습니다." if stopped else NEXT_STEP_NOT_BUILT
+        _set_progress(run_id, state=state, message=message)
+        _end(ctx, state, 0, message)
+    except Exception as exc:  # noqa: BLE001 - API 원문은 상태나 로그에 쓰지 않는다
+        message = str(exc) if isinstance(exc, cloud_lookup.LookupFailed) else "DB 조회를 완료하지 못했습니다. 권한과 클라우드 API 상태를 확인하세요."
+        _set_progress(run_id, state="failed", message=message)
+        _end(ctx, "failed", 0, message)
     finally:
         _release(run_id)
-    return run_id
 
 
 # [이전 입력 앞단] run_input.py로 대체했다. 조회 단계 연결이 끝나면 지운다.
@@ -1006,6 +1035,7 @@ def _status_from_memory(run_id: str, progress: _Progress) -> RunStatus:
     return RunStatus(
         run_id=run_id, job_id=to_job_id(run_id), state=progress.state, phase=progress.stage, progress=0,
         message=progress.message,
+        metrics={"target_db_network": progress.target_network} if progress.target_network else {},
         cleanup_required=progress.state in CLEANUP_STATES and bool(remaining), remaining=remaining,
     )
 

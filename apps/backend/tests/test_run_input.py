@@ -1,13 +1,16 @@
 """The run entrance: input shape, stored credentials, and no secret value leaving it."""
 
 import copy
+import threading
+import time
+from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from app.core.secrets import has_secret, put_secret, resolve
-from app.features.db_migration import db_workflow, run_input
+from app.features.db_migration import cloud_lookup, db_workflow, run_input
 from app.features.db_migration import router as db_router
 from app.features.db_migration.cloud_guides import CLOUD_GUIDES, credential_next_steps
 from app.main import app
@@ -47,8 +50,30 @@ class NoJobAgent:
         raise db_workflow.AgentError(404, "not found")
 
 
+def _wait_for_lookup(run_id):
+    deadline = time.monotonic() + 5
+    while run_id in db_workflow._active and time.monotonic() < deadline:
+        threading.Event().wait(0.005)
+    assert run_id not in db_workflow._active
+
+
+def _run_and_wait(*args, **kwargs):
+    run_id = db_workflow.run(*args, **kwargs)
+    _wait_for_lookup(run_id)
+    return run_id
+
+
+def _found_route(injected):
+    def endpoint(side):
+        return SimpleNamespace(cloud=side.cloud, region=side.region,
+                               db=SimpleNamespace(host="10.20.0.5", port=5432, publicly_accessible=False),
+                               cidrs=("10.20.0.0/24",))
+    return SimpleNamespace(source=endpoint(injected.source), target=endpoint(injected.target))
+
+
 @pytest.fixture(autouse=True)
 def env(tmp_path, monkeypatch):
+    monkeypatch.setattr(cloud_lookup, "find_route", _found_route)
     monkeypatch.setenv("ALPHA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("ALPHA_SECRETS_KEY", Fernet.generate_key().decode())
     with db_workflow._active_lock:
@@ -165,7 +190,7 @@ def test_credentials_with_wrong_keys_do_not_leak_them():
 def test_run_reports_that_later_steps_are_not_connected(credentials):
     agent = NoJobAgent()
 
-    assert db_workflow.run(INPUT, agent=agent) == "mig-001"
+    assert _run_and_wait(INPUT, agent=agent) == "mig-001"
 
     status = db_workflow.status("mig-001", agent=agent)
     assert status.state == "failed"
@@ -179,14 +204,14 @@ def test_run_makes_a_run_id_when_left_out(credentials):
     raw = copy.deepcopy(INPUT)
     del raw["run_id"]
 
-    assert db_workflow.run(raw, agent=NoJobAgent()).startswith("mig-")
+    assert _run_and_wait(raw, agent=NoJobAgent()).startswith("mig-")
 
 
 def test_run_without_credentials_leaves_no_run_behind():
     agent = NoJobAgent()
 
     with pytest.raises(run_input.MissingCredentials):
-        db_workflow.run(INPUT, agent=agent)
+        _run_and_wait(INPUT, agent=agent)
 
     with pytest.raises(db_workflow.UnknownRun):
         db_workflow.status("mig-001", agent=agent)
@@ -198,12 +223,12 @@ def test_run_refuses_a_run_that_is_already_active(credentials):
         db_workflow._active.add("mig-001")
 
     with pytest.raises(db_workflow.NotAllowed):
-        db_workflow.run(INPUT, agent=NoJobAgent())
+        _run_and_wait(INPUT, agent=NoJobAgent())
 
 
 def test_stop_removes_the_saved_accounts(credentials):
     agent = NoJobAgent()
-    db_workflow.run(INPUT, agent=agent)
+    _run_and_wait(INPUT, agent=agent)
 
     result = db_workflow.stop("mig-001", agent=agent)
 
@@ -224,6 +249,7 @@ def test_http_accepts_the_input(http, credentials):
     resp = http.post("/db-migration/runs", json=INPUT)
 
     assert resp.status_code == 202 and resp.json() == {"run_id": "mig-001"}
+    _wait_for_lookup("mig-001")
     assert http.get("/db-migration/runs/mig-001").json()["state"] == "failed"
 
 
@@ -245,7 +271,7 @@ def test_cleanup_guidance_follows_the_clouds_of_the_input(credentials):
     agent = NoJobAgent()
     raw = changed("target.cloud", "azure")
     raw["target"]["region"] = "koreacentral"
-    db_workflow.run(raw, agent=agent)
+    _run_and_wait(raw, agent=agent)
 
     steps = db_workflow.stop("mig-001", agent=agent).next_steps
 
@@ -256,7 +282,7 @@ def test_cleanup_guidance_follows_the_clouds_of_the_input(credentials):
 
 def test_cleanup_guidance_for_gcp_target(credentials):
     agent = NoJobAgent()
-    db_workflow.run(INPUT, agent=agent)
+    _run_and_wait(INPUT, agent=agent)
 
     steps = db_workflow.stop("mig-001", agent=agent).next_steps
 
@@ -307,7 +333,7 @@ def test_every_route_is_injected_the_same_way(credentials, source, target):
 @pytest.mark.parametrize(("source", "target"), ROUTES)
 def test_every_route_gets_guidance_for_its_own_clouds(credentials, source, target):
     agent = NoJobAgent()
-    db_workflow.run(route_input(source, target), agent=agent)
+    _run_and_wait(route_input(source, target), agent=agent)
 
     steps = db_workflow.stop("mig-001", agent=agent).next_steps
 
