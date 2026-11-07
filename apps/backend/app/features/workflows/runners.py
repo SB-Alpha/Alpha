@@ -33,7 +33,8 @@ _STEP_NUMBER_KEYS = ("elapsed_ms", "waited_ms", "mismatch")
 _MAX_AGENT_TEXT = 300
 _MAX_AGENT_TEXT_SCANNED = 4000  # 아주 긴 값에 정규식이 오래 걸리지 않게 먼저 자릅니다
 _DEFAULT_CUTOVER_PROGRESS = 75
-_PAST_CUTOVER_PHASES = {"cutover", "stabilizing", "closed"}
+_SWITCHED_PHASES = {"stabilizing", "closed"}
+_PAST_CUTOVER_PHASES = {"cutover", *_SWITCHED_PHASES}
 
 PROBE_SETTLE_S = 3.0
 
@@ -459,10 +460,12 @@ def clean_up_cdc(run: RunStatus) -> bool:
     return True
 
 
-def _cdc_end_reason(result: Any) -> str:
-    """db_migration 이 끝난 이유. streaming 이후의 종료는 정상 흐름이 아니므로 항상 사유를 만듭니다."""
+def _cdc_end_reason(result: Any) -> str | None:
+    """db_migration 이 끝난 이유. 전환이 끝나 돌아온 것만 정상 종료이고, 그 밖의 streaming 이후 종료에는 항상 사유를 만듭니다."""
     is_mapping = isinstance(result, Mapping)
     state = result.get("state") if is_mapping else getattr(result, "state", None)
+    if state in _SWITCHED_PHASES:
+        return None
     message = result.get("message") if is_mapping else getattr(result, "message", None)
     return message or f"CDC 복제 작업이 끝났습니다 (상태: {state})"
 
@@ -564,7 +567,7 @@ def run_db_migration(
     runner_returned = [False]
 
     def _worker() -> None:
-        ended_with: str
+        ended_with: str | None
         try:
             res = db_migration_service.run(inp, _ReportingProxy())
             result_holder.append(res)
@@ -577,7 +580,7 @@ def run_db_migration(
         with handoff_lock:
             worker_done[0] = True
             is_background = runner_returned[0]
-        if is_background and ctx is not None:
+        if is_background and ctx is not None and ended_with is not None:
             _report_cdc_ended(ctx, ended_with)
 
     thread = threading.Thread(target=_worker, daemon=True, name=f"cdc-runner-{job_id}")

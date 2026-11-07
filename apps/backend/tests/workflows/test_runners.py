@@ -1561,3 +1561,30 @@ def test_cdc_end_report_hides_connection_details():
         assert "alpha_admin" not in text
         assert "password authentication failed" in text
 
+
+
+# -- 전환 후 CDC 추적 종료 --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("phase", ["stabilizing", "closed"])
+def test_cdc_tracking_ending_after_the_switch_is_not_an_error(tmp_path, monkeypatch, phase):
+    next_stage_started = threading.Event()
+    ended = threading.Event()
+
+    def cdc(inp, proxy):
+        proxy.report("running", 50, {"phase": "streaming"}, "복제 중")
+        assert next_stage_started.wait(WAIT_S)
+        ended.set()
+        return {"state": phase}
+
+    def app_deploy(run, ctx):
+        next_stage_started.set()
+        return {"healthy": True}
+
+    engine = _engine_through_cdc(tmp_path, monkeypatch, cdc, app_deploy)
+    run_id = _advance_past_plan_approval(engine)
+    engine.advance(run_id)
+
+    assert ended.wait(WAIT_S)
+    time.sleep(0.05)  # 추적 스레드가 끝난 뒤에 남길 기록을 기다립니다.
+    assert "cdc_error" not in engine.get(run_id).stage(StageName.DB_MIGRATION).metrics
