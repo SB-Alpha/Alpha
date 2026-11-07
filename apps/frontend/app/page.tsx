@@ -15,6 +15,7 @@ type TextField =
   | "service_name"
   | "aws_credentials_ref"
   | "db_admin_ref"
+  | "target_project_id"
   | "aws_region"
   | "aws_role_ref"
   | "ecs_service"
@@ -32,6 +33,7 @@ const INITIAL: FormState = {
   aws_credentials_ref: "",
   db_admin_ref: "",
   target_preset: GcpTargetAdapter.provider,
+  target_project_id: "",
   aws_region: DEFAULT_AWS_REGION,
   aws_role_ref: "",
   ecs_service: "",
@@ -76,7 +78,7 @@ function toRequest(form: FormState): MigrationRequest {
     db_credentials_ref: optional(form.db_credentials_ref),
     db_admin_ref: optional(form.db_admin_ref),
     target_region: targetRegion,
-    target_infra: adapter.toConfig(targetRegion),
+    target_infra: adapter.toConfig(targetRegion, form.target_project_id),
   };
 }
 
@@ -159,23 +161,33 @@ export default function HomePage() {
             {field(DB_ADMIN_FIELD, form.db_credentials_ref.trim() === "")}
           </div>
 
-          <div>
-            <label htmlFor="target_preset" className="text-xs font-semibold text-ink/60">
-              목적지 클라우드
-            </label>
-            <select
-              id="target_preset"
-              value={form.target_preset}
-              onChange={(e) => setForm({ ...form, target_preset: e.target.value as TargetInfraType })}
-              className={`${INPUT} mt-1`}
-            >
-              {TARGET_ADAPTERS.map((option) => (
-                <option key={option.provider} value={option.provider} disabled={!option.isAvailable}>
-                  {option.label}
-                  {option.isAvailable ? "" : " · 어댑터 준비 중"}
-                </option>
-              ))}
-            </select>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label htmlFor="target_preset" className="text-xs font-semibold text-ink/60">
+                목적지 클라우드
+              </label>
+              <select
+                id="target_preset"
+                value={form.target_preset}
+                onChange={(e) => setForm({ ...form, target_preset: e.target.value as TargetInfraType })}
+                className={`${INPUT} mt-1`}
+              >
+                {TARGET_ADAPTERS.map((option) => (
+                  <option key={option.provider} value={option.provider} disabled={!option.isAvailable}>
+                    {option.label}
+                    {option.isAvailable ? "" : " · 어댑터 준비 중"}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {field(
+              {
+                key: "target_project_id",
+                label: `목적지 ${adapter.cloudName} ${adapter.projectIdLabel}`,
+                placeholder: adapter.projectIdPlaceholder,
+              },
+              false,
+            )}
           </div>
 
           <p className="text-xs text-ink/50">비밀번호·키 원문은 넣지 않습니다. Secret 경로 같은 참조만 넣으세요.</p>
