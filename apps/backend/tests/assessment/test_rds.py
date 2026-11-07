@@ -14,6 +14,7 @@ def _inst(status="in-sync", groups=True):
     return {
         "DBInstanceIdentifier": "db-example", "DbiResourceId": "db-ABC", "Engine": "postgres",
         "EngineVersion": "16.15", "DBInstanceClass": "db.t3.micro", "AllocatedStorage": 20,
+        "MultiAZ": True, "BackupRetentionPeriod": 7,
         "PubliclyAccessible": False, "Endpoint": {"Address": HOST, "Port": 5432},
         "VpcSecurityGroups": [{"VpcSecurityGroupId": SG}],
         "DBParameterGroups": [{"DBParameterGroupName": "pg", "ParameterApplyStatus": status}] if groups else [],
@@ -55,6 +56,14 @@ def test_normal():
     assert r.network.vpc_id == VPC and r.vpc_id == VPC and r.network.cidr == "172.31.0.0/16"
     assert r.network.route_table_ids == [RTB] and r.network.db_security_group_id == SG
     assert r.resource_id == "db-ABC"
+    assert r.db.ha_enabled is True and r.db.backup_retention_days == 7 and r.network.allowed_cidrs == []
+
+
+def test_ha_backup_absent():
+    i = _inst()
+    del i["MultiAZ"], i["BackupRetentionPeriod"]
+    r = collect_rds(_session([i]), "ap-northeast-2", None)
+    assert r.db.ha_enabled is None and r.db.backup_retention_days is None
 
 
 def test_pending_reboot():

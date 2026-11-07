@@ -1,0 +1,15 @@
+# Imported ECR image; existing postgres/cloudflared services remain unchanged.
+services:
+  was:
+    image: alpha-target-app:onprem-054d4487623f
+    platform: linux/amd64
+    restart: unless-stopped
+    env_file:
+      - .was.env
+    ports:
+      - "127.0.0.1:18081:8080"
+    networks:
+      - back
+      - front
+    mem_limit: 512m
+    cpus: 1.0

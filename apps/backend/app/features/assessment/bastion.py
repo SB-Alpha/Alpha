@@ -22,7 +22,7 @@ from app.features.assessment.aws import AwsSession, error_code
 BASTION_TAG_KEY = "Purpose"
 BASTION_TAG_VALUE = "alpha-assessment-bastion"
 _REGION_RE = re.compile(r"^[a-z]{2}(-[a-z]+)+-\d$")
-_HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+$")
+_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]*$")  # 첫 글자는 영문·숫자(ssh 옵션으로 읽히지 않게)
 _SECRET_MARKS = ("AKIA", "ASIA", "SecretAccessKey", "SessionToken")
 
 
