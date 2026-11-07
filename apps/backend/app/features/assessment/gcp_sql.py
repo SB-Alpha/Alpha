@@ -113,6 +113,14 @@ def proxy_tunnel(connection_name: str, private_ip: bool, timeout: float = 20.0):
     return _open
 
 
+_SHARED = {"db-f1-micro": (1, 0.6), "db-g1-small": (1, 1.7)}
+
+
+def _size(tier: str | None) -> tuple[int | None, float | None]:
+    m = re.fullmatch(r"db-custom-(\d+)-(\d+)", tier or "")
+    return (int(m[1]), int(m[2]) / 1024) if m else _SHARED.get(tier, (None, None))
+
+
 def collect(
     inp: AssessmentInput,
     session: Any,
@@ -155,9 +163,10 @@ def collect(
     public = ip.get("ipv4Enabled")
     addrs = {a.get("type"): a.get("ipAddress") for a in d.get("ipAddresses") or []}
     host = addrs.get("PRIVATE") or addrs.get("PRIMARY")
+    vcpu, mem = _size(st.get("tier"))
     src.db = DbInfo(
         engine="postgres" if ver.startswith("POSTGRES") else None, publicly_accessible=public, engine_version=version,
-        instance_class=st.get("tier"), allocated_storage_gb=disk_gb, logical_replication=lr,
+        instance_class=st.get("tier"), vcpu=vcpu, memory_gib=mem, allocated_storage_gb=disk_gb, logical_replication=lr,
         ha_enabled=None if "availabilityType" not in st else st["availabilityType"] == "REGIONAL",
         backup_retention_days=((st.get("backupConfiguration") or {}).get("backupRetentionSettings") or {}).get("retainedBackups"))
     src.source_db = SourceDb(

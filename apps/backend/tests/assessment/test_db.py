@@ -1,5 +1,6 @@
 """db.py 통합 테스트: rds·bastion·refs·pg_connect 는 가짜로 바꿉니다 (AWS·DB 접속 없음)."""
 
+import contextlib
 from contextlib import contextmanager
 
 import pytest
@@ -190,3 +191,15 @@ def test_service_run_fills_tables(fx, monkeypatch):
     out = service.run(INP, session=session())
     assert out.source.tables == ["public.t"] and out.source.db.database == "appdb"
     assert SENTINEL not in out.model_dump_json()
+
+
+@pytest.mark.parametrize("cloud", ["gcp", "azure"])
+def test_slots_filled_for_non_aws(fx, monkeypatch, cloud):
+    from app.features.assessment import csp
+    r = fx["rds"]
+    monkeypatch.setitem(db.COLLECTORS, cloud, lambda inp, sess: csp.CspSource(
+        db=r.db, source_db=r.source_db, network=r.network, creds={"user": "u", "password": SENTINEL},
+        tunnel=lambda: contextlib.nullcontext(("h", 5432))))
+    fx["catalog"] = {**CATALOG, "max_replication_slots": 10, "slots_in_use": 2}
+    out = db.collect(INP.model_copy(update={"source_cloud": cloud}), object())
+    assert (out.facts.max_replication_slots, out.facts.replication_slots_in_use) == (10, 2)

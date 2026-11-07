@@ -255,3 +255,12 @@ def test_proxy_stops_process(monkeypatch):
 def test_db_collect_never_raises():
     out = db.collect(AssessmentInput(**KW), object())  # SDK 미설치/자격 없음도 gaps
     assert out.gaps and out.source_db.instance_id is None
+
+
+@pytest.mark.parametrize("tier,want", [("db-custom-2-7680", (2, 7.5)), ("db-f1-micro", (1, 0.6)),
+                                       ("db-g1-small", (1, 1.7)), ("db-perf-optimized-N-8", (None, None))])
+def test_tier_size(tier, want):
+    d = inst("on")
+    d["settings"]["tier"] = tier
+    s = run(fake(d))
+    assert (s.db.vcpu, s.db.memory_gib) == want

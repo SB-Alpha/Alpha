@@ -217,6 +217,21 @@ def _err(e: Exception) -> str:
     return f"{type(e).__name__} {code}" if code else type(e).__name__
 
 
+def _size(client: Any, location: str | None, sku: str | None) -> tuple[int | None, float | None]:
+    try:  # 조회 실패 시 SKU 이름의 숫자(vCPU)만 사용, 메모리는 비움
+        for c in client.location_based_capabilities.execute(location):
+            for ed in c.supported_flexible_server_editions or []:
+                for v in ed.supported_server_versions or []:
+                    for vc in v.supported_vcores or []:
+                        if vc.name == sku and vc.v_cores:
+                            mpv = vc.supported_memory_per_vcore_mb
+                            return vc.v_cores, mpv * vc.v_cores / 1024 if mpv else None
+    except Exception:
+        pass
+    m = re.match(r"Standard_[A-Za-z]+(\d+)", sku or "")
+    return (int(m[1]), None) if m else (None, None)
+
+
 def collect(inp: AssessmentInput, session: Any, client_factory: Callable[[Any, str], Any] = _client,
             compute_factory: Callable[[Any, str], Any] = _compute, network_factory: Callable[[Any, str], Any] = _network) -> CspSource:
     src = CspSource()
@@ -258,9 +273,10 @@ def collect(inp: AssessmentInput, session: Any, client_factory: Callable[[Any, s
         src.gaps.append(f"논리 복제 파라미터 조회 실패 ({_err(e)})")
     lr = csp.logical_enabled("azure", flag)
 
+    vcpu, mem = _size(client, getattr(s, "location", None), getattr(sku, "name", None))
     src.db = DbInfo(
         engine="postgres", publicly_accessible=public, engine_version=getattr(s, "version", None),
-        instance_class=getattr(sku, "name", None), allocated_storage_gb=getattr(storage, "storage_size_gb", None),
+        instance_class=getattr(sku, "name", None), vcpu=vcpu, memory_gib=mem, allocated_storage_gb=getattr(storage, "storage_size_gb", None),
         logical_replication=lr, wal_level=flag,
         ha_enabled=None if ha_mode is None else ha_mode != "Disabled",
         backup_retention_days=getattr(getattr(s, "backup", None), "backup_retention_days", None),

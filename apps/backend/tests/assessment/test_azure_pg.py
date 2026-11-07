@@ -374,3 +374,21 @@ def test_private_endpoint_vnet_selects_bastion_without_pin():
     nf.network_interfaces = net({"n1": ("v1", "10.0.0.4", None)})(None, None).network_interfaces
     r = run(factory(srv=server(public="Disabled")), cf=compute([("b1", TAG, "n1")]), nf=lambda s, sub: nf)
     assert r.tunnel is not None and not any("VNet 을 알 수 없어" in g for g in r.gaps)
+
+
+def test_size_from_capabilities():
+    caps = [N(supported_flexible_server_editions=[N(supported_server_versions=[N(supported_vcores=[
+        N(name="Standard_D2s_v3", v_cores=2, supported_memory_per_vcore_mb=4096)])])])]
+    c = factory()(None, None)
+    c.location_based_capabilities = N(execute=lambda loc: caps)
+    r = run(lambda s, sub: c)
+    assert (r.db.vcpu, r.db.memory_gib) == (2, 8.0)
+
+
+def test_size_fallback_from_sku_name():
+    def boom(loc):
+        raise Err(403)
+    c = factory()(None, None)
+    c.location_based_capabilities = N(execute=boom)
+    r = run(lambda s, sub: c)
+    assert (r.db.vcpu, r.db.memory_gib) == (2, None) and r.gaps == []
