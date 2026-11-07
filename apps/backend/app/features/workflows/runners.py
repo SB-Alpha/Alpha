@@ -35,6 +35,10 @@ _MAX_AGENT_TEXT_SCANNED = 4000  # 아주 긴 값에 정규식이 오래 걸리�
 _DEFAULT_CUTOVER_PROGRESS = 75
 _SWITCHED_PHASES = {"stabilizing", "closed"}
 _PAST_CUTOVER_PHASES = {"cutover", *_SWITCHED_PHASES}
+VERIFICATION_RUNNING = "running"
+VERIFICATION_UNKNOWN = "unknown"  # workflows 가 기다리는 동안 결과를 받지 못했습니다. 에이전트 값이 아닙니다.
+# 에이전트의 비교 제한(VERIFY_TIMEOUT_S 기본 3600초)보다 조금 길게 기다립니다.
+VERIFICATION_WAIT_S = 3700.0
 
 PROBE_SETTLE_S = 3.0
 
@@ -641,27 +645,82 @@ def run_cutover(
     poll_interval_s: float = 1.0,
     timeout_s: float = 60.0,
     probe_settle_s: float = PROBE_SETTLE_S,
+    verification_wait_s: float = VERIFICATION_WAIT_S,
 ) -> Any:
-    """전환을 실행하고 실측값을 남깁니다.
+    """전환을 실행하고 실측값을 남긴 뒤, 전환 시점 데이터 비교가 끝날 때까지 봅니다.
 
     ALPHA_PROBE_URL 이 있으면 외부 프로버로 읽기 실패 수와 대기 시간을, WORKER_URL 이 있으면 Worker 집계로
     쓰기 실패 수를 잽니다. 시뮬레이션에서는 실제 전환이 없어 잴 대상이 없으므로 둘 다 켜지 않습니다.
+    측정은 전환 직후에 끝납니다. 비교는 오래 걸릴 수 있고 전환 시간과 상관이 없습니다.
     """
     is_simulated = _agent_is_simulated()
     prober = None if is_simulated else prober_from_env()
     worker = None if is_simulated else _cutover_worker()
     if prober is None and worker is None:
-        return _request_cutover(run, ctx, poll_interval_s, timeout_s)
+        job = _request_cutover(run, ctx, poll_interval_s, timeout_s)
+    else:
+        if prober is not None:
+            prober.start()
+        measured = ProbedContext(ctx, prober)
+        try:
+            job = _request_cutover(run, measured, poll_interval_s, timeout_s)
+            time.sleep(probe_settle_s)  # 전환 직후 요청까지 측정에 포함합니다.
+        finally:
+            _finish_measurement(measured, worker, run)
+    return _await_verification(run, ctx, job, poll_interval_s, verification_wait_s)
 
-    if prober is not None:
-        prober.start()
-    measured = ProbedContext(ctx, prober)
-    try:
-        job = _request_cutover(run, measured, poll_interval_s, timeout_s)
-        time.sleep(probe_settle_s)  # 전환 직후 요청까지 측정에 포함합니다.
+
+def _verification(job: Mapping[str, Any]) -> Any:
+    metrics = job.get("metrics")
+    return metrics.get("verification") if isinstance(metrics, Mapping) else None
+
+
+def _switched_message(job: Mapping[str, Any]) -> str:
+    msg = _scrub_agent_text(job.get("message"))
+    message = f"트래픽 전환 완료 ({msg})" if msg else "트래픽 전환 완료 (안정화 관찰 중)"
+    missing = _best_effort(_verify_cutover_sequence, job.get("evidence")).get("cutover_sequence_missing")
+    if missing:
+        # 트래픽은 이미 넘어갔으므로 실패로 두지 않고 경고만 남깁니다.
+        message = f"{message} — 경고: 전환 순서 증적 불완전 (누락: {', '.join(missing)})"
+    return message
+
+
+def _await_verification(
+    run: RunStatus,
+    ctx: RunContext,
+    job: Mapping[str, Any],
+    poll_interval_s: float,
+    wait_s: float,
+) -> Any:
+    """전환 시점 데이터 비교 결과를 받아 단계 결과에 반영합니다. 보고하지 않는 에이전트는 기다리지 않습니다.
+
+    불일치면 단계를 실패로 남깁니다. 트래픽은 이미 목적지에 있어 되돌리지 않고 사람이 확인합니다.
+    끝내지 못한 비교(unverifiable)와 기다리다 못 받은 결과는 데이터가 다르다는 뜻이 아니므로 경고만 남깁니다.
+    """
+    if _verification(job) is None:
         return job
-    finally:
-        _finish_measurement(measured, worker, run)
+
+    from app.features.db_migration.client import AgentSettings, CdcAgentClient
+
+    agent = CdcAgentClient(AgentSettings.from_env())
+    job_id = _cutover_job_id(run)
+    deadline = time.monotonic() + wait_s
+    while _verification(job) == VERIFICATION_RUNNING and job.get("state") != "failed":
+        if time.monotonic() > deadline:
+            warning = f"경고: 전환 시점 데이터 비교 결과를 {wait_s:g}초 안에 받지 못했습니다. 데이터를 직접 확인하세요"
+            ctx.report("running", 100, {"verification": VERIFICATION_UNKNOWN}, f"{_switched_message(job)} — {warning}")
+            return job
+        time.sleep(poll_interval_s)
+        job = _read_job(agent, job_id) or job
+        metrics = _best_effort(_cutover_metrics, job.get("metrics"), job.get("evidence"))
+        ctx.report("running", _job_progress(job), metrics, _switched_message(job))
+
+    metrics = _best_effort(_cutover_metrics, job.get("metrics"), job.get("evidence"))
+    if job.get("state") == "failed":
+        ctx.report("running", _job_progress(job), {**metrics, CUTOVER_OUTCOME: "post_switch_failed"})
+        raise RuntimeError(f"전환 후 확인 필요: {_scrub_agent_text(job.get('message')) or '상세 불명'}")
+    ctx.report("running", 100, metrics, _switched_message(job))
+    return job
 
 
 def _finish_measurement(measured: ProbedContext, worker: Any, run: RunStatus) -> None:
@@ -723,6 +782,7 @@ def _request_cutover(
 ) -> Any:
     """승인 ② 완료 후 CDC 에이전트에 cutover 요청(hold -> switch -> release)을 전달하고,
     에이전트가 stabilizing(전환 완료) 또는 failed/waiting_approval(롤백)에 도달할 때까지 대기합니다.
+    전환 시간은 여기서 확정합니다. 뒤따르는 데이터 비교는 _await_verification 이 봅니다.
 
     cutover_outcome 은 항상 지금 말할 수 있는 만큼만 씁니다. 도중에 끊겨도 원본에 있다고 잘못 말하지 않게
     요청을 보내기 전에 unknown 으로 바꾸고, 결과를 본 뒤에만 덮어씁니다.
@@ -757,13 +817,9 @@ def _request_cutover(
 
         # 1. 성공 상태 (에이전트가 stabilizing 또는 succeeded 도달)
         if phase == "stabilizing" or state == "succeeded":
-            message = f"트래픽 전환 완료 ({msg})" if msg else "트래픽 전환 완료 (안정화 관찰 중)"
             sequence = _best_effort(_verify_cutover_sequence, job.get("evidence"))
-            missing = sequence.get("cutover_sequence_missing")
-            if missing:
-                # 트래픽은 이미 넘어갔으므로 실패로 두지 않고 경고만 남깁니다.
-                message = f"{message} — 경고: 전환 순서 증적 불완전 (누락: {', '.join(missing)})"
-            ctx.report("running", 100, {**metrics, **sequence, CUTOVER_OUTCOME: "switched"}, message)
+            progress = _job_progress(job) if _verification(job) == VERIFICATION_RUNNING else 100
+            ctx.report("running", progress, {**metrics, **sequence, CUTOVER_OUTCOME: "switched"}, _switched_message(job))
             return job
 
         # 2. 롤백 상태 (전환 실패 후 원본 복귀)

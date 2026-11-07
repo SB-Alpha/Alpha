@@ -1567,6 +1567,156 @@ def test_cdc_end_report_hides_connection_details():
 
 
 
+# -- 전환 시점 데이터 비교 ------------------------------------------------------------
+
+
+def _verifying(verification, **job):
+    return {
+        **STABILIZING,
+        "metrics": {"traffic_mode": "TARGET", "cutover_ms": 415.0, "verification": verification},
+        "evidence": {**_steps(*AGENT_STEPS), "verification": {"state": verification}},
+        **job,
+    }
+
+
+def test_cutover_is_recorded_before_the_comparison_and_the_stage_waits_for_it(engine, monkeypatch):
+    matched = _verifying("match", message="전환 완료 (415.0ms), 데이터 일치, 안정화 관찰 중")
+    matched["metrics"]["mismatch"] = 0
+    reports, result = _drive_cutover(engine, monkeypatch, _verifying("running"), _verifying("running"), matched)
+
+    switched = next(r for r in reports if r.metrics.get("cutover_outcome") == "switched")
+    assert switched.metrics["verification"] == "running"
+    assert switched.metrics["cutover_seconds"] == 0.415
+    assert switched.metrics["cutover_sequence"] == "VERIFIED"
+    assert switched.progress == 90
+
+    last = reports[-1]
+    assert (last.progress, last.metrics["verification"], last.metrics["mismatch"]) == (100, "match", 0)
+    assert "데이터 일치" in last.message
+    assert result["metrics"]["verification"] == "match"
+
+
+def test_mismatch_fails_the_stage_and_keeps_the_measured_cutover(engine, monkeypatch):
+    mismatched = _verifying("mismatch", state="failed", message="전환 시점 데이터 불일치 2개 테이블, 수동 확인 필요")
+    mismatched["metrics"]["mismatch"] = 2
+    reports, result = _drive_cutover(engine, monkeypatch, _verifying("running"), mismatched)
+
+    assert isinstance(result, RuntimeError)
+    assert "불일치 2개 테이블" in str(result)
+    last = reports[-1]
+    assert last.metrics["cutover_outcome"] == "post_switch_failed"
+    assert (last.metrics["verification"], last.metrics["mismatch"]) == ("mismatch", 2)
+    assert last.metrics["cutover_seconds"] == 0.415
+
+
+def test_mismatch_already_there_at_the_first_read_still_fails(engine, monkeypatch):
+    reports, result = _drive_cutover(engine, monkeypatch, _verifying("mismatch", state="failed", message="불일치"))
+
+    assert isinstance(result, RuntimeError)
+    assert reports[-1].metrics["cutover_outcome"] == "post_switch_failed"
+
+
+def test_unverifiable_warns_but_does_not_fail_the_stage(engine, monkeypatch):
+    unverifiable = _verifying("unverifiable", message="전환 완료, 전환 시점 데이터 비교를 끝내지 못함. 데이터를 직접 확인하세요")
+    reports, result = _drive_cutover(engine, monkeypatch, _verifying("running"), unverifiable)
+
+    assert result["metrics"]["verification"] == "unverifiable"
+    assert reports[-1].metrics["verification"] == "unverifiable"
+    assert reports[-1].metrics.get("cutover_outcome") != "post_switch_failed"
+    assert "직접 확인" in reports[-1].message
+
+
+def test_job_failing_during_the_comparison_does_not_wait_for_a_result(engine, monkeypatch):
+    broken = _verifying("running", state="failed", message="목적지로 전환 후 오류, 수동 확인 필요")
+    reports, result = _drive_cutover(engine, monkeypatch, _verifying("running"), broken)
+
+    assert isinstance(result, RuntimeError)
+    assert reports[-1].metrics["cutover_outcome"] == "post_switch_failed"
+
+
+def test_comparison_result_that_never_comes_warns_after_the_wait(engine, monkeypatch):
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+    jobs = [{"state": "waiting_approval", "phase": "cutover_ready"}]
+
+    class FakeAgent:
+        def __init__(self, settings):
+            pass
+
+        def cutover(self, job_id, approved_by):
+            jobs[0] = _verifying("running")
+
+        def get_job(self, job_id):
+            return jobs[0]
+
+    monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", FakeAgent)
+    ctx = RecordingCtx()
+    result = run_cutover(engine.create_run(REQUEST), ctx=ctx, poll_interval_s=0.001, verification_wait_s=0.01)  # type: ignore[arg-type]
+
+    assert result["phase"] == "stabilizing"
+    last = ctx.reports[-1]
+    assert last.metrics["verification"] == "unknown"
+    assert "경고" in last.message
+
+
+def test_agent_read_errors_during_the_comparison_are_retried(engine, monkeypatch):
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+    reads = iter([
+        {"state": "waiting_approval", "phase": "cutover_ready"},
+        _verifying("running"),
+        OSError("tunnel down"),
+        _verifying("match"),
+    ])
+
+    class FakeAgent:
+        def __init__(self, settings):
+            pass
+
+        def cutover(self, job_id, approved_by):
+            return {"accepted": True}
+
+        def get_job(self, job_id):
+            item = next(reads)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    monkeypatch.setattr("app.features.db_migration.client.CdcAgentClient", FakeAgent)
+    result = run_cutover(engine.create_run(REQUEST), ctx=RecordingCtx(), poll_interval_s=0.001)  # type: ignore[arg-type]
+
+    assert result["metrics"]["verification"] == "match"
+
+
+def test_sequence_warning_survives_the_comparison_reports(engine, monkeypatch):
+    incomplete = _steps("hold", "released")
+    reports, _ = _drive_cutover(
+        engine,
+        monkeypatch,
+        _verifying("running", evidence=incomplete),
+        _verifying("match", evidence=incomplete),
+    )
+
+    assert "전환 순서 증적 불완전" in reports[-1].message
+
+
+def test_measurement_ends_before_the_comparison(engine, monkeypatch):
+    order = []
+    monkeypatch.setattr(
+        "app.features.workflows.runners._request_cutover",
+        lambda *a: order.append("cutover") or _verifying("match"),
+    )
+    monkeypatch.setattr("app.features.workflows.runners._cutover_worker", lambda: _FakeWorkerStatus({}))
+    monkeypatch.setattr("app.features.workflows.runners._finish_measurement", lambda *a: order.append("measured"))
+    monkeypatch.setattr(
+        "app.features.workflows.runners._await_verification",
+        lambda run, ctx, job, *a: order.append("compared") or job,
+    )
+    monkeypatch.setenv("CDC_AGENT_URL", "http://fake-agent")
+
+    run_cutover(engine.create_run(REQUEST), ctx=RecordingCtx(), probe_settle_s=0)  # type: ignore[arg-type]
+
+    assert order == ["cutover", "measured", "compared"]
+
+
 # -- 거절과 롤백 구분 -----------------------------------------------------------------
 
 

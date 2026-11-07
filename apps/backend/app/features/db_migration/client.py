@@ -157,6 +157,7 @@ class _MockSimulationTransport(httpx.BaseTransport):
                     m["simulated"] = True
                     m["traffic_mode"] = "TARGET"
                     m["cutover_ms"] = 1200
+                    m["verification"] = "match"
                     m["failed_requests"] = 0
                     m["copy_percent"] = 100
                     m["replication_lag_bytes"] = 0
