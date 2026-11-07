@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.27",
     "pydantic>=2",
     "boto3>=1.34",  # assessment: 원본 AWS 읽기 전용 조회
+    "google-auth[urllib3]>=2",  # provisioning: 이미지 복사의 GCP 토큰 (필요할 때만 불러옴)
     "cryptography>=42",
     "keyring>=25",
 ]

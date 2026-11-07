@@ -16,7 +16,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "terraform_output.sample.json"
 
 @pytest.fixture
 def raw_output() -> dict:
-    return json.loads(FIXTURE.read_text())
+    return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
 def make(raw: dict, **overrides) -> dict:

@@ -3,13 +3,17 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
+import { CdcJobControls } from "@/components/CdcJobControls";
+import { RecoveryBanner } from "@/components/CutoverSafety";
+import { CutoverTimeline } from "@/components/CutoverTimeline";
 import { DashboardPanel } from "@/components/DashboardPanel";
 import { PlanApproval } from "@/components/PlanApproval";
 import { RunActions } from "@/components/RunActions";
+import { SelfHealingCard } from "@/components/SelfHealingCard";
 import { StageStepper } from "@/components/StageStepper";
 import { StateBadge } from "@/components/StateBadge";
 import { formatTime } from "@/lib/labels";
-import { workflows, type RunStatus } from "@/lib/workflows";
+import { runTitle, targetSummary, workflows, type RunStatus } from "@/lib/workflows";
 
 const POLL_MS = 2000;
 
@@ -76,10 +80,10 @@ export function RunView() {
             <div>
               <p className="font-mono text-xs text-ink/50">{run.run_id}</p>
               <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">
-                {run.request.github_repo_url.replace(/^https?:\/\/(www\.)?github\.com\//, "")}
+                {runTitle(run.request)}
               </h1>
               <p className="mt-1 text-sm text-ink/60">
-                {run.request.aws_region} → GCP {run.request.target_region ?? "—"} · 시작 {formatTime(run.created_at)}
+                {run.request.aws_region} → {targetSummary(run.request)} · 시작 {formatTime(run.created_at)}
               </p>
             </div>
             <div className="text-right">
@@ -87,6 +91,8 @@ export function RunView() {
               {run.message && <p className="mt-1 text-sm text-ink/70">{run.message}</p>}
             </div>
           </header>
+
+          <RecoveryBanner run={run} />
 
           <DashboardPanel run={run} />
 
@@ -98,16 +104,31 @@ export function RunView() {
             onApprove={(comment) => act(() => workflows.approve(run.run_id, "plan", comment))}
           />
 
+          <CutoverTimeline run={run} />
+
+          <SelfHealingCard
+            run={run}
+            isBusy={isBusy}
+            onApplySimulationInput={(output) =>
+              run.current_stage && act(() => workflows.submitManual(run.run_id, run.current_stage!, output, "시뮬레이션 값"))
+            }
+          />
+
           <RunActions
             run={run}
             isBusy={isBusy}
-            onApproveCutover={(comment) => act(() => workflows.approve(run.run_id, "cutover", comment))}
+            onApproveCutover={(comment, approver, preflight, acknowledgeUnknown) =>
+              act(() => workflows.approve(run.run_id, "cutover", comment, approver, preflight, acknowledgeUnknown))
+            }
             onManual={(output, note) =>
               run.current_stage && act(() => workflows.submitManual(run.run_id, run.current_stage!, output, note))
             }
             onResume={() => act(() => workflows.resume(run.run_id))}
+            onRetryCleanup={() => act(() => workflows.retryCleanup(run.run_id))}
             onAbort={(reason) => act(() => workflows.abort(run.run_id, reason))}
           />
+
+          <CdcJobControls run={run} onChanged={() => void refresh()} />
         </>
       )}
     </div>

@@ -7,6 +7,7 @@ import {
   formatBytes,
   formatDuration,
   isFinished,
+  isSimulated,
   numberMetric,
   overallProgress,
   securityAuditSummary,
@@ -95,6 +96,14 @@ export function DashboardPanel({ run }: Props) {
   const mismatch = numberMetric(run, METRIC_KEYS.mismatchTables);
   const failed = numberMetric(run, METRIC_KEYS.failedRequests);
   const cutover = numberMetric(run, METRIC_KEYS.cutoverSeconds);
+  const probeRequests = numberMetric(run, METRIC_KEYS.probeRequests);
+  const probeMaxMs = numberMetric(run, METRIC_KEYS.probeMaxMs);
+  const failedHint =
+    probeRequests === null || probeMaxMs === null
+      ? undefined
+      : `실측 ${probeRequests.toLocaleString("ko-KR")}건 · 최대 ${Math.round(probeMaxMs).toLocaleString("ko-KR")}ms`;
+  const writeRequests = numberMetric(run, METRIC_KEYS.writeRequests);
+  const writeFailed = numberMetric(run, METRIC_KEYS.writeFailedRequests);
 
   const rowsText = rows && `${rows.source.toLocaleString("ko-KR")} / ${rows.target.toLocaleString("ko-KR")}`;
   // 복사 중에는 목적지 행 수가 적은 것이 정상이라 빨강으로 표시하지 않습니다.
@@ -105,6 +114,12 @@ export function DashboardPanel({ run }: Props) {
       <h2 id="dashboard-heading" className="sr-only">
         이전 관제 대시보드
       </h2>
+
+      {isSimulated(run) && (
+        <p role="status" className="rounded-lg border-2 border-amber-500 bg-amber-50 p-3 text-sm font-semibold text-amber-950 lg:col-span-2">
+          시뮬레이션 모드입니다. 아래 CDC·전환 지표는 실제 복제나 트래픽 전환 결과가 아닙니다.
+        </p>
+      )}
 
       <div className="rounded-lg border border-ink bg-white p-4 shadow-[3px_3px_0_0_var(--color-ink)]">
         <p className="text-xs text-ink/60">전체 진행률</p>
@@ -159,9 +174,16 @@ export function DashboardPanel({ run }: Props) {
           tone={countTone(mismatch)}
         />
         <MetricTile
-          label="요청 실패"
+          label="읽기 실패 (프로버)"
           value={failed === null ? null : `${failed.toLocaleString("ko-KR")}건`}
           tone={countTone(failed)}
+          hint={failedHint}
+        />
+        <MetricTile
+          label="쓰기 실패 (Worker)"
+          value={writeFailed === null ? null : `${writeFailed.toLocaleString("ko-KR")}건`}
+          tone={countTone(writeFailed)}
+          hint={writeRequests === null ? undefined : `실측 ${writeRequests.toLocaleString("ko-KR")}건`}
         />
         <MetricTile label="전환 시간 T1−T0" value={cutover === null ? null : `${cutover.toFixed(1)}초`} />
       </dl>

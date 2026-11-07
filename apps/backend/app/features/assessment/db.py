@@ -49,7 +49,9 @@ def _pg_step(inp: AssessmentInput, session: AwsSession, r: rds.RdsResult, gaps: 
     elif not named and not r.db_name and users:
         res.database_name, res.tables = None, None
         gaps.append(f"앱 DB 이름을 확정하지 못함 (후보: {', '.join(users)}) — ALPHA_SOURCE_DB_NAME 지정 필요")
-    update: dict = {"database_name": res.database_name, "wal_level": res.wal_level}
+    update: dict = {"database_name": res.database_name, "wal_level": res.wal_level,
+                    "max_replication_slots": res.max_replication_slots,
+                    "replication_slots_in_use": res.replication_slots_in_use}
     if res.tables is not None:
         update["tables"] = res.tables
     r.db = r.db.model_copy(update=update)

@@ -8,31 +8,54 @@ from functools import lru_cache
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 
 from app.core.config import get_settings
+from app.features.db_migration.guide_workflow import to_job_id
 
 from .engine import Engine, InvalidTransition
+from .healer import SelfHealingDiagnosis, diagnose_run
+from .preflight import evaluate_cutover
+from .readiness import cutover_readiness
 from .schemas import (
     AbortRequest,
     ApproveRequest,
     ManualStageInput,
     MigrationRequest,
+    PreflightReport,
+    RunDetail,
     RunStatus,
     StageName,
+    WorkflowState,
 )
-from .runners import RUNNERS
+from .runners import RUNNERS, clean_up_cdc
 from .store import RunNotFound, RunStore
+from .target_adapters import UnsupportedTarget, adapter_for
 
 router = APIRouter(prefix="/runs", tags=["workflows"])
+
+PreflightEvaluator = Callable[[RunStatus], PreflightReport]
 
 
 @lru_cache
 def get_engine() -> Engine:
     # 연결된 모듈은 runners.RUNNERS 에 단계별로 등록합니다. 없는 단계는 수동 입력 대기입니다.
-    return Engine(RunStore(get_settings().workflows_db_path), RUNNERS)
+    return Engine(RunStore(get_settings().workflows_db_path), RUNNERS, abort_cleanup=clean_up_cdc)
 
 
-def _apply(run_id: str, action: Callable[[], RunStatus]) -> RunStatus:
+def get_preflight() -> PreflightEvaluator:
+    return evaluate_cutover
+
+
+def _waiting_at_cutover(run: RunStatus) -> bool:
+    return run.state == WorkflowState.WAITING_APPROVAL and run.waiting_gate == "cutover"
+
+
+def _detail(run: RunStatus) -> RunDetail:
+    readiness = cutover_readiness(run) if _waiting_at_cutover(run) else None
+    return RunDetail(**run.model_dump(), cutover_readiness=readiness, cdc_job_id=to_job_id(run.run_id))
+
+
+def _apply(run_id: str, action: Callable[[], RunStatus]) -> RunDetail:
     try:
-        return action()
+        return _detail(action())
     except RunNotFound:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"run {run_id} 이(가) 없습니다") from None
     except InvalidTransition as exc:
@@ -43,6 +66,10 @@ def _apply(run_id: str, action: Callable[[], RunStatus]) -> RunStatus:
 def create_run(
     req: MigrationRequest, background: BackgroundTasks, engine: Engine = Depends(get_engine)
 ) -> RunStatus:
+    try:
+        adapter_for(req)
+    except UnsupportedTarget as exc:
+        raise HTTPException(422, str(exc)) from None
     run = engine.create_run(req)
     background.add_task(engine.advance, run.run_id)
     return run
@@ -55,46 +82,95 @@ def list_runs(
     return engine.list(limit)
 
 
-@router.get("/{run_id}", response_model=RunStatus)
-def get_run(run_id: str, engine: Engine = Depends(get_engine)) -> RunStatus:
+@router.get("/{run_id}", response_model=RunDetail)
+def get_run(run_id: str, engine: Engine = Depends(get_engine)) -> RunDetail:
     return _apply(run_id, lambda: engine.get(run_id))
 
 
-@router.post("/{run_id}/approve", response_model=RunStatus)
+@router.post("/{run_id}/approve", response_model=RunDetail)
 def approve_run(
     run_id: str,
     req: ApproveRequest,
     background: BackgroundTasks,
     engine: Engine = Depends(get_engine),
-) -> RunStatus:
-    run = _apply(run_id, lambda: engine.approve(run_id, req.gate, req.comment))
+) -> RunDetail:
+    # 승인 조건은 저장된 값으로 서버가 검사합니다. 실시간 점검(GET /preflight)은 참고용이고,
+    # 승인 요청이 프록시 제한(30초) 안에 끝나도록 여기서는 네트워크를 부르지 않습니다.
+    run = _apply(
+        run_id,
+        lambda: engine.approve(
+            run_id,
+            req.gate,
+            req.comment,
+            approver=req.approver,
+            preflight_verdict=req.preflight_verdict,
+            preflight_measured_at=req.preflight_measured_at,
+            acknowledge_unknown=req.acknowledge_unknown,
+        ),
+    )
     background.add_task(engine.advance, run_id)
     return run
 
 
-@router.post("/{run_id}/abort", response_model=RunStatus)
+@router.post("/{run_id}/abort", response_model=RunDetail)
 def abort_run(
-    run_id: str, req: AbortRequest | None = None, engine: Engine = Depends(get_engine)
-) -> RunStatus:
+    run_id: str,
+    background: BackgroundTasks,
+    req: AbortRequest | None = None,
+    engine: Engine = Depends(get_engine),
+) -> RunDetail:
     reason = req.reason if req else None
-    return _apply(run_id, lambda: engine.abort(run_id, reason))
+    run = _apply(run_id, lambda: engine.abort(run_id, reason))
+    background.add_task(engine.run_abort_cleanup, run_id)
+    return run
 
 
-@router.post("/{run_id}/resume", response_model=RunStatus)
-def resume_run(run_id: str, background: BackgroundTasks, engine: Engine = Depends(get_engine)) -> RunStatus:
+@router.post("/{run_id}/cleanup", response_model=RunDetail)
+def retry_cleanup(run_id: str, background: BackgroundTasks, engine: Engine = Depends(get_engine)) -> RunDetail:
+    """중단 뒤 정리에 실패한 run 의 외부 자원 정리를 다시 시도합니다."""
+    run = _apply(run_id, lambda: engine.retry_cleanup(run_id))
+    background.add_task(engine.run_abort_cleanup, run_id)
+    return run
+
+
+@router.post("/{run_id}/resume", response_model=RunDetail)
+def resume_run(run_id: str, background: BackgroundTasks, engine: Engine = Depends(get_engine)) -> RunDetail:
     run = _apply(run_id, lambda: engine.resume(run_id))
     background.add_task(engine.advance, run_id)
     return run
 
 
-@router.post("/{run_id}/stages/{stage}/manual", response_model=RunStatus)
+@router.post("/{run_id}/stages/{stage}/manual", response_model=RunDetail)
 def submit_manual(
     run_id: str,
     stage: StageName,
     req: ManualStageInput,
     background: BackgroundTasks,
     engine: Engine = Depends(get_engine),
-) -> RunStatus:
+) -> RunDetail:
     run = _apply(run_id, lambda: engine.submit_manual(run_id, stage, req))
     background.add_task(engine.advance, run_id)
     return run
+
+
+@router.get("/{run_id}/preflight", response_model=PreflightReport)
+def get_preflight_report(
+    run_id: str,
+    engine: Engine = Depends(get_engine),
+    preflight: PreflightEvaluator = Depends(get_preflight),
+) -> PreflightReport:
+    """전환 승인 ② 대기 중인 run 의 전환 전 점검 결과를 돌려줍니다. 참고용이며 승인을 막지 않습니다."""
+    run = _apply(run_id, lambda: engine.get(run_id))
+    if not _waiting_at_cutover(run):
+        raise HTTPException(status.HTTP_409_CONFLICT, f"전환 승인 ② 대기 중인 run 만 점검합니다 (현재 {run.state.value})")
+    return preflight(run)
+
+
+@router.get("/{run_id}/diagnosis", response_model=SelfHealingDiagnosis)
+@router.post("/{run_id}/diagnose", response_model=SelfHealingDiagnosis)
+def get_diagnosis(run_id: str, engine: Engine = Depends(get_engine)) -> SelfHealingDiagnosis:
+    """장애 발생 시 AI 자가치유(Self-Healing) 진단 리포트를 생성합니다."""
+    run = _apply(run_id, lambda: engine.get(run_id))
+    if run.state != WorkflowState.FAILED:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"실패한 run 만 진단합니다 (현재 {run.state.value})")
+    return diagnose_run(run)

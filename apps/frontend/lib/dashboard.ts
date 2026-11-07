@@ -1,17 +1,30 @@
 // 대시보드 계산. run 상태만으로 만들고, 값이 없으면 null(화면에 "미제공")을 돌려줍니다.
-// db_migration 키는 #30·#31 이 실제로 보내는 이름입니다. serving·failed_requests·cutover_seconds 와
-// 보안 키는 보내는 모듈이 아직 없어 "미제공"으로 남습니다. 어느 단계에서 보고하든 화면에 나타납니다.
+// db_migration 키는 #30·#31 이 실제로 보내는 이름입니다. serving 은 workflows 가 에이전트 보고로, cutover_seconds 는
+// 워커 측정값이나 에이전트 보고로 채웁니다(cutover_seconds_source). failed_requests·probe_* 는 프로버 실측값입니다.
+// 실제 run 에서 ALPHA_PROBE_URL 이 없으면 "미제공"이고, 시뮬레이터는 failed_requests 를 자체 값으로 보냅니다.
+// iam_audit_status 는 보내는 모듈이 아직 없어 "미제공"으로 남습니다.
 
-import type { RunStatus, StageStatus, WorkflowState } from "./workflows";
+import { isRecord } from "./plan";
+import type { ApprovalRecord, PreflightReport, PreflightVerdict, RunStatus, StageStatus, WorkflowState } from "./workflows";
 
 export const METRIC_KEYS = {
+  simulated: "simulated", // true: 실제 에이전트가 아닌 시뮬레이션 값
   serving: "serving", // "aws" | "gcp": 지금 요청을 처리하는 쪽
   replicationLagBytes: "replication_lag_bytes",
   copyPercent: "copy_percent",
   tables: "tables", // { 테이블명: { source_rows, target_rows, percent, match } }
   mismatchTables: "mismatch", // 불일치 테이블 수
   failedRequests: "failed_requests",
+  probeRequests: "probe_requests", // 프로버가 보낸 요청 수
+  probeMaxMs: "probe_max_ms", // 가장 오래 기다린 요청
+  writeRequests: "write_requests", // 보류 시작부터 Worker 가 처리한 쓰기 요청 수
+  writeFailedRequests: "write_failed_requests", // 그중 원본 5xx·연결 실패 수
   cutoverSeconds: "cutover_seconds", // T1 − T0
+  cutoverSecondsSource: "cutover_seconds_source", // "worker" | "agent"
+  cutoverSteps: "cutover_steps", // [{ step, elapsed_ms?, waited_ms?, mismatch?, error? }]
+  cutoverSequence: "cutover_sequence", // "VERIFIED" | "INCOMPLETE"
+  cutoverSequenceMissing: "cutover_sequence_missing", // INCOMPLETE 일 때 빠진 단계 이름
+  cutoverOutcome: "cutover_outcome", // "not_started" | "rolled_back" | "unknown" | "post_switch_failed" | "switched"
   iamAuditStatus: "iam_audit_status", // "PASS" | "WARN" | "FAIL"
   cloudSqlPrivateIp: "cloud_sql_private_ip", // "SECURE" | "PUBLIC"
   secretEncryption: "secret_encryption", // "ENCRYPTED" | "PLAINTEXT"
@@ -81,6 +94,11 @@ export function securityTone(value: string | null): SecurityTone {
   return SECURITY_BAD.includes(value) ? "bad" : "neutral";
 }
 
+/** 시뮬레이션 모드에서 나온 값이 섞여 있으면 true 입니다. */
+export function isSimulated(run: RunStatus): boolean {
+  return findMetric(run, METRIC_KEYS.simulated) === true;
+}
+
 /** 모듈이 실제로 보고한 값만 돌려줍니다. 보고가 없으면 null 입니다. */
 export function securityAuditSummary(run: RunStatus) {
   const iamAudit = stringMetric(run, METRIC_KEYS.iamAuditStatus);
@@ -101,6 +119,72 @@ export function tableRowTotals(run: RunStatus): { source: number; target: number
     source: rows.reduce((sum, r) => sum + (r.source_rows as number), 0),
     target: rows.reduce((sum, r) => sum + (r.target_rows as number), 0),
   };
+}
+
+export interface CutoverStep {
+  step: string;
+  elapsed_ms?: number;
+  waited_ms?: number;
+  mismatch?: number;
+  error?: string;
+}
+
+export type CutoverSecondsSource = "worker" | "agent";
+
+export interface CutoverSequence {
+  status: "VERIFIED" | "INCOMPLETE";
+  missing: string[];
+}
+
+const finiteNumber = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+function readCutoverStep(raw: unknown): CutoverStep | null {
+  if (!isRecord(raw) || typeof raw.step !== "string" || raw.step.trim() === "") return null;
+  return {
+    step: raw.step,
+    elapsed_ms: finiteNumber(raw.elapsed_ms),
+    waited_ms: finiteNumber(raw.waited_ms),
+    mismatch: finiteNumber(raw.mismatch),
+    error: typeof raw.error === "string" && raw.error.trim() !== "" ? raw.error : undefined,
+  };
+}
+
+/** 에이전트가 보고한 전환 단계. 형식이 어긋난 항목은 버립니다. 보고가 없으면 null, 보고했지만 비어 있으면 빈 목록입니다. */
+export function cutoverSteps(run: RunStatus): CutoverStep[] | null {
+  const raw = findMetric(run, METRIC_KEYS.cutoverSteps);
+  if (!Array.isArray(raw)) return null;
+  return (raw as unknown[]).map(readCutoverStep).filter((s): s is CutoverStep => s !== null);
+}
+
+/** 전환 시간을 잰 기준. 보고가 없거나 값이 다르면 null 입니다. */
+export function cutoverSecondsSource(run: RunStatus): CutoverSecondsSource | null {
+  const source = stringMetric(run, METRIC_KEYS.cutoverSecondsSource);
+  return source === "worker" || source === "agent" ? source : null;
+}
+
+/** 전환 순서 검증 결과. 보고가 없거나 값이 다르면 null 입니다 (INCOMPLETE 로 추정하지 않음). */
+export function cutoverSequence(run: RunStatus): CutoverSequence | null {
+  const status = stringMetric(run, METRIC_KEYS.cutoverSequence);
+  if (status !== "VERIFIED" && status !== "INCOMPLETE") return null;
+  const missing = findMetric(run, METRIC_KEYS.cutoverSequenceMissing);
+  return {
+    status,
+    missing: Array.isArray(missing) ? (missing as unknown[]).filter((s): s is string => typeof s === "string") : [],
+  };
+}
+
+/** 승인 ② 기록. 재시도하면 여러 건입니다. 이 필드가 없는 응답도 빈 목록으로 읽습니다. */
+export function cutoverApprovals(run: RunStatus): ApprovalRecord[] {
+  return (run.approval_records ?? []).filter((r) => r.gate === "cutover");
+}
+
+const VERDICTS: PreflightVerdict[] = ["go", "no_go", "unverified"];
+
+/** 화면에 쓸 판정. 시뮬레이션이거나 모르는 값이면 go 로 보이지 않게 unverified 로 둡니다. */
+export function preflightVerdict(report: PreflightReport): PreflightVerdict {
+  if (report.simulated || !VERDICTS.includes(report.verdict)) return "unverified";
+  return report.verdict;
 }
 
 export function formatBytes(bytes: number): string {
