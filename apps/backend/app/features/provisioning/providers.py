@@ -8,10 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .schemas import DEFAULT_PROVIDER
 from .terraform import ProvisioningError
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
-DEFAULT_PROVIDER = "gcp"
 
 
 @dataclass(frozen=True)

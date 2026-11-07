@@ -19,6 +19,8 @@ class RunAborted(BaseException):
 # 단계 종료(succeeded·failed·aborted)와 대기(pending)는 engine 이 run() 반환·예외로 정합니다.
 # 모듈이 보고할 수 있는 건 진행 중 상태뿐이며, 저장되는 단계 state 는 계속 running 입니다.
 _REPORTABLE = {WorkflowState.RUNNING, WorkflowState.WAITING_APPROVAL, WorkflowState.PAUSED}
+# 끝난 단계는 보고로 다시 열지 않습니다. CDC 처럼 단계가 끝난 뒤에도 계속 보고하는 모듈의 최신 값만 받습니다.
+_SETTLED_STAGE_STATES = {WorkflowState.SUCCEEDED, WorkflowState.FAILED, WorkflowState.ABORTED}
 
 
 def now() -> datetime:
@@ -65,13 +67,20 @@ class StoreRunContext:
             if run.state == WorkflowState.ABORTED:
                 raise RunAborted(self._run_id)
             current = run.stage(self._stage)
+            merged = {**current.metrics, **(metrics or {})}
+            text = message if message is not None else current.message
+            if current.state in _SETTLED_STAGE_STATES:
+                # 실패 메시지는 진단의 근거이므로 남깁니다. run.updated_at 은 상태가 바뀐 시각이므로 유지합니다.
+                kept = current.message if current.state == WorkflowState.FAILED else text
+                updated = with_stage(run, self._stage, metrics=merged, message=kept)
+                return updated.model_copy(update={"updated_at": run.updated_at})
             return with_stage(
                 run,
                 self._stage,
                 state=WorkflowState.RUNNING,
                 progress=progress,
-                metrics={**current.metrics, **(metrics or {})},
-                message=message if message is not None else current.message,
+                metrics=merged,
+                message=text,
             )
 
         self._store.update(self._run_id, change)

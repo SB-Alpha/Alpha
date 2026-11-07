@@ -2,6 +2,7 @@
   "target_infra": {
     "region": "asia-northeast3",
     "service_name": "target-app",
+    "source_service_name": "target-app",
     "source_image": null,
     "container_port": 8080,
     "cpu": 1,
@@ -13,6 +14,8 @@
     "db_name": null,
     "db_user": "alpha",
     "db_tier": "db-g1-small",
+    "db_memory_gib": 1.0,
+    "db_vcpu": 2,
     "db_disk_size_gb": 20,
     "db_logical_decoding": true
   },

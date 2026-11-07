@@ -1,4 +1,5 @@
-import type { Gate, StageName, WorkflowState } from "./workflows";
+import type { CutoverSecondsSource } from "./dashboard";
+import type { Gate, PreflightVerdict, StageName, WorkflowState } from "./workflows";
 
 export const STAGE_LABEL: Record<StageName, string> = {
   discovery: "원본 조사",
@@ -10,6 +11,17 @@ export const STAGE_LABEL: Record<StageName, string> = {
 };
 
 export const GATE_LABEL: Record<Gate, string> = { plan: "승인 ① 계획", cutover: "승인 ② 전환" };
+
+export const PREFLIGHT_VERDICT_LABEL: Record<PreflightVerdict, string> = {
+  go: "필수 항목 모두 통과",
+  no_go: "실패 항목 있음",
+  unverified: "미확인 항목 있음",
+};
+
+export const CUTOVER_SECONDS_SOURCE_LABEL: Record<CutoverSecondsSource, string> = {
+  worker: "Worker 기준",
+  agent: "에이전트 기준",
+};
 
 export const STATE_LABEL: Record<WorkflowState, string> = {
   pending: "대기",

@@ -34,3 +34,56 @@ jobs:
 
       - name: Run tests
         run: pytest
+
+  agent-test:
+    name: agent-test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/db_migration/agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: infra/db_migration/agent/pyproject.toml
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: apps/frontend/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: apps/frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm exec eslint
+
+      - name: Build
+        run: pnpm build
+
+      # next build 가 만드는 라우트 타입이 있어야 통과하므로 빌드 뒤에 둡니다.
+      - name: Type check
+        run: pnpm exec tsc --noEmit

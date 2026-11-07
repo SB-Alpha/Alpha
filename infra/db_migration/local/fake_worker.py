@@ -9,10 +9,12 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import psycopg
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel
 
 TOKEN = os.environ["WORKER_TOKEN"]
@@ -23,12 +25,19 @@ app = FastAPI(title="fake-worker")
 lock = threading.Lock()
 released = threading.Event()
 released.set()
-state = {"mode": "SOURCE", "next_origin": "SOURCE", "run_id": None, "hold_started_at": None,
-         "released_at": None, "held_count": 0, "inflight_source": 0, "updated_at": None}
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def new_counts(since: str) -> dict:
+    return {"since": since, "write_total": 0, "write_failed": 0, "read_total": 0, "read_failed": 0}
+
+
+state = {"mode": "SOURCE", "next_origin": "SOURCE", "run_id": None, "hold_started_at": None,
+         "released_at": None, "held_count": 0, "inflight_source": 0, "updated_at": None,
+         "request_counts": new_counts(now())}
 
 
 def auth(authorization: str = Header(default="")) -> None:
@@ -58,8 +67,9 @@ def hold(body: Hold) -> dict:
         if state["mode"] != "SOURCE":
             raise HTTPException(409, f"mode is {state['mode']}")
         released.clear()
-        state.update(mode="HOLD", next_origin="SOURCE", run_id=body.run_id, hold_started_at=now(),
-                     released_at=None, held_count=0, updated_at=now())
+        started = now()
+        state.update(mode="HOLD", next_origin="SOURCE", run_id=body.run_id, hold_started_at=started,
+                     released_at=None, held_count=0, updated_at=started, request_counts=new_counts(started))
         return dict(state)
 
 
@@ -112,24 +122,45 @@ def route() -> str:
         return origin
 
 
+@contextmanager
+def routed(*, is_write: bool) -> Iterator[str]:
+    """Route one request, then count it when it ends. Any exception counts as a failure, like a 5xx."""
+    origin = None
+    is_failure = True
+    try:
+        origin = route()
+        yield origin
+        is_failure = False
+    finally:
+        kind = "write" if is_write else "read"
+        with lock:
+            if origin == "SOURCE":
+                state["inflight_source"] -= 1
+            state["request_counts"][f"{kind}_total"] += 1
+            state["request_counts"][f"{kind}_failed"] += int(is_failure)
+
+
 @app.post("/api/items")
 def write(body: Write) -> dict:
-    origin = route()
     started = time.monotonic()
-    try:
-        with psycopg.connect(DSN[origin], autocommit=True, connect_timeout=5) as conn:
-            if body.op == "insert":
-                conn.execute("INSERT INTO work_items (id, title, status) VALUES (%s, %s, %s)",
-                             (body.id, body.title, body.status))
-            elif body.op == "update":
-                conn.execute("UPDATE work_items SET title = %s, status = %s, updated_at = now() WHERE id = %s",
-                             (body.title, body.status, body.id))
-            elif body.op == "delete":
-                conn.execute("DELETE FROM work_items WHERE id = %s", (body.id,))
-            else:
-                raise HTTPException(422, "op")
-    finally:
-        if origin == "SOURCE":
-            with lock:
-                state["inflight_source"] -= 1
+    with routed(is_write=True) as origin, psycopg.connect(DSN[origin], autocommit=True, connect_timeout=5) as conn:
+        if body.op == "insert":
+            conn.execute("INSERT INTO work_items (id, title, status) VALUES (%s, %s, %s)",
+                         (body.id, body.title, body.status))
+        elif body.op == "update":
+            conn.execute("UPDATE work_items SET title = %s, status = %s, updated_at = now() WHERE id = %s",
+                         (body.title, body.status, body.id))
+        elif body.op == "delete":
+            conn.execute("DELETE FROM work_items WHERE id = %s", (body.id,))
+        else:
+            raise HTTPException(422, "op")
     return {"served_by": origin, "ms": round((time.monotonic() - started) * 1000, 1)}
+
+
+@app.get("/health/ready")
+def ready(response: Response) -> dict:
+    """A read through the gate, for the external prober."""
+    with routed(is_write=False) as origin, psycopg.connect(DSN[origin], autocommit=True, connect_timeout=5) as conn:
+        conn.execute("SELECT 1")
+    response.headers["X-Gate-Origin"] = origin
+    return {"served_by": origin}

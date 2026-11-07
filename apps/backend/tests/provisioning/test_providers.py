@@ -1,15 +1,23 @@
 import json
 from pathlib import Path
+from typing import get_args
 
 import pytest
+from pydantic import ValidationError
 
 from app.features.provisioning import providers
 from app.features.provisioning.providers import GCP, PROVIDERS, ProviderConfig, get_provider, terraform_dir
-from app.features.provisioning.schemas import AppDeployInput, ProvisioningInput
+from app.features.provisioning.schemas import AppDeployInput, ProviderName, ProvisioningInput
 from app.features.provisioning.service import build_tfvars, deploy_app, resolve_project_id, run
 from app.features.provisioning.terraform import ProvisioningError
 
 from .test_service import FIXTURE, FakeContext, FakeTerraform, fake_clock, with_app_url
+
+
+def fake_provider_input(model, **fields):
+    # "other" 는 시험용 가짜 목적지라 입력 검증(등록된 이름만 받음)을 거치지 않고 만든다.
+    # 단계 코드가 이름으로 설정을 고르는 부분만 확인하는 시험에서만 쓴다.
+    return model.model_construct(**fields)
 
 # 목적지가 하나 더 있을 때를 흉내 낸 설정. 변수 이름·환경변수·강제 변수가 GCP 와 모두 다르다.
 OTHER = ProviderConfig(
@@ -82,10 +90,23 @@ def test_unknown_provider_is_a_clear_error_that_lists_the_registered_ones():
         get_provider("nope")
 
 
-def test_an_unregistered_provider_stops_before_terraform_is_touched():
+def test_the_input_accepts_exactly_the_registered_provider_names():
+    # schemas.py 는 구현을 import 하지 않으려고 이름을 Literal 로 따로 가진다. 등록표와 어긋나면 여기서 걸린다.
+    assert set(get_args(ProviderName)) == set(PROVIDERS)
+
+
+@pytest.mark.parametrize("model", [ProvisioningInput, AppDeployInput])
+def test_a_misspelled_provider_is_rejected_by_input_validation(model):
+    with pytest.raises(ValidationError, match="provider"):
+        model(run_id="r", provider="gpc", project_id="p", target_infra={})
+
+
+def test_an_unregistered_provider_still_stops_before_terraform_is_touched():
+    # 입력 검증을 건너뛰어 만든 값이 service 까지 와도 Terraform 을 건드리기 전에 멈춘다(두 번째 방어선).
     tf = FakeTerraform()
+    inp = fake_provider_input(ProvisioningInput, run_id="r", provider="nope", project_id="p", target_infra={})
     with pytest.raises(ProvisioningError, match="'nope'"):
-        run(ProvisioningInput(run_id="r", provider="nope", project_id="p", target_infra={}), FakeContext(), terraform=tf)
+        run(inp, FakeContext(), terraform=tf)
     assert tf.calls == []
 
 
@@ -148,7 +169,8 @@ def test_scope_falls_back_to_the_providers_environment_variable(monkeypatch, oth
 def test_run_with_another_provider_writes_its_variables_and_uses_its_default_region(other_provider):
     tf = FakeTerraform()
     result = run(
-        ProvisioningInput(
+        fake_provider_input(
+            ProvisioningInput,
             run_id="mig-001",
             provider="other",
             project_id="sub-1",
@@ -165,7 +187,9 @@ def test_run_with_another_provider_writes_its_variables_and_uses_its_default_reg
 
 def test_an_explicit_region_beats_the_providers_default(other_provider):
     result = run(
-        ProvisioningInput(run_id="r", provider="other", project_id="sub-1", target_infra={"region": "elsewhere-2"}),
+        fake_provider_input(
+            ProvisioningInput, run_id="r", provider="other", project_id="sub-1", target_infra={"region": "elsewhere-2"}
+        ),
         FakeContext(),
         terraform=FakeTerraform(),
     )
@@ -174,9 +198,10 @@ def test_an_explicit_region_beats_the_providers_default(other_provider):
 
 
 def test_deploy_app_with_another_provider_turns_the_app_on_with_its_variables(other_provider):
-    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text()), "https://target-app.example.net"))
+    tf = FakeTerraform(outputs=with_app_url(json.loads(FIXTURE.read_text(encoding="utf-8")), "https://target-app.example.net"))
     result = deploy_app(
-        AppDeployInput(
+        fake_provider_input(
+            AppDeployInput,
             run_id="mig-001",
             provider="other",
             project_id="sub-1",

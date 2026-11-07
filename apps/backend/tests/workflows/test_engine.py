@@ -1,11 +1,16 @@
+import json
+import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-from app.features.workflows.context import RunAborted, StoreRunContext
+from app.features.workflows.context import RunAborted, StoreRunContext, with_stage
 from app.features.workflows.engine import Engine, InvalidTransition
 from app.features.workflows.schemas import (
+    ApprovalRecord,
+    ApproveRequest,
     ManualStageInput,
     MigrationRequest,
     RunContext,
@@ -115,7 +120,7 @@ def test_full_flow_reaches_succeeded_after_two_approvals(db_path):
     assert engine.advance(run_id).waiting_gate == "plan"
     engine.approve(run_id, "plan")
     assert engine.advance(run_id).waiting_gate == "cutover"
-    engine.approve(run_id, "cutover")
+    engine.approve(run_id, "cutover", acknowledge_unknown=True)
     run = engine.advance(run_id)
 
     assert run.state == WorkflowState.SUCCEEDED
@@ -294,3 +299,459 @@ def test_report_after_abort_raises(db_path):
     engine.abort(run_id)
     with pytest.raises(RunAborted):
         StoreRunContext(store, run_id, StageName.DISCOVERY).report("running", 1)
+
+
+# -- 승인 기록과 실패 후 재승인 ---------------------------------------------------
+
+
+def _engine_at_cutover_gate(db_path: Path, cutover) -> tuple[Engine, str]:
+    engine = make_engine(
+        db_path,
+        discovery=ok_runner,
+        planning=ok_runner,
+        provisioning=ok_runner,
+        db_migration=ok_runner,
+        app_deploy=ok_runner,
+        cutover=cutover,
+    )
+    run_id = engine.advance(engine.create_run(REQUEST).run_id).run_id
+    engine.approve(run_id, "plan", approver="계획 승인자")
+    run = engine.advance(run_id)
+    assert (run.state, run.waiting_gate) == (WorkflowState.WAITING_APPROVAL, "cutover")
+    return engine, run_id
+
+
+class CountingCutover:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.calls = 0
+        self.error = error
+
+    def __call__(self, run: RunStatus, ctx: RunContext) -> dict:
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return {"ok": True}
+
+
+def test_approve_appends_record_and_keeps_existing_message(db_path):
+    engine, run_id = _engine_at_cutover_gate(db_path, ok_runner)
+
+    run = engine.approve(run_id, "cutover", "확인함", approver="박준서", preflight_verdict="no_go", acknowledge_unknown=True)
+
+    assert run.message == "전환 승인 ② 완료: 확인함"
+    assert run.approvals == ["plan", "cutover"]
+    assert [r.gate for r in run.approval_records] == ["plan", "cutover"]
+    record = run.approval_records[-1]
+    assert (record.approver, record.comment, record.preflight_verdict) == ("박준서", "확인함", "no_go")
+    assert record.at is not None
+
+
+def test_approve_without_approver_records_none(db_path):
+    engine, run_id = _engine_at_cutover_gate(db_path, ok_runner)
+    record = engine.approve(run_id, "cutover", acknowledge_unknown=True).approval_records[-1]
+    assert (record.approver, record.comment, record.preflight_verdict) == (None, None, None)
+
+
+def test_cutover_approve_stores_the_reported_preflight_time(db_path):
+    engine, run_id = _engine_at_cutover_gate(db_path, ok_runner)
+    measured = datetime(2026, 11, 6, 1, 2, 3, tzinfo=timezone.utc)
+
+    run = engine.approve(run_id, "cutover", preflight_verdict="unverified", preflight_measured_at=measured, acknowledge_unknown=True)
+
+    record = engine.get(run_id).approval_records[-1]
+    assert record == run.approval_records[-1]
+    assert (record.preflight_verdict, record.preflight_measured_at) == ("unverified", measured)
+
+
+def test_plan_approve_never_stores_preflight_values(db_path):
+    engine = make_engine(db_path, discovery=ok_runner, planning=ok_runner)
+    run_id = engine.advance(engine.create_run(REQUEST).run_id).run_id
+    measured = datetime(2026, 11, 6, 1, 2, 3, tzinfo=timezone.utc)
+
+    record = engine.approve(run_id, "plan", preflight_verdict="go", preflight_measured_at=measured).approval_records[-1]
+
+    assert (record.gate, record.preflight_verdict, record.preflight_measured_at) == ("plan", None, None)
+
+
+def test_approval_records_stored_without_measured_time_still_load():
+    record = ApprovalRecord.model_validate({"gate": "cutover", "preflight_verdict": "no_go", "at": "2026-11-06T01:02:03Z"})
+    assert (record.preflight_verdict, record.preflight_measured_at) == ("no_go", None)
+
+
+def test_rejected_approve_leaves_no_record(db_path):
+    engine, run_id = _engine_at_cutover_gate(db_path, ok_runner)
+    with pytest.raises(InvalidTransition):
+        engine.approve(run_id, "plan", approver="박준서")
+    assert [r.gate for r in engine.get(run_id).approval_records] == ["plan"]
+
+
+def test_rows_stored_without_approval_records_still_load(db_path):
+    store = RunStore(db_path)
+    run_id = Engine(store).create_run(REQUEST).run_id
+    with sqlite3.connect(db_path) as conn:
+        data = json.loads(conn.execute("SELECT data FROM runs").fetchone()[0])
+        del data["approval_records"]
+        conn.execute("UPDATE runs SET data = ?", (json.dumps(data),))
+
+    assert store.get(run_id).approval_records == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, None), ("", None), ("   \t", None), (" " * 101, None), (" 박준서 ", "박준서"), ("x" * 100, "x" * 100)],
+)
+def test_approve_request_normalizes_blank_approver(raw, expected):
+    assert ApproveRequest(gate="cutover", approver=raw).approver == expected
+
+
+def test_approve_request_rejects_long_approver():
+    with pytest.raises(ValidationError):
+        ApproveRequest(gate="cutover", approver="x" * 101)
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("컷오버 실패로 원본으로 롤백되었습니다: x"), TimeoutError("대기 시간 초과")]
+)
+def test_failed_cutover_needs_fresh_approval_on_resume(db_path, error):
+    cutover = CountingCutover(error)
+    engine, run_id = _engine_at_cutover_gate(db_path, cutover)
+    engine.approve(run_id, "cutover", approver="박준서", acknowledge_unknown=True)
+
+    failed = engine.advance(run_id)
+
+    assert failed.state == WorkflowState.FAILED
+    assert failed.approvals == ["plan"]
+    assert [r.gate for r in failed.approval_records] == ["plan", "cutover"]
+    assert "전환 승인 ②" in failed.message
+    # 진단이 읽는 단계 오류 메시지는 그대로입니다
+    assert failed.stage(StageName.CUTOVER).message == f"{type(error).__name__}: {error}"
+    assert cutover.calls == 1
+
+    engine.resume(run_id)
+    waiting = engine.advance(run_id)
+
+    assert (waiting.state, waiting.waiting_gate) == (WorkflowState.WAITING_APPROVAL, "cutover")
+    assert waiting.current_stage == StageName.CUTOVER
+    assert cutover.calls == 1
+
+    cutover.error = None
+    engine.approve(run_id, "cutover", approver="이주호", acknowledge_unknown=True)
+    done = engine.advance(run_id)
+
+    assert done.state == WorkflowState.SUCCEEDED
+    assert cutover.calls == 2
+    assert [r.approver for r in done.approval_records if r.gate == "cutover"] == ["박준서", "이주호"]
+
+
+def test_stuck_cutover_stage_also_drops_the_approval(db_path):
+    engine, run_id = _engine_at_cutover_gate(db_path, ok_runner)
+    engine.approve(run_id, "cutover", acknowledge_unknown=True)
+    store = engine._store
+    store.update(run_id, lambda r: with_stage(r, StageName.CUTOVER, state=WorkflowState.RUNNING))
+
+    engine._mark_failed(run_id, None, "workflows 내부 오류")
+
+    run = engine.get(run_id)
+    assert run.state == WorkflowState.FAILED
+    assert run.approvals == ["plan"]
+    assert run.message.startswith("workflows 내부 오류")
+    assert "전환 승인 ②" in run.message
+
+
+def _legacy_failed_cutover_row(db_path: Path, engine: Engine, run_id: str) -> None:
+    """이 변경 전에 저장된 row: 전환 실패인데 승인 ② 가 남아 있고 approval_records·cutover_outcome 이 없습니다."""
+    engine._store.update(
+        run_id,
+        lambda r: with_stage(r, StageName.CUTOVER, state=WorkflowState.FAILED, message="RuntimeError: 실패").model_copy(
+            update={"state": WorkflowState.FAILED, "waiting_gate": None, "approvals": ["plan", "cutover"]}
+        ),
+    )
+    with sqlite3.connect(db_path) as conn:
+        data = json.loads(conn.execute("SELECT data FROM runs").fetchone()[0])
+        del data["approval_records"]
+        conn.execute("UPDATE runs SET data = ?", (json.dumps(data),))
+
+
+def test_resuming_a_legacy_row_does_not_reuse_its_stale_approval(db_path):
+    cutover = CountingCutover()
+    engine, run_id = _engine_at_cutover_gate(db_path, cutover)
+    _legacy_failed_cutover_row(db_path, engine, run_id)
+
+    engine.resume(run_id)
+    run = engine.advance(run_id)
+
+    assert (run.state, run.waiting_gate) == (WorkflowState.WAITING_APPROVAL, "cutover")
+    assert cutover.calls == 0
+    assert run.approvals == ["plan"]
+    assert run.approval_records == []
+    # 이전 결과를 모르므로 화면이 "전환 전" 으로 말하지 않게 합니다.
+    assert run.stage(StageName.CUTOVER).metrics["cutover_outcome"] == "unknown"
+
+
+def test_resume_of_an_earlier_failed_stage_leaves_cutover_untouched(db_path):
+    engine, run_id = _engine_at_cutover_gate(db_path, ok_runner)
+    engine._store.update(
+        run_id,
+        lambda r: with_stage(r, StageName.APP_DEPLOY, state=WorkflowState.FAILED).model_copy(
+            update={"state": WorkflowState.FAILED, "waiting_gate": None}
+        ),
+    )
+
+    run = engine.resume(run_id)
+
+    assert run.approvals == ["plan"]
+    assert "cutover_outcome" not in run.stage(StageName.CUTOVER).metrics
+
+
+class OutcomeCutover(CountingCutover):
+    """결과를 보고한 뒤 실패하는 runner 입니다. 실제 run_cutover 의 경계만 흉내 냅니다."""
+
+    def __init__(self, outcome: str) -> None:
+        super().__init__(RuntimeError("실패"))
+        self.outcome = outcome
+
+    def __call__(self, run: RunStatus, ctx: RunContext) -> dict:
+        ctx.report("running", 50, {"cutover_outcome": self.outcome})
+        return super().__call__(run, ctx)
+
+
+@pytest.mark.parametrize("outcome", ["rolled_back", "not_started"])
+def test_failure_confirmed_on_source_revokes_the_approval(db_path, outcome):
+    engine, run_id = _engine_at_cutover_gate(db_path, OutcomeCutover(outcome))
+    engine.approve(run_id, "cutover", acknowledge_unknown=True)
+
+    run = engine.advance(run_id)
+
+    assert run.approvals == ["plan"]
+    assert "전환 승인 ②" in run.message
+
+
+@pytest.mark.parametrize("outcome", ["post_switch_failed", "unknown"])
+def test_failure_that_may_have_moved_traffic_keeps_the_manual_path(db_path, outcome):
+    engine, run_id = _engine_at_cutover_gate(db_path, OutcomeCutover(outcome))
+    engine.approve(run_id, "cutover", acknowledge_unknown=True)
+
+    run = engine.advance(run_id)
+
+    assert run.state == WorkflowState.FAILED
+    assert run.approvals == ["plan", "cutover"]
+    assert "수동 확인 필요" in run.message
+    assert "전환 승인 ②" not in run.message
+
+    done = engine.submit_manual(run_id, StageName.CUTOVER, ManualStageInput(output={"checked": True}))
+    assert done.stage(StageName.CUTOVER).manual is True
+
+
+@pytest.mark.parametrize("outcome", ["post_switch_failed", "unknown"])
+def test_resume_after_uncertain_outcome_needs_approval_and_keeps_the_warning(db_path, outcome):
+    cutover = OutcomeCutover(outcome)
+    engine, run_id = _engine_at_cutover_gate(db_path, cutover)
+    engine.approve(run_id, "cutover", acknowledge_unknown=True)
+    engine.advance(run_id)
+
+    engine.resume(run_id)
+    run = engine.advance(run_id)
+
+    assert (run.state, run.waiting_gate) == (WorkflowState.WAITING_APPROVAL, "cutover")
+    assert cutover.calls == 1
+    assert run.approvals == ["plan"]
+    assert run.stage(StageName.CUTOVER).metrics["cutover_outcome"] == outcome
+
+
+def test_internal_failure_after_the_switch_is_not_offered_as_a_retry(db_path):
+    engine, run_id = _engine_at_cutover_gate(db_path, ok_runner)
+    engine.approve(run_id, "cutover", acknowledge_unknown=True)
+    engine._store.update(
+        run_id,
+        lambda r: with_stage(r, StageName.CUTOVER, state=WorkflowState.RUNNING, metrics={"cutover_outcome": "switched"}),
+    )
+
+    engine._mark_failed(run_id, None, "workflows 내부 오류")
+
+    run = engine.get(run_id)
+    assert run.approvals == ["plan", "cutover"]
+    assert "수동 확인 필요" in run.message
+
+
+def test_internal_failure_without_stuck_cutover_keeps_the_approval(db_path):
+    engine, run_id = _engine_at_cutover_gate(db_path, ok_runner)
+    engine.approve(run_id, "cutover", acknowledge_unknown=True)
+
+    engine._mark_failed(run_id, None, "workflows 내부 오류")
+
+    run = engine.get(run_id)
+    assert run.approvals == ["plan", "cutover"]
+    assert run.message == "workflows 내부 오류"
+
+
+def test_failed_provisioning_keeps_plan_approval_and_retries_without_approval(db_path):
+    calls = []
+
+    def flaky(run: RunStatus, ctx: RunContext) -> dict:
+        calls.append(run.run_id)
+        if len(calls) == 1:
+            raise RuntimeError("terraform 오류")
+        return {"ok": True}
+
+    engine = make_engine(db_path, discovery=ok_runner, planning=ok_runner, provisioning=flaky)
+    run_id = engine.advance(engine.create_run(REQUEST).run_id).run_id
+    engine.approve(run_id, "plan")
+
+    failed = engine.advance(run_id)
+    assert failed.state == WorkflowState.FAILED
+    assert failed.approvals == ["plan"]
+    assert failed.message == "provisioning 실패"
+
+    engine.resume(run_id)
+    run = engine.advance(run_id)
+    assert len(calls) == 2
+    assert run.waiting_gate is None
+    assert run.stage(StageName.PROVISIONING).state == WorkflowState.SUCCEEDED
+
+
+def test_manual_input_cannot_bypass_fresh_approval_after_failed_cutover(db_path):
+    engine, run_id = _engine_at_cutover_gate(db_path, CountingCutover(RuntimeError("롤백")))
+    engine.approve(run_id, "cutover", acknowledge_unknown=True)
+    assert engine.advance(run_id).state == WorkflowState.FAILED
+
+    with pytest.raises(InvalidTransition, match="전환 승인"):
+        engine.submit_manual(run_id, StageName.CUTOVER, ManualStageInput(output={"done": True}))
+
+    assert engine.get(run_id).state == WorkflowState.FAILED
+
+
+def test_aborted_run_is_untouched_by_late_cutover_failure(db_path):
+    engine, run_id = _engine_at_cutover_gate(db_path, ok_runner)
+    engine.approve(run_id, "cutover", acknowledge_unknown=True)
+    engine.abort(run_id, "운영자 중단")
+
+    engine._mark_failed(run_id, StageName.CUTOVER, "늦은 실패")
+
+    run = engine.get(run_id)
+    assert run.state == WorkflowState.ABORTED
+    assert run.approvals == ["plan", "cutover"]
+def _aborted_run_with_cleanup(db_path, cleanup):
+    engine = Engine(RunStore(db_path), abort_cleanup=cleanup)
+    run_id = engine.create_run(REQUEST).run_id
+    return engine, run_id, engine.abort(run_id, "테스트")
+
+
+def test_abort_marks_cleanup_running_then_done(db_path):
+    seen = []
+
+    def cleanup(run: RunStatus) -> bool:
+        seen.append(run.state)
+        return True
+
+    engine, run_id, aborted = _aborted_run_with_cleanup(db_path, cleanup)
+    assert aborted.cleanup_state == "running"
+
+    engine.run_abort_cleanup(run_id)
+
+    after = engine.get(run_id)
+    assert seen == [WorkflowState.ABORTED]
+    assert after.cleanup_state == "done"
+    assert "완료" in after.cleanup_message
+    assert after.updated_at == aborted.updated_at
+
+
+def test_abort_cleanup_with_nothing_to_clean_leaves_no_note(db_path):
+    engine, run_id, _ = _aborted_run_with_cleanup(db_path, lambda run: False)
+
+    engine.run_abort_cleanup(run_id)
+
+    after = engine.get(run_id)
+    assert after.cleanup_state is None
+    assert after.cleanup_message is None
+
+
+def test_failed_abort_cleanup_is_recorded_and_can_be_retried(db_path):
+    attempts = []
+
+    def cleanup(run: RunStatus) -> bool:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("커넥터 서버 응답 없음")
+        return True
+
+    engine, run_id, _ = _aborted_run_with_cleanup(db_path, cleanup)
+
+    engine.run_abort_cleanup(run_id)
+    failed = engine.get(run_id)
+    assert failed.cleanup_state == "failed"
+    assert "커넥터 서버 응답 없음" in failed.cleanup_message
+
+    assert engine.retry_cleanup(run_id).cleanup_state == "running"
+    engine.run_abort_cleanup(run_id)
+    assert engine.get(run_id).cleanup_state == "done"
+    assert len(attempts) == 2
+
+
+def test_cleanup_failure_scrubs_sensitive_details(db_path):
+    def cleanup(run: RunStatus) -> bool:
+        raise RuntimeError("failed to connect postgres://admin:supersecret@10.0.1.2:5432/db")
+
+    engine, run_id, _ = _aborted_run_with_cleanup(db_path, cleanup)
+    engine.run_abort_cleanup(run_id)
+    failed = engine.get(run_id)
+    assert failed.cleanup_state == "failed"
+    assert "supersecret" not in failed.cleanup_message
+    assert "10.0.1.2" not in failed.cleanup_message
+    assert "[숨김]" in failed.cleanup_message
+
+
+def test_cleanup_retry_is_refused_unless_it_failed(db_path):
+    engine, run_id, _ = _aborted_run_with_cleanup(db_path, lambda run: True)
+    with pytest.raises(InvalidTransition):
+        engine.retry_cleanup(run_id)  # 아직 정리 중
+    engine.run_abort_cleanup(run_id)
+    with pytest.raises(InvalidTransition):
+        engine.retry_cleanup(run_id)  # 이미 끝남
+
+
+def test_abort_without_cleanup_configured_stays_as_before(db_path):
+    engine = make_engine(db_path)
+    run_id = engine.create_run(REQUEST).run_id
+
+    assert engine.abort(run_id).cleanup_state is None
+    engine.run_abort_cleanup(run_id)
+    assert engine.get(run_id).cleanup_state is None
+
+
+def test_report_after_success_updates_metrics_without_reopening_the_stage(db_path):
+    store = RunStore(db_path)
+    engine = Engine(store, {StageName.DISCOVERY: discovery_runner})
+    run_id = engine.create_run(REQUEST).run_id
+    before = engine.advance(run_id)
+
+    StoreRunContext(store, run_id, StageName.DISCOVERY).report("running", 7, {"lag": 3}, "복제 중")
+
+    after = engine.get(run_id)
+    stage = after.stage(StageName.DISCOVERY)
+    assert stage.state == WorkflowState.SUCCEEDED
+    assert stage.progress == 100
+    assert stage.metrics == {"tables": 1, "lag": 3}
+    assert stage.message == "복제 중"
+    assert after.state == before.state
+    assert after.updated_at == before.updated_at
+
+
+def test_report_after_failure_keeps_the_error_and_allows_resume(db_path):
+    def fails(run: RunStatus, ctx: RunContext) -> dict:
+        raise RuntimeError("원래 오류")
+
+    store = RunStore(db_path)
+    engine = Engine(store, {StageName.DISCOVERY: fails})
+    run_id = engine.create_run(REQUEST).run_id
+    before = engine.advance(run_id)
+    failed_message = before.stage(StageName.DISCOVERY).message
+
+    StoreRunContext(store, run_id, StageName.DISCOVERY).report("running", 7, {"lag": 3}, "복제 중")
+
+    after = engine.get(run_id)
+    stage = after.stage(StageName.DISCOVERY)
+    assert stage.state == WorkflowState.FAILED
+    assert stage.message == failed_message
+    assert stage.metrics == {"lag": 3}
+    assert after.updated_at == before.updated_at
+    assert engine.resume(run_id).state == WorkflowState.RUNNING
