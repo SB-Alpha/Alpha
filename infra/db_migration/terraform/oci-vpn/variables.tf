@@ -30,6 +30,8 @@ variable "tunnels" {
     peer_asn      = string
     oracle_bgp_ip = string
     peer_bgp_ip   = string
+    # 상대 클라우드가 OCI 기본 PFS 그룹을 받지 못할 때만 지정한다
+    phase_two_dh_group = optional(string)
   }))
 }
 

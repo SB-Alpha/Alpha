@@ -102,6 +102,8 @@ def _oci_variables(plan: VpnPlan, settings: OciSettings, psk: dict, peers: list[
             peer = by_key[key]
             tunnels[key] = {"cpe_ip": peer.public_ip, "peer_asn": peer.asn, "peer_cidrs": cidrs,
                             "oracle_bgp_ip": f"{leg.oracle_bgp_ip(i)}/30", "peer_bgp_ip": f"{leg.peer_bgp_ip(i)}/30"}
+            if peer.phase_two_dh_group:
+                tunnels[key]["phase_two_dh_group"] = peer.phase_two_dh_group
     return {"region": settings.region, "config_profile": settings.profile, "compartment_id": settings.compartment_id,
             "name": plan.name, "drg_id": settings.drg_id, "tunnels": tunnels, "shared_secrets": psk}
 

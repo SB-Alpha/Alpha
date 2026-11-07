@@ -51,6 +51,12 @@ variable "shared_secret" {
   sensitive = true
 }
 
+variable "phase_two_dh_group" {
+  description = "Phase 2 PFS 그룹. null이면 OCI 기본값을 쓴다"
+  type        = string
+  default     = null
+}
+
 resource "oci_core_cpe" "this" {
   compartment_id = var.compartment_id
   display_name   = var.name
@@ -87,6 +93,14 @@ resource "oci_core_ipsec_connection_tunnel_management" "primary" {
     customer_bgp_asn      = var.peer_asn
     customer_interface_ip = var.peer_bgp_ip
     oracle_interface_ip   = var.oracle_bgp_ip
+  }
+
+  dynamic "phase_two_details" {
+    for_each = var.phase_two_dh_group == null ? [] : [var.phase_two_dh_group]
+    content {
+      is_pfs_enabled = true
+      dh_group       = phase_two_details.value
+    }
   }
 }
 

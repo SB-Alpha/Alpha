@@ -116,6 +116,8 @@ class PeerTunnel:
     key: str
     public_ip: str
     asn: str
+    # 상대 클라우드가 OCI 기본 PFS 그룹을 받지 못할 때만 지정한다. 없으면 OCI 기본값을 쓴다.
+    phase_two_dh_group: str | None = None
 
 
 def public_ips(value: object, expected: int) -> list[str]:
