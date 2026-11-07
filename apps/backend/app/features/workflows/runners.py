@@ -9,6 +9,7 @@ import ipaddress
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
 import threading
@@ -21,7 +22,7 @@ from .context import RunAborted
 from .engine import CUTOVER_ON_SOURCE, CUTOVER_OUTCOME, StageRunner
 from .prober import ProbedContext, prober_from_env
 from .schemas import RunContext, RunStatus, StageName, WorkflowState
-from .target_adapters import adapter_for
+from .target_adapters import adapter_for, provider_of
 
 log = logging.getLogger(__name__)
 
@@ -461,9 +462,46 @@ def _check_cdc_settings() -> None:
     OciSettings.from_env()
 
 
+ALLOW_SAME_ACCOUNT_ENV = "ALLOW_SAME_ACCOUNT_TARGET"
+
+
+def _extract_source_account_id(run: RunStatus) -> str | None:
+    """조사 출력의 원본 AWS 계정 ID(source.account_id). 없으면 None."""
+    planning_out = run.outputs.get(StageName.PLANNING.value) or {}
+    source = planning_out.get("source")
+    if hasattr(source, "model_dump"):
+        source = source.model_dump()
+    account = source.get("account_id") if isinstance(source, dict) else None
+    return str(account) if account else None
+
+
+def _check_target_account(run: RunStatus) -> None:
+    """AWS 목적지 계정이 원본 계정과 같으면 Terraform 을 시작하기 전에 거부합니다.
+
+    같은 계정에 목적지를 만들면 이름(ECR 저장소, IAM 역할 등)이 원본과 겹쳐 실패하거나 원본 계정에 자원이 섞입니다.
+    Terraform 의 allowed_account_ids 는 '입력한 값'과 '실행 환경 로그인'만 비교하므로 원본 계정은 여기서 비교합니다.
+    계정이 하나뿐인 시연 환경에서는 환경변수 ALLOW_SAME_ACCOUNT_TARGET=1 로 명시해야 통과합니다.
+    원본 계정을 알 수 없으면(직접 입력 등) 비교하지 않습니다.
+    """
+    if provider_of(run.request) != "aws":
+        return
+    config = run.request.target_infra
+    target = (config.project_id if config else None) or os.getenv("AWS_ACCOUNT_ID")
+    source = _extract_source_account_id(run)
+    if not target or not source or str(target).strip() != source:
+        return
+    if os.getenv(ALLOW_SAME_ACCOUNT_ENV, "").strip().lower() in {"1", "true", "yes"}:
+        return
+    raise RuntimeError(
+        f"목적지 AWS 계정({target})이 원본 계정과 같습니다. 같은 계정에 만들면 이름이 겹치거나 원본 계정에 자원이 섞일 수 있어 "
+        f"시작하지 않았습니다. 다른 계정 ID 를 지정하세요. 같은 계정에 만들려면 환경변수 {ALLOW_SAME_ACCOUNT_ENV}=1 을 설정하세요"
+    )
+
+
 def run_provisioning(run: RunStatus, ctx: RunContext) -> Any:
     # planning 출력의 target_infra 로 목적지 인프라(VPC, Cloud SQL)를 프로비저닝합니다 (PR #40).
     target_infra = _extract_plan_target_infra(run)
+    _check_target_account(run)
     _check_cdc_settings()
     res = adapter_for(run.request).provision(run.run_id, target_infra, run.request.target_infra, ctx)
     metrics = _private_ip_metric(res)
