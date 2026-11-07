@@ -101,7 +101,50 @@ class GcpPeer:
         return [PeerTunnel(key, ips[i], "65010") for i, key in enumerate(leg.keys)]
 
 
-ADAPTERS: dict[str, PeerAdapter] = {"aws": AwsPeer(), "gcp": GcpPeer()}
+class AzurePeer:
+    """Active-Active 게이트웨이의 인스턴스 2개가 OCI 터널 2개와 하나씩 BGP로 연결된다.
+
+    GatewaySubnet은 VNet 대역을 정하는 일이라 만들지 않는다. 없으면 자원을 만들기 전에 거절한다.
+    """
+
+    root = "azure-vpn"
+    asn = "65515"
+    # Azure는 OCI 기본 PFS 그룹 5를 제안하지 않아 Phase 2가 맞지 않는다.
+    phase_two_dh_group = "GROUP14"
+
+    def validate(self, leg: VpnLeg) -> None:
+        _required(leg, "resource_group", "vnet_name", "has_gateway_subnet")
+
+    def credentials(self, values: dict[str, str]) -> dict[str, str]:
+        env = {"ARM_TENANT_ID": values["tenant_id"], "ARM_CLIENT_ID": values["client_id"],
+               "ARM_CLIENT_SECRET": values["client_secret"], "ARM_SUBSCRIPTION_ID": values["subscription_id"]}
+        if not all(env.values()):
+            raise ValueError
+        return env
+
+    def variables(self, leg: VpnLeg, name: str, settings: OciSettings, psk: dict, oci_ips: dict) -> dict:
+        linked = all(key in oci_ips for key in leg.keys)
+        return {
+            "resource_group": leg.network["resource_group"], "location": leg.region,
+            "vnet_name": leg.network["vnet_name"], "name": name, "gateway_asn": int(self.asn),
+            "gateway_bgp_ips": [leg.peer_bgp_ip(i) for i in range(2)],
+            "oci_tunnels": [{"oci_ip": oci_ips[key], "oci_bgp_ip": leg.oracle_bgp_ip(i)}
+                            for i, key in enumerate(leg.keys)] if linked else [],
+            "shared_secrets": [psk[key] for key in leg.keys] if linked else [],
+        }
+
+    def peers(self, tf: TerraformPort, leg: VpnLeg) -> list[PeerTunnel]:
+        values = tf.output(leg.role, "gateway_public_ips")
+        if values is None:
+            return []
+        ips = public_ips(values, 2)
+        expected = [leg.peer_bgp_ip(i) for i in range(2)]
+        if str(tf.output(leg.role, "gateway_asn")) != self.asn or tf.output(leg.role, "gateway_bgp_ips") != expected:
+            raise VpnError("invalid_output", f"{leg.role}: Azure returned unexpected BGP settings")
+        return [PeerTunnel(key, ips[i], self.asn, self.phase_two_dh_group) for i, key in enumerate(leg.keys)]
+
+
+ADAPTERS: dict[str, PeerAdapter] = {"aws": AwsPeer(), "gcp": GcpPeer(), "azure": AzurePeer()}
 
 
 def adapters_for(legs: tuple[VpnLeg, VpnLeg], registry: dict[str, PeerAdapter] | None = None) -> dict[str, PeerAdapter]:

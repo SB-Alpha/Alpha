@@ -13,8 +13,8 @@ from cryptography.fernet import Fernet
 
 from app.core.secrets import delete_secret, has_secret, put_secret, resolve
 from app.features.db_migration import vpn, vpn_workflow as flow
-from app.features.db_migration.vpn_peers import ADAPTERS, GcpPeer
-from app.features.db_migration.vpn_plan import BGP_NETWORKS, TUNNEL_KEYS, PeerTunnel, VpnError, VpnLeg, VpnPlan
+from app.features.db_migration.vpn_peers import ADAPTERS
+from app.features.db_migration.vpn_plan import BGP_NETWORKS, TUNNEL_KEYS, VpnError, VpnLeg, VpnPlan
 from app.features.db_migration.vpn_terraform import TerraformSession
 
 SECRET = "private-key-do-not-echo"
@@ -45,6 +45,7 @@ def env(tmp_path, monkeypatch):
         monkeypatch.setenv(name, value)
     put_secret("cloud/aws", {"aws_access_key_id": "key", "aws_secret_access_key": SECRET})
     put_secret("cloud/gcp", {"credentials_json": SECRET})
+    put_secret("cloud/azure", {"tenant_id": "tenant", "client_id": "client", "client_secret": SECRET, "subscription_id": "sub"})
 
 
 def leg(role, cloud):
@@ -52,7 +53,7 @@ def leg(role, cloud):
         "aws": {"vpc_id": "vpc", "route_table_ids": ["rtb"], "db_security_group_id": "sg"},
         "gcp": {"project_id": "network-project", "vpc_name": "net", "psa_range_cidr": "10.20.0.0/20",
                 "psa_range_cidrs": ["10.20.0.0/20", "10.21.0.0/20"]},
-        "azure": {"vnet_name": "net"},
+        "azure": {"resource_group": "rg", "vnet_name": "net", "has_gateway_subnet": True},
     }
     return VpnLeg(role, cloud, "region", "scope", ("172.31.0.0/16",) if cloud == "aws" else ("10.20.0.0/16",),
                   copy.deepcopy(networks[cloud]), 6543, f"secret://cloud/{cloud}")
@@ -86,6 +87,9 @@ class FakeTerraform:
         if endpoint.cloud == "aws":
             self.state[role] = {"tunnels": [{"aws_ip": ips[i], "aws_bgp_ip": endpoint.peer_bgp_ip(i),
                                              "oci_bgp_ip": endpoint.oracle_bgp_ip(i), "amazon_asn": 64512} for i in range(2)]}
+        elif endpoint.cloud == "azure":
+            self.state[role] = {"gateway_public_ips": ips, "gateway_asn": 65515,
+                                "gateway_bgp_ips": [endpoint.peer_bgp_ip(i) for i in range(2)]}
         else:
             self.state[role] = {"ha_vpn_interface_ips": ips, "router_asn": 65010}
 
@@ -221,39 +225,80 @@ def test_lost_psk_is_not_regenerated_for_an_existing_vpn():
 
 
 @pytest.mark.parametrize("source,target", [("azure", "aws"), ("gcp", "azure")])
-def test_missing_azure_adapter_is_rejected_before_any_resource_or_secret(source, target):
+def test_missing_adapter_is_rejected_before_any_resource_or_secret(source, target):
     inp = plan(source, target)
     tf = FakeTerraform(inp)
+    registry = {cloud: adapter for cloud, adapter in ADAPTERS.items() if cloud != "azure"}
     with pytest.raises(VpnError) as exc:
-        flow.ensure_vpn(inp, terraform=tf)
+        flow.ensure_vpn(inp, terraform=tf, registry=registry)
     assert exc.value.code == "unsupported_cloud" and not tf.applies
     assert not has_secret(f"secret://{RUN_ID}/vpn-context") and not has_secret(f"secret://{RUN_ID}/vpn-psk")
 
 
-class ExampleAzureAdapter(GcpPeer):
-    """공통 절차의 확장 테스트 전용. 실제 Azure 구현으로 등록하지 않는다."""
-    root = "test-azure"
-    asn = "65515"
-
-    def validate(self, leg):
-        pass
-
-    def variables(self, leg, name, settings, psk, oci_ips):
-        return {"test_only": True, "shared_secrets": [psk[key] for key in leg.keys]}
-
-    def peers(self, tf, leg):
-        values = tf.output(leg.role, "ha_vpn_interface_ips")
-        return [PeerTunnel(key, values[i], self.asn) for i, key in enumerate(leg.keys)] if values else []
-
-
 @pytest.mark.parametrize("source,target", tuple(permutations(("aws", "gcp", "azure"), 2)))
-def test_common_order_handles_all_six_routes_when_adapters_are_provided(source, target):
+def test_common_order_handles_all_six_routes(source, target):
     inp = plan(source, target)
     tf = FakeTerraform(inp)
-    registry = {**ADAPTERS, "azure": ExampleAzureAdapter()}
-    flow.ensure_vpn(inp, terraform=tf, registry=registry)
+    flow.ensure_vpn(inp, terraform=tf)
     assert [role for role, _ in tf.applies] == ["source", "target", "oci", "source", "target"]
-    assert flow.destroy_vpn(RUN_ID, terraform=tf, registry=registry)
+    assert flow.destroy_vpn(RUN_ID, terraform=tf)
+
+
+@pytest.mark.parametrize("source,target,azure_role", [("aws", "azure", "target"), ("azure", "gcp", "source")])
+def test_azure_gateway_is_built_first_and_connected_after_oci(source, target, azure_role):
+    inp = plan(source, target)
+    tf = FakeTerraform(inp)
+    flow.ensure_vpn(inp, terraform=tf)
+    first, second = [values for role, values in tf.applies if role == azure_role]
+    endpoint = getattr(inp, azure_role)
+    psk = resolve(f"secret://{RUN_ID}/vpn-psk")
+
+    assert first["oci_tunnels"] == [] and first["shared_secrets"] == []
+    assert first["gateway_bgp_ips"] == [endpoint.peer_bgp_ip(0), endpoint.peer_bgp_ip(1)]
+    assert first["resource_group"] == "rg" and first["vnet_name"] == "net" and first["location"] == "region"
+    assert second["oci_tunnels"] == [
+        {"oci_ip": OCI_IPS[key], "oci_bgp_ip": endpoint.oracle_bgp_ip(i)} for i, key in enumerate(endpoint.keys)]
+    assert second["shared_secrets"] == [psk[key] for key in endpoint.keys]
+
+
+def test_only_azure_tunnels_change_the_oci_pfs_group():
+    inp = plan("aws", "azure")
+    tf = FakeTerraform(inp)
+    flow.ensure_vpn(inp, terraform=tf)
+    tunnels = next(values for role, values in tf.applies if role == "oci")["tunnels"]
+
+    assert tunnels["target-0"]["phase_two_dh_group"] == tunnels["target-1"]["phase_two_dh_group"] == "GROUP14"
+    assert tunnels["target-0"]["peer_asn"] == "65515"
+    assert "phase_two_dh_group" not in tunnels["source-0"] and "phase_two_dh_group" not in tunnels["source-1"]
+
+
+@pytest.mark.parametrize("change", [{"has_gateway_subnet": False}, {"resource_group": None}, {"vnet_name": None}])
+def test_azure_without_required_network_is_rejected_before_any_resource(change):
+    inp = plan("aws", "azure")
+    inp = replace(inp, target=replace(inp.target, network={**inp.target.network, **change}))
+    tf = FakeTerraform(inp)
+    with pytest.raises(VpnError) as exc:
+        flow.ensure_vpn(inp, terraform=tf)
+    assert exc.value.code == "invalid_plan" and not tf.applies
+
+
+@pytest.mark.parametrize("name,value", [("gateway_asn", 64512), ("gateway_bgp_ips", ["169.254.31.1", "169.254.32.1"])])
+def test_azure_unexpected_bgp_output_stops_before_oci(name, value):
+    inp = plan("aws", "azure")
+    tf = FakeTerraform(inp)
+    tf.apply("target", {})
+    tf.applies.clear()
+    tf.state["target"][name] = value
+    with pytest.raises(VpnError) as exc:
+        ADAPTERS["azure"].peers(tf, inp.target)
+    assert exc.value.code == "invalid_output"
+
+
+def test_azure_credentials_become_terraform_environment():
+    assert ADAPTERS["azure"].credentials(resolve("secret://cloud/azure")) == {
+        "ARM_TENANT_ID": "tenant", "ARM_CLIENT_ID": "client", "ARM_CLIENT_SECRET": SECRET, "ARM_SUBSCRIPTION_ID": "sub"}
+    with pytest.raises(KeyError):
+        ADAPTERS["azure"].credentials({"tenant_id": "tenant"})
 
 
 def test_context_contains_topology_and_credential_references_only():

@@ -1,0 +1,12 @@
+# 복사해서 terraform.tfvars로 쓴다. terraform.tfvars는 커밋하지 않는다.
+resource_group  = "<VNet이 있는 리소스 그룹>"
+location        = "<Azure 리전>"
+vnet_name       = "<DB의 Private Endpoint가 있는 VNet>"
+gateway_bgp_ips = ["169.254.21.1", "169.254.22.1"]
+
+# 1단계에서는 비워 두고, OCI 쪽 apply 뒤에 채워 다시 apply한다.
+oci_tunnels = [
+  # { oci_ip = "192.0.2.20", oci_bgp_ip = "169.254.21.2" },
+  # { oci_ip = "192.0.2.21", oci_bgp_ip = "169.254.22.2" },
+]
+shared_secrets = []
