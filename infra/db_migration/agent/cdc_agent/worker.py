@@ -14,7 +14,8 @@ class WorkerClient:
         headers = {}
         if settings.worker_token_file:
             headers["Authorization"] = f"Bearer {settings.worker_token_file.read_text().strip()}"
-        self._http = httpx.Client(base_url=settings.worker_url, headers=headers, timeout=5)
+        self._http = httpx.Client(base_url=settings.worker_url, headers=headers,
+                                  timeout=settings.worker_timeout_s)
 
     def _post(self, path: str, body: dict) -> dict:
         resp = self._http.post(path, json=body)

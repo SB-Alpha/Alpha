@@ -21,5 +21,11 @@ CREATE INDEX work_items_created_at_idx ON work_items (created_at DESC);
 INSERT INTO work_items (title, status)
 SELECT 'seed item ' || g, (ARRAY['todo','in_progress','done'])[1 + g % 3]
 FROM generate_series(1, 1000) g;
+-- 자동 증가 ID: 전환 후 목적지 시퀀스가 원본 값부터 이어지는지 본다.
+CREATE TABLE tickets (
+    id    BIGSERIAL PRIMARY KEY,
+    title TEXT      NOT NULL
+);
+INSERT INTO tickets (title) SELECT 'seed ticket ' || g FROM generate_series(1, 20) g;
 RESET ROLE;
 SQL

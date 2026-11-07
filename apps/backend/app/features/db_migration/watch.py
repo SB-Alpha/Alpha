@@ -16,6 +16,7 @@ from typing import TextIO
 import httpx
 
 from .client import AgentError, AgentSettings, CdcAgentClient
+from .settings import MissingSetting
 from .guide_workflow import TERMINAL_STATES, to_job_id
 
 PHASES = ("source_prepare", "target_prepare", "precheck", "replication_setup", "snapshot", "streaming",
@@ -131,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         agent = CdcAgentClient(AgentSettings.from_env())
-    except KeyError:
+    except MissingSetting:
         print("CDC_AGENT_URL이 설정되지 않았습니다.", file=sys.stderr)
         return 2
     try:

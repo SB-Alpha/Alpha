@@ -61,7 +61,7 @@ def run(inp: <Module>Input, ctx: RunContext) -> <Module>Output: ...
 provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어댑터를 부릅니다. 지금은 `gcp` 만 등록돼 있고 `target_infra` 가 없는 요청도 `gcp` 입니다. 새 클라우드의 계약과 아직 GCP 에 묶인 부분은 `docs/TARGET_ADAPTER_SPEC.md` 에 있습니다.
 
 ## 승인 ② 판정
-`readiness.py` 가 복제 상태, 초기 복사, 복제 지연, 불일치 테이블, 목적지 앱 상태를 봅니다. 화면과 API 가 같은 판정을 씁니다.
+`readiness.py` 가 복제 상태, 초기 복사, 복제 지연, 행 수 불일치 테이블, 목적지 앱 상태를 봅니다. 화면과 API 가 같은 판정을 씁니다.
 
 승인 ② 화면에는 두 가지 결과가 함께 나옵니다.
 
@@ -72,8 +72,9 @@ provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어
 - 실패 항목이 있으면 `409` 로 거부합니다. `acknowledge_unknown` 으로도 넘어가지 못합니다.
 - 미제공 항목만 있으면 `acknowledge_unknown: true` 일 때만 승인합니다.
 - 복제 지연 기준값(1MiB)은 임시값입니다. 팀 합의 후 바꿉니다.
-- 초기 복사·불일치 테이블: 쓰기 중에는 두 DB 를 다른 순간에 읽어 값이 오가므로, 에이전트가 `cutover_ready` 로 올린 뒤의 순간값으로는 막지 않습니다. 쓰기를 멈춘 전환 기준점에서 다시 검사해 다르면 전환하지 않습니다.
-- `cdc_error`: CDC 추적이 streaming 이후 끝나면 `db_migration` 단계 지표에 남아 승인을 막습니다. 끝난 단계는 다시 열지 않고 지표만 갱신합니다.
+- 초기 복사·행 수 불일치 테이블: 쓰기 중에는 두 DB 를 다른 순간에 읽어 값이 오가므로, 에이전트가 `cutover_ready` 로 올린 뒤의 순간값으로는 막지 않습니다. 이 값은 행 수만 비교합니다. 내용 비교는 전환 시점 스냅샷으로 트래픽을 푼 뒤에 합니다 (`verification`).
+- CDC 설정 사전 점검: `provisioning` runner 는 목적지를 만들기 전에 `CDC_AGENT_URL` 과 OCI 설정(`vpn.OciSettings`)을 봅니다. 값이 없으면 변수 이름을 남기고 실패합니다. 시뮬레이션은 보지 않습니다. 클러스터 상태와 대역 겹침은 VPN 을 만들기 전에 `db_migration` 이 봅니다.
+- `cdc_error`: CDC 추적이 streaming 이후 끝나면 `db_migration` 단계 지표에 남아 승인을 막습니다. 전환이 끝나 돌아온 경우는 정상 종료라 남기지 않습니다. 끝난 단계는 다시 열지 않고 지표만 갱신합니다.
 
 ## 중단과 복제 자원 정리
 - run 을 중단하면 `service.stop` 으로 커넥터, 복제 슬롯, VPN 을 정리합니다. CDC 를 수동 입력으로 넘겼거나 아직 시작하지 않았으면 할 일이 없습니다.
@@ -87,7 +88,10 @@ provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어
 - `serving`: 에이전트의 `traffic_mode` 에서 옮깁니다.
 - `cutover_seconds`·`cutover_seconds_source`: 팀 합의(박준서, 11/5)대로 Worker 의 `released_at - hold_started_at`(에이전트 `evidence.cutover.t0`·`t1`)을 씁니다 (`worker`). 두 값을 쓸 수 없으면 에이전트 `cutover_ms` 를 씁니다 (`agent`). 둘 다 없으면 "미제공" 입니다.
 - `cutover_steps`: 에이전트 `evidence.cutover.steps` 의 `step`·`elapsed_ms`·`waited_ms`·`mismatch`·`error`(접속 정보를 가린 뒤 300자까지)만 옮깁니다. 진행 중과 실패 직전에도 보고합니다.
-- `cutover_sequence`·`cutover_sequence_missing`: 성공 시 순서 검증 결과(`VERIFIED`/`INCOMPLETE`)와 빠진 단계입니다. 증적이 없으면(시뮬레이터 포함) 단계 지표는 모두 "미제공" 입니다.
+- `cutover_sequence`·`cutover_sequence_missing`: 성공 시 순서 검증 결과(`VERIFIED`/`INCOMPLETE`)와 빠진 단계입니다. 세 번째 단계는 `snapshot_fixed` 이고, 이전 에이전트의 `validated` 도 인정합니다. 증적이 없으면(시뮬레이터 포함) 단계 지표는 모두 "미제공" 입니다.
+- `verification`: 전환 시점 스냅샷 비교 결과입니다. 전환 시간은 트래픽을 푼 시점에 확정하고, 단계는 이 값이 정해질 때까지 기다립니다.
+  - `running`(비교 중), `match`(일치), `mismatch`(불일치), `unverifiable`(비교를 끝내지 못함)은 에이전트 값이고, `unknown`(기다리는 동안 결과를 못 받음)은 workflows 값입니다. 보고가 없는 에이전트는 기다리지 않고 "미제공" 입니다.
+  - `mismatch` 는 단계를 실패로 남기고 `cutover_outcome` 을 `post_switch_failed` 로 바꿉니다. `unverifiable`·`unknown` 은 데이터가 다르다는 뜻이 아니어서 경고만 남기고 단계는 성공합니다.
 - `cutover_outcome`: 처음 계약에 없던 값으로, 실패 직후 동작과 화면의 복귀 안내를 정하려고 workflows 가 추가했습니다. `not_started`(전환이 시작되지 않음), `rolled_back`(원본으로 복귀함), `unknown`(결과 불명), `post_switch_failed`(경로를 바꾼 뒤 오류), `switched`(전환 완료) 중 하나입니다.
   - `rolled_back` 은 에이전트 보고만으로 쓰지 않습니다. 복귀 단계에 실패가 없고, Worker 상태가 `mode`·`next_origin` 모두 `SOURCE` 일 때만 씁니다. `WORKER_URL` 이 없거나 읽지 못하면 `unknown` 입니다. 전환 요청 응답을 잃은 경우도 `unknown` 입니다.
   - 결과를 모르는데 트래픽이 원본이라고 확인되지 않으면 중단 뒤 복제 자원을 자동으로 정리하지 않습니다.
@@ -108,7 +112,7 @@ provisioning 과 app_deploy 는 요청의 `target_infra.provider` 로 고른 어
 | --- | --- | --- |
 | `job_ready` | 에이전트 job | `waiting_approval`/`cutover_ready` 면 `pass`, 아니면 `fail` |
 | `db_connectivity` | `measure_error`·`measured_at` | 측정 오류면 `fail`(원문은 싣지 않음), 측정 시각이 시간대가 있는 ISO 문자열이면 `pass`, 아니면 `unknown`. 합의된 기준이 없어 시각의 나이는 보지 않습니다 |
-| `data_match` | `mismatch` | 0 이면 `pass`, 0 보다 크면 `fail`. 측정 오류면 `unknown` |
+| `data_match` | `mismatch`(행 수 비교) | 0 이면 `pass`, 0 보다 크면 `fail`. 측정 오류면 `unknown` |
 | `replication_lag` | `replication_lag_bytes` | 기준이 없으면 `info`. `ALPHA_CUTOVER_MAX_LAG_BYTES` 가 있으면 `pass`/`fail`, 값이 잘못되면 `unknown` |
 | `target_ready` | `app_deploy` 의 `app_url` + `/health/ready` | 200 이면 `pass`, 아니면 `fail`. 수동 입력 주소나 https 가 아닌 주소는 호출하지 않고 `unknown` |
 | `worker_target` | `WorkerClient.get_target()` | `app_url` 과 같으면 `pass`, 저장된 주소가 다르면 `fail`. 저장된 주소가 없으면 Worker 가 설정된 기본 대상을 쓰는 것이라 `unknown`. Worker 미설정이면 `unknown` |

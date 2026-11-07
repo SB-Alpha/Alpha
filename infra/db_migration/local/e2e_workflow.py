@@ -69,7 +69,7 @@ def serve() -> int:
     os.environ.update(
         CDC_AGENT_URL="http://localhost:18080",
         WORKER_URL="http://localhost:18081",
-        WORKER_TOKEN_FILE=str(HERE / ".local" / "secrets" / "worker.token"),
+        WORKER_TOKEN_FILE=str(HERE / ".local" / "agent-secrets" / "worker.token"),
         ALPHA_PROBE_URL="http://localhost:18081/health/ready",
         ALPHA_DATA_DIR=data_dir,
         ALPHA_SECRETS_KEY=Fernet.generate_key().decode(),
@@ -167,10 +167,14 @@ def verify(run_id: str) -> int:
     with httpx.Client(base_url=API, timeout=30) as http:
         run = http.get(f"/runs/{run_id}").json()
     metrics = next(s for s in run["stages"] if s["stage"] == "cutover")["metrics"]
+    cdc_metrics = next(s for s in run["stages"] if s["stage"] == "db_migration")["metrics"]
     checks = {
         "run 완료": run["state"] == "succeeded",
         "트래픽이 목적지로 전환": metrics.get("serving") == "gcp",
         "전환 시간 측정": isinstance(metrics.get("cutover_seconds"), (int, float)),
+        "전환 순서 증적": metrics.get("cutover_sequence") == "VERIFIED",
+        "전환 시점 데이터 일치": metrics.get("verification") == "match",
+        "전환 후 CDC 오류 없음": "cdc_error" not in cdc_metrics,
         "프로버 실측": isinstance(metrics.get("probe_requests"), int) and metrics["probe_requests"] > 0,
         "프로버 마지막 응답 출처 TARGET": metrics.get("probe_last_origin") == "TARGET",
         "Worker 쓰기 집계": isinstance(metrics.get("write_requests"), int),

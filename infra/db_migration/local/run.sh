@@ -7,7 +7,8 @@ api() { curl -sf "$@"; }
 
 case "${1:-}" in
   up)
-    mkdir -p .local/secrets
+    mkdir -p .local/secrets .local/agent-secrets
+    rm -f .local/secrets/worker.token
     if [ ! -f .local/.env ]; then
       gen() { openssl rand -hex 16; }
       cat > .local/.env <<ENV
@@ -22,8 +23,8 @@ ENV
     fi
     grep -q '^SECRETS_KEY=' .local/.env || echo "SECRETS_KEY=$(openssl rand -base64 32 | tr '+/' '-_')" >> .local/.env
     set -a; . .local/.env; set +a
-    printf '%s' "$WORKER_TOKEN" > .local/secrets/worker.token
-    chmod 644 .local/secrets/worker.token
+    printf '%s' "$WORKER_TOKEN" > .local/agent-secrets/worker.token
+    chmod 644 .local/agent-secrets/worker.token
     compose up -d --build
     for _ in $(seq 1 90); do api localhost:18080/status >/dev/null 2>&1 && break; sleep 2; done
     api localhost:18080/status; echo
@@ -77,6 +78,10 @@ print("validation mismatch:", v.get("mismatch"), "rows:", v.get("rows_checked"))
     # backend run·stop 전체 흐름 (VPN은 건너뜀). backend 의존성이 있는 python으로 실행한다.
     "${PYTHON:-python3}" e2e_run.py
     ;;
+  flow)
+    # db_workflow 전체 흐름: run → cutover → finish (VPN은 건너뜀).
+    "${PYTHON:-python3}" e2e_flow.py
+    ;;
   workflow)
     # workflows 엔진·컷오버 전체 흐름 (클라우드 없음). serve 를 띄운 뒤 다른 터미널에서 prepare·verify 를 부른다.
     shift
@@ -90,5 +95,5 @@ print("validation mismatch:", v.get("mismatch"), "rows:", v.get("rows_checked"))
     compose down -v
     ;;
   *)
-    echo "usage: $0 up|e2e [seconds]|run|workflow serve|prepare|verify <run_id>|load [seconds] [rps]|down" >&2; exit 2;;
+    echo "usage: $0 up|e2e [seconds]|run|flow|workflow serve|prepare|verify <run_id>|load [seconds] [rps]|down" >&2; exit 2;;
 esac

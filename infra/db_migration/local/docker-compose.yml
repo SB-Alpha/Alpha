@@ -81,10 +81,13 @@ services:
       CONNECT_URL: http://connect:8083
       KAFKA_BOOTSTRAP: kafka:9092
       WORKER_URL: http://fake-worker:8081
-      WORKER_TOKEN_FILE: /etc/alpha-cdc/secrets/worker.token
+      WORKER_TOKEN_FILE: /etc/alpha-cdc/agent-secrets/worker.token
+      AGENT_SECRETS_DIR: /etc/alpha-cdc/agent-secrets
       SECRETS_KEY: ${SECRETS_KEY}
+      METRICS_INTERVAL_S: "1"
     volumes:
       - ./.local/secrets:/etc/alpha-cdc/secrets
+      - ./.local/agent-secrets:/etc/alpha-cdc/agent-secrets
 
   fake-worker:
     image: alpha-cdc-agent:local

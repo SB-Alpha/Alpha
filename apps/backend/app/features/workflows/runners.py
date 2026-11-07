@@ -26,12 +26,19 @@ from .target_adapters import adapter_for
 log = logging.getLogger(__name__)
 
 # 전환 순서. 실행은 에이전트가 하고 workflows 는 증적으로 확인만 합니다 (PR #45).
-CUTOVER_SEQUENCE = ("hold", "marker_on_target", "validated", "switched_to_target", "released")
+CUTOVER_SEQUENCE = ("hold", "marker_on_target", "snapshot_fixed", "switched_to_target", "released")
+# 이전 에이전트는 보류 중에 비교를 끝내고 snapshot_fixed 자리에 validated 를 남깁니다.
+_CUTOVER_STEP_ALIASES = {"snapshot_fixed": ("snapshot_fixed", "validated")}
 _STEP_NUMBER_KEYS = ("elapsed_ms", "waited_ms", "mismatch")
 _MAX_AGENT_TEXT = 300
 _MAX_AGENT_TEXT_SCANNED = 4000  # 아주 긴 값에 정규식이 오래 걸리지 않게 먼저 자릅니다
 _DEFAULT_CUTOVER_PROGRESS = 75
-_PAST_CUTOVER_PHASES = {"cutover", "stabilizing", "closed"}
+_SWITCHED_PHASES = {"stabilizing", "closed"}
+_PAST_CUTOVER_PHASES = {"cutover", *_SWITCHED_PHASES}
+VERIFICATION_RUNNING = "running"
+VERIFICATION_UNKNOWN = "unknown"  # workflows 가 기다리는 동안 결과를 받지 못했습니다. 에이전트 값이 아닙니다.
+# 에이전트의 비교 제한(VERIFY_TIMEOUT_S 기본 3600초)보다 조금 길게 기다립니다.
+VERIFICATION_WAIT_S = 3700.0
 
 PROBE_SETTLE_S = 3.0
 # CDC 스트리밍 진입까지 기다리는 전체 상한. 실제 클라우드에서는 VPN 생성과 터널 협상만으로 10분을 넘길 수 있습니다.
@@ -218,10 +225,12 @@ def _verify_cutover_sequence(evidence: Any) -> dict[str, Any]:
     position = 0
     missing = []
     for expected in CUTOVER_SEQUENCE:
-        try:
-            position = names.index(expected, position) + 1
-        except ValueError:
+        accepted = _CUTOVER_STEP_ALIASES.get(expected, (expected,))
+        found = next((i for i in range(position, len(names)) if names[i] in accepted), None)
+        if found is None:
             missing.append(expected)
+        else:
+            position = found + 1
     if missing:
         return {"cutover_sequence": "INCOMPLETE", "cutover_sequence_missing": missing}
     return {"cutover_sequence": "VERIFIED"}
@@ -310,24 +319,26 @@ def _rollback_outcome(job: Mapping[str, Any]) -> str:
     return "rolled_back" if _worker_confirms_source() else "unknown"
 
 
-def _post_cutover(agent: Any, ctx: RunContext, job_id: str, approved_by: str, not_started: str) -> str:
-    """전환을 요청합니다. accepted(접수), refused(409 거절), lost(응답을 잃어 닿았는지 모름) 중 하나입니다."""
+def _post_cutover(
+    agent: Any, ctx: RunContext, job_id: str, approved_by: str, not_started: str
+) -> tuple[str, str | None]:
+    """전환을 요청합니다. 결과는 accepted(접수), refused(409 거절), lost(응답을 잃어 닿았는지 모름) 중 하나와 거절 사유입니다."""
     from app.features.db_migration.client import AgentError
 
     try:
         agent.cutover(job_id, approved_by=approved_by)
     except AgentError as exc:
         if exc.status_code == 409:
-            return "refused"
+            return "refused", _scrub_agent_text(exc.detail)
         if exc.status_code < 500:
             ctx.report("running", 10, {CUTOVER_OUTCOME: not_started})
             raise RuntimeError(f"에이전트가 전환 요청을 거부했습니다 (HTTP {exc.status_code})") from None
         log.warning("컷오버 요청 응답 오류, 상태로 판정합니다 (HTTP %s)", exc.status_code)
-        return "lost"
+        return "lost", None
     except Exception as exc:  # 응답만 잃었을 수 있으므로 실패로 치지 않고 상태를 봅니다.
         log.warning("컷오버 요청 응답을 받지 못했습니다, 상태로 판정합니다 (%s)", type(exc).__name__)
-        return "lost"
-    return "accepted"
+        return "lost", None
+    return "accepted", None
 
 
 def _job_progress(job: Mapping[str, Any]) -> int:
@@ -437,9 +448,23 @@ def run_assessment(run: RunStatus, ctx: RunContext) -> Any:
     return res
 
 
+def _check_cdc_settings() -> None:
+    """목적지를 만들기 전에 CDC 설정을 봅니다. 빠진 값은 목적지를 다 만든 뒤 db_migration 단계에서야 드러납니다."""
+    from app.features.db_migration.client import AgentSettings
+    from app.features.db_migration.vpn import OciSettings
+
+    try:
+        if AgentSettings.from_env().is_simulation:
+            return  # 모의 에이전트로는 실제 VPN 을 만들지 않습니다.
+    except KeyError:
+        raise RuntimeError("CDC_AGENT_URL 환경변수가 설정되지 않아 CDC 를 시작할 수 없습니다") from None
+    OciSettings.from_env()
+
+
 def run_provisioning(run: RunStatus, ctx: RunContext) -> Any:
     # planning 출력의 target_infra 로 목적지 인프라(VPC, Cloud SQL)를 프로비저닝합니다 (PR #40).
     target_infra = _extract_plan_target_infra(run)
+    _check_cdc_settings()
     res = adapter_for(run.request).provision(run.run_id, target_infra, run.request.target_infra, ctx)
     metrics = _private_ip_metric(res)
     if ctx is not None and metrics:
@@ -486,10 +511,12 @@ def clean_up_cdc(run: RunStatus) -> bool:
     return True
 
 
-def _cdc_end_reason(result: Any) -> str:
-    """db_migration 이 끝난 이유. streaming 이후의 종료는 정상 흐름이 아니므로 항상 사유를 만듭니다."""
+def _cdc_end_reason(result: Any) -> str | None:
+    """db_migration 이 끝난 이유. 전환이 끝나 돌아온 것만 정상 종료이고, 그 밖의 streaming 이후 종료에는 항상 사유를 만듭니다."""
     is_mapping = isinstance(result, Mapping)
     state = result.get("state") if is_mapping else getattr(result, "state", None)
+    if state in _SWITCHED_PHASES:
+        return None
     message = result.get("message") if is_mapping else getattr(result, "message", None)
     return message or f"CDC 복제 작업이 끝났습니다 (상태: {state})"
 
@@ -591,7 +618,7 @@ def run_db_migration(
     runner_returned = [False]
 
     def _worker() -> None:
-        ended_with: str
+        ended_with: str | None
         try:
             res = db_migration_service.run(inp, _ReportingProxy())
             result_holder.append(res)
@@ -604,7 +631,7 @@ def run_db_migration(
         with handoff_lock:
             worker_done[0] = True
             is_background = runner_returned[0]
-        if is_background and ctx is not None:
+        if is_background and ctx is not None and ended_with is not None:
             _report_cdc_ended(ctx, ended_with)
 
     thread = threading.Thread(target=_worker, daemon=True, name=f"cdc-runner-{job_id}")
@@ -683,27 +710,82 @@ def run_cutover(
     poll_interval_s: float = 1.0,
     timeout_s: float = 60.0,
     probe_settle_s: float = PROBE_SETTLE_S,
+    verification_wait_s: float = VERIFICATION_WAIT_S,
 ) -> Any:
-    """전환을 실행하고 실측값을 남깁니다.
+    """전환을 실행하고 실측값을 남긴 뒤, 전환 시점 데이터 비교가 끝날 때까지 봅니다.
 
     ALPHA_PROBE_URL 이 있으면 외부 프로버로 읽기 실패 수와 대기 시간을, WORKER_URL 이 있으면 Worker 집계로
     쓰기 실패 수를 잽니다. 시뮬레이션에서는 실제 전환이 없어 잴 대상이 없으므로 둘 다 켜지 않습니다.
+    측정은 전환 직후에 끝납니다. 비교는 오래 걸릴 수 있고 전환 시간과 상관이 없습니다.
     """
     is_simulated = _agent_is_simulated()
     prober = None if is_simulated else prober_from_env()
     worker = None if is_simulated else _cutover_worker()
     if prober is None and worker is None:
-        return _request_cutover(run, ctx, poll_interval_s, timeout_s)
+        job = _request_cutover(run, ctx, poll_interval_s, timeout_s)
+    else:
+        if prober is not None:
+            prober.start()
+        measured = ProbedContext(ctx, prober)
+        try:
+            job = _request_cutover(run, measured, poll_interval_s, timeout_s)
+            time.sleep(probe_settle_s)  # 전환 직후 요청까지 측정에 포함합니다.
+        finally:
+            _finish_measurement(measured, worker, run)
+    return _await_verification(run, ctx, job, poll_interval_s, verification_wait_s)
 
-    if prober is not None:
-        prober.start()
-    measured = ProbedContext(ctx, prober)
-    try:
-        job = _request_cutover(run, measured, poll_interval_s, timeout_s)
-        time.sleep(probe_settle_s)  # 전환 직후 요청까지 측정에 포함합니다.
+
+def _verification(job: Mapping[str, Any]) -> Any:
+    metrics = job.get("metrics")
+    return metrics.get("verification") if isinstance(metrics, Mapping) else None
+
+
+def _switched_message(job: Mapping[str, Any]) -> str:
+    msg = _scrub_agent_text(job.get("message"))
+    message = f"트래픽 전환 완료 ({msg})" if msg else "트래픽 전환 완료 (안정화 관찰 중)"
+    missing = _best_effort(_verify_cutover_sequence, job.get("evidence")).get("cutover_sequence_missing")
+    if missing:
+        # 트래픽은 이미 넘어갔으므로 실패로 두지 않고 경고만 남깁니다.
+        message = f"{message} — 경고: 전환 순서 증적 불완전 (누락: {', '.join(missing)})"
+    return message
+
+
+def _await_verification(
+    run: RunStatus,
+    ctx: RunContext,
+    job: Mapping[str, Any],
+    poll_interval_s: float,
+    wait_s: float,
+) -> Any:
+    """전환 시점 데이터 비교 결과를 받아 단계 결과에 반영합니다. 보고하지 않는 에이전트는 기다리지 않습니다.
+
+    불일치면 단계를 실패로 남깁니다. 트래픽은 이미 목적지에 있어 되돌리지 않고 사람이 확인합니다.
+    끝내지 못한 비교(unverifiable)와 기다리다 못 받은 결과는 데이터가 다르다는 뜻이 아니므로 경고만 남깁니다.
+    """
+    if _verification(job) is None:
         return job
-    finally:
-        _finish_measurement(measured, worker, run)
+
+    from app.features.db_migration.client import AgentSettings, CdcAgentClient
+
+    agent = CdcAgentClient(AgentSettings.from_env())
+    job_id = _cutover_job_id(run)
+    deadline = time.monotonic() + wait_s
+    while _verification(job) == VERIFICATION_RUNNING and job.get("state") != "failed":
+        if time.monotonic() > deadline:
+            warning = f"경고: 전환 시점 데이터 비교 결과를 {wait_s:g}초 안에 받지 못했습니다. 데이터를 직접 확인하세요"
+            ctx.report("running", 100, {"verification": VERIFICATION_UNKNOWN}, f"{_switched_message(job)} — {warning}")
+            return job
+        time.sleep(poll_interval_s)
+        job = _read_job(agent, job_id) or job
+        metrics = _best_effort(_cutover_metrics, job.get("metrics"), job.get("evidence"))
+        ctx.report("running", _job_progress(job), metrics, _switched_message(job))
+
+    metrics = _best_effort(_cutover_metrics, job.get("metrics"), job.get("evidence"))
+    if job.get("state") == "failed":
+        ctx.report("running", _job_progress(job), {**metrics, CUTOVER_OUTCOME: "post_switch_failed"})
+        raise RuntimeError(f"전환 후 확인 필요: {_scrub_agent_text(job.get('message')) or '상세 불명'}")
+    ctx.report("running", 100, metrics, _switched_message(job))
+    return job
 
 
 def _finish_measurement(measured: ProbedContext, worker: Any, run: RunStatus) -> None:
@@ -765,6 +847,7 @@ def _request_cutover(
 ) -> Any:
     """승인 ② 완료 후 CDC 에이전트에 cutover 요청(hold -> switch -> release)을 전달하고,
     에이전트가 stabilizing(전환 완료) 또는 failed/waiting_approval(롤백)에 도달할 때까지 대기합니다.
+    전환 시간은 여기서 확정합니다. 뒤따르는 데이터 비교는 _await_verification 이 봅니다.
 
     cutover_outcome 은 항상 지금 말할 수 있는 만큼만 씁니다. 도중에 끊겨도 원본에 있다고 잘못 말하지 않게
     요청을 보내기 전에 unknown 으로 바꾸고, 결과를 본 뒤에만 덮어씁니다.
@@ -784,8 +867,10 @@ def _request_cutover(
         raise RuntimeError("CDC_AGENT_URL 환경변수가 설정되지 않아 트래픽 전환을 호출할 수 없습니다") from None
 
     agent = CdcAgentClient(settings)
+    # 에이전트는 시도마다 증적을 새로 만듭니다. 요청 전 값과 같으면 그 증적은 앞선 시도의 것입니다.
+    evidence_before = _cutover_evidence(_read_job(agent, job_id).get("evidence"))
     ctx.report("running", 10, {CUTOVER_OUTCOME: "unknown"})
-    post = _post_cutover(agent, ctx, job_id, _cutover_approver(run), not_started)
+    post, refusal = _post_cutover(agent, ctx, job_id, _cutover_approver(run), not_started)
 
     start_t = time.monotonic()
     while True:
@@ -797,18 +882,16 @@ def _request_cutover(
 
         # 1. 성공 상태 (에이전트가 stabilizing 또는 succeeded 도달)
         if phase == "stabilizing" or state == "succeeded":
-            message = f"트래픽 전환 완료 ({msg})" if msg else "트래픽 전환 완료 (안정화 관찰 중)"
             sequence = _best_effort(_verify_cutover_sequence, job.get("evidence"))
-            missing = sequence.get("cutover_sequence_missing")
-            if missing:
-                # 트래픽은 이미 넘어갔으므로 실패로 두지 않고 경고만 남깁니다.
-                message = f"{message} — 경고: 전환 순서 증적 불완전 (누락: {', '.join(missing)})"
-            ctx.report("running", 100, {**metrics, **sequence, CUTOVER_OUTCOME: "switched"}, message)
+            progress = _job_progress(job) if _verification(job) == VERIFICATION_RUNNING else 100
+            ctx.report("running", progress, {**metrics, **sequence, CUTOVER_OUTCOME: "switched"}, _switched_message(job))
             return job
 
         # 2. 롤백 상태 (전환 실패 후 원본 복귀)
         # 요청 응답을 잃었으면 아직 처리 전일 수 있어 롤백으로 보지 않고 계속 봅니다. 끝까지 모르면 unknown 입니다.
-        if (state == "waiting_approval" or phase == "cutover_ready") and post != "lost":
+        # 거절됐는데 증적이 그대로면 이번 요청으로 돈 전환이 없으니 롤백이 아닙니다 (Worker 검사 거절 등).
+        attempted = post != "refused" or _cutover_evidence(job.get("evidence")) != evidence_before
+        if (state == "waiting_approval" or phase == "cutover_ready") and post != "lost" and attempted:
             outcome = _rollback_outcome(job)
             ctx.report("running", _job_progress(job), {**metrics, CUTOVER_OUTCOME: outcome})
             if outcome == "rolled_back":
@@ -818,7 +901,8 @@ def _request_cutover(
         # 3. 거절됐고 전환 단계도 아니면 이번 요청으로 시작된 전환이 없습니다.
         if post == "refused" and job and phase != "cutover":
             ctx.report("running", _job_progress(job), {**metrics, CUTOVER_OUTCOME: not_started})
-            raise RuntimeError(f"에이전트가 전환 요청을 거부했습니다 ({state}/{phase}): {msg or '상세 불명'}")
+            detail = "; ".join(text for text in (refusal, msg) if text) or "상세 불명"
+            raise RuntimeError(f"에이전트가 전환 요청을 거부했습니다 ({state}/{phase}): {detail}")
 
         # 4. 영구 실패 상태. 에이전트는 전환 단계에서 원본으로 못 돌아갈 때만 failed 를 남깁니다 (jobs.py).
         if state in ("failed", "aborted"):
