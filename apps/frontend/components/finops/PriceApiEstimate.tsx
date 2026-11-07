@@ -64,6 +64,7 @@ function savingText(s: Saving | undefined): string {
 }
 
 function arbitrageStatus(arb: ArbitrageResult): string {
+  if (arb.lag_fenced && arb.recommendation.startsWith(NOT_PROVIDED)) return "복제 지연 미제공 · 원본 고정";
   if (arb.lag_fenced) return "복제 지연으로 원본 고정";
   if (
     arb.recommendation.startsWith(NOT_PROVIDED) ||
@@ -152,8 +153,10 @@ export function deriveLiveView(
 
   let liveArb: ArbitrageResult | null | undefined = baseArb;
   if (baseArb && crInstanceFull !== null) {
-    const lagFenced =
-      typeof replicationLagBytes === "number" && Number.isFinite(replicationLagBytes) && replicationLagBytes > MAX_SAFE_LAG_BYTES;
+    // 지연을 모르면 안전하다고 보지 않습니다 (백엔드 arbitrage.py 와 같은 판단)
+    const lagKnown =
+      typeof replicationLagBytes === "number" && Number.isFinite(replicationLagBytes) && replicationLagBytes >= 0;
+    const lagFenced = !lagKnown || replicationLagBytes > MAX_SAFE_LAG_BYTES;
     const baselineUsd = baseArb.baseline_monthly_cost ?? fargateApp;
     const egressPerGb = baseArb.egress_usd_per_gb;
     const readRatio = READ_RATIO;
@@ -189,7 +192,9 @@ export function deriveLiveView(
           arbitrage_monthly_cost: baselineUsd,
           monthly_savings: 0,
           savings_percent: 0,
-          recommendation: "FENCED_PRIMARY: 복제 지연으로 인해 모든 트래픽이 원본 마스터에 고정되었습니다.",
+          recommendation: lagKnown
+            ? "FENCED_PRIMARY: 복제 지연으로 인해 모든 트래픽이 원본 마스터에 고정되었습니다."
+            : "미제공: 복제 지연을 받지 못해 읽기 우회를 하지 않고 원본 마스터에 고정했습니다.",
         };
       } else if (egressUsd !== null) {
         const arbTotalUsd = targetAppUsd + egressUsd;
