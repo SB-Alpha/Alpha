@@ -198,6 +198,10 @@ def _image_step(
     if needs_aws_key and not inp.source_credentials_ref:
         ctx.report("running", 2, message="원본 AWS 키가 없어 이미지 복사를 건너뜁니다 (목적지 저장소에 이미지가 이미 있어야 합니다)")
         return None
+    if needs_aws_key and not str(inp.source_credentials_ref).startswith("secret://"):
+        # 조사 모듈은 로컬 개발용 profile:<이름> 도 받는다. 그 이름표는 서버에서 풀 수 없으니 실패시키지 않고 건너뛴다.
+        ctx.report("running", 2, message="원본 AWS 키 이름표가 secret:// 형식이 아니라 이미지 복사를 건너뜁니다 (목적지 저장소에 이미지가 이미 있어야 합니다)")
+        return None
     service_name = infra.get("service_name")
     if not service_name:
         raise ProvisioningError("service_name 이 없어 복사할 이미지의 목적지 이름을 정할 수 없습니다")

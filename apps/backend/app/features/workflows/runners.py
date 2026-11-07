@@ -369,6 +369,22 @@ def _extract_plan_target_infra(run: RunStatus) -> dict[str, Any]:
     return dict(target_infra)
 
 
+def _extract_source_credentials_ref(run: RunStatus) -> str | None:
+    """조사 출력의 원본 AWS 키 이름표(source.credentials_ref.cloud). 없으면 None.
+
+    app_deploy 가 원본 이미지(ECR)를 목적지 저장소로 복사할 때 원본을 읽는 데 씁니다.
+    """
+    planning_out = run.outputs.get(StageName.PLANNING.value) or {}
+    source = planning_out.get("source")
+    if hasattr(source, "model_dump"):
+        source = source.model_dump()
+    credentials = source.get("credentials_ref") if isinstance(source, dict) else None
+    if hasattr(credentials, "model_dump"):
+        credentials = credentials.model_dump()
+    ref = credentials.get("cloud") if isinstance(credentials, dict) else None
+    return ref if isinstance(ref, str) and ref else None
+
+
 def run_discovery(run: RunStatus, ctx: RunContext) -> dict[str, Any]:
     # 11/4 합의로 discovery·planning 은 assessment 하나로 합쳤습니다 (PR #27). 원본 조회 결과는
     # planning 출력의 `source` 에 있으므로 이 단계는 조회 없이 그 사실만 남기고 넘깁니다.
@@ -622,7 +638,13 @@ def run_app_deploy(run: RunStatus, ctx: RunContext) -> Any:
       - GCP_PROJECT_ID: 배포 대상 GCP 프로젝트 ID
     """
     target_infra = _extract_plan_target_infra(run)
-    return adapter_for(run.request).deploy_app(run.run_id, target_infra, run.request.target_infra, ctx)
+    return adapter_for(run.request).deploy_app(
+        run.run_id,
+        target_infra,
+        run.request.target_infra,
+        ctx,
+        source_credentials_ref=_extract_source_credentials_ref(run),
+    )
 
 
 def run_cutover(

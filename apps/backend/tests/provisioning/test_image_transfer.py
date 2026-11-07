@@ -449,6 +449,18 @@ def test_without_a_source_key_an_ecr_image_is_not_copied_like_before():
     assert any("복사를 건너뜁니다" in (m or "") for _, _, m in ctx.calls)
 
 
+@pytest.mark.parametrize("ref", ["profile:default", "aws/default", ""])
+def test_a_key_reference_that_is_not_secret_style_skips_the_copy_instead_of_failing(ref):
+    # 조사 모듈은 로컬 개발용 profile:<이름> 도 받는다. 서버에서는 풀 수 없으니 앱 배포를 막지 않고 건너뛴다.
+    transfer = FakeTransfer()
+    result, tf, ctx = deploy(app_input(source_credentials_ref=ref), transfer)
+
+    assert transfer.calls == []
+    assert "container_image" not in tf.var_values
+    assert any("복사를 건너뜁니다" in (m or "") for _, _, m in ctx.calls)
+    assert result.healthy is True
+
+
 def test_dry_run_never_copies():
     transfer = FakeTransfer()
     _, tf, _ = deploy(app_input(dry_run=True), transfer)

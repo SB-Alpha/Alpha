@@ -48,7 +48,7 @@ class AzureTargetAdapter:
     provider = "azure"
 
     def provision(self, run_id, target_infra, config, ctx): ...
-    def deploy_app(self, run_id, target_infra, config, ctx): ...
+    def deploy_app(self, run_id, target_infra, config, ctx, source_credentials_ref=None): ...
 
 TARGET_ADAPTERS = {"gcp": GcpTargetAdapter(), "azure": AzureTargetAdapter()}
 ```
@@ -59,6 +59,7 @@ TARGET_ADAPTERS = {"gcp": GcpTargetAdapter(), "azure": AzureTargetAdapter()}
 | `target_infra` | 승인 ① 을 받은 `plan.target_infra` (3절) |
 | `config` | 요청의 `TargetInfraConfig`. 없을 수 있습니다 |
 | `ctx` | 진행 보고 통로. `ctx.report("running", 0~100, metrics, message)` |
+| `source_credentials_ref` | (`deploy_app` 만) 원본 AWS 키 이름표. 조사 출력의 `source.credentials_ref.cloud` 에서 runner 가 꺼내 넘깁니다. 원본 이미지(ECR)를 목적지 저장소로 복사할 때 원본을 읽는 데 쓰며, 그대로 `AppDeployInput.source_credentials_ref` 에 넘기면 됩니다. 없거나 `secret://` 형식이 아니면 복사를 건너뜁니다 |
 
 끝은 값을 돌려주거나 예외를 내는 것으로 정해집니다. 예외를 내면 그 단계가 실패로 기록됩니다.
 
