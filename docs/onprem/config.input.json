@@ -1,0 +1,23 @@
+{
+  "deployment_id": "",
+  "directory": "",
+  "docker_socket": "",
+  "database": "",
+  "admin_ref": "",
+  "app_ref": "",
+  "cloudflare_ref": "",
+  "worker_secret_ref": "",
+  "account_id": "",
+  "zone_id": "",
+  "tunnel_id": "",
+  "db_access_app_id": "",
+  "db_hostname": "",
+  "app_hostname": "",
+  "cdc_db_host": "127.0.0.1",
+  "cdc_db_port": 15432,
+  "platform": "linux/amd64",
+  "allow_emulation": true,
+  "app_secret_refs": {},
+  "update_worker_target": false,
+  "health_timeout_s": 120
+}

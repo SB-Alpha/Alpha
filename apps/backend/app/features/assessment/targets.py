@@ -60,6 +60,20 @@ class TargetProfile:
 
 
 PROFILES: dict[str, TargetProfile] = {
+    "onprem": TargetProfile(
+        cloud="onprem", label="온프렘", app_platform="Docker WAS", db_service="PostgreSQL container",
+        registry="ECR archive", secret_store="Local encrypted secrets",
+        max_vcpu=None, max_memory_mib=512,
+        rules={
+            "privileged": "온프렘 어댑터는 특권 컨테이너를 만들지 않음",
+            "host_devices": _NO_HOST, "add_capabilities": _NO_HOST, "add_sys_ptrace": _NO_HOST,
+            "udp_port": _HTTP_ONLY, "tcp_ingress": _HTTP_ONLY,
+            "no_ingress": "Worker가 호출할 HTTP 앱 경로가 필요함",
+            "gpu": _NO_GPU, "arm64": None, "pid_host": _NO_HOST, "ipc_host": _NO_HOST,
+            "host_path_volume": "WAS의 호스트 볼륨 이전은 지원하지 않음",
+            "docker_volume": "WAS의 Docker 볼륨 이전은 지원하지 않음",
+        },
+    ),
     "gcp": TargetProfile(
         cloud="gcp", label="GCP", app_platform="Cloud Run", db_service="Cloud SQL",
         registry="Artifact Registry", secret_store="GCP Secret Manager",

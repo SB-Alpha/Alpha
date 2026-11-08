@@ -55,7 +55,7 @@ PreflightStatus = Literal["pass", "fail", "unknown", "info"]
 PreflightVerdict = Literal["go", "no_go", "unverified"]
 CheckStatus = Literal["pass", "fail", "unknown"]
 CutoverDecision = Literal["go", "needs_confirmation", "no_go"]
-TargetInfraType = Literal["gcp", "azure", "aws", "ncp"]
+TargetInfraType = Literal["gcp", "azure", "aws", "ncp", "onprem"]
 
 _SECRET_LIKE_PARAM = re.compile(r"password|passwd|secret|token|api_?key|private_?key|credential", re.IGNORECASE)
 

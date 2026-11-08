@@ -473,6 +473,9 @@ def build_steps(image_uri: str | None = None, cloud: str = "gcp") -> list[PlanSt
     if prof is not None and prof.cloud == "gcp":
         label, registry, app_platform = "GCP", "Artifact Registry", "Cloud Run"
         apply = "terraform apply: VPC, Cloud SQL(논리 디코딩), Artifact Registry, Cloud Run, Secret Manager"
+    elif prof is not None and prof.cloud == "onprem":
+        label, registry, app_platform = prof.label, prof.registry, prof.app_platform
+        apply = "Docker Compose: PostgreSQL·cloudflared 준비, DB 접속 확인, WAS 배포"
     elif prof is not None:
         label, registry, app_platform = prof.label, prof.registry, prof.app_platform
         apply = (f"terraform apply: 네트워크, {prof.db_service}(논리 디코딩), {prof.registry}, "

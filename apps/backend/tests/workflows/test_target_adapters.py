@@ -269,7 +269,7 @@ def test_aws_is_a_known_provider_with_an_adapter(client):
 
 def test_describe_targets_lists_every_provider_with_its_registration():
     described = {t.provider: t.available for t in target_adapters.describe_targets()}
-    assert described == {"gcp": True, "azure": True, "aws": True, "ncp": False}
+    assert described == {"gcp": True, "azure": True, "aws": True, "ncp": False, "onprem": True}
     assert {p for p, ok in described.items() if ok} == set(target_adapters.TARGET_ADAPTERS)
 
 

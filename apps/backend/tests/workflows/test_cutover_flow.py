@@ -1197,3 +1197,34 @@ def test_post_switch_failure_resumed_through_the_api_can_still_be_recorded(fast,
     assert run.state == WorkflowState.SUCCEEDED
     assert len(world.cutover_calls) == calls_before
 
+
+
+def test_onprem_uses_main_cutover_after_both_approvals(engine, world, monkeypatch):
+    from app.features.provisioning.onprem import service
+    from app.features.workflows.schemas import TargetInfraConfig
+
+    monkeypatch.setenv("ONPREM_CONFIG_REF", "secret://operator/onprem")
+
+    def provision(**kwargs):
+        world.order.append("provisioning")
+        assert kwargs["config_ref"] == "secret://operator/onprem"
+        return {"target": {"db": {"private_ip": "127.0.0.1", "port": 15432}}, "applied": True}
+
+    def deploy(**kwargs):
+        world.order.append("app_deploy")
+        return {"app_url": "https://was.example.test", "healthy": True, "worker_target_updated": True}
+
+    monkeypatch.setattr(service, "provision", provision)
+    monkeypatch.setattr(service, "deploy_app", deploy)
+    request = REQUEST.model_copy(update={"target_infra": TargetInfraConfig(provider="onprem")})
+    run_id = engine.advance(engine.create_run(request).run_id).run_id
+    engine.approve(run_id, "plan")
+    run = engine.advance(run_id)
+    assert run.waiting_gate == "cutover"
+    assert world.order == ["planning", "provisioning", "db_migration", "app_deploy"]
+    assert not world.cutover_calls
+    engine.approve(run_id, "cutover", approver="test", acknowledge_unknown=True)
+    run = engine.advance(run_id)
+    assert world.cutover_calls == [(to_job_id(run_id), "test")]
+    assert run.state == WorkflowState.SUCCEEDED
+    assert run.stage(StageName.CUTOVER).metrics["cutover_sequence"] == "VERIFIED"

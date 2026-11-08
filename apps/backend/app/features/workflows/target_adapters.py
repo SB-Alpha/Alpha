@@ -212,10 +212,34 @@ class AwsTargetAdapter:
         return provisioning_service.deploy_app(inp, ctx)
 
 
+class OnpremTargetAdapter:
+    """OrbStack + Cloudflare. 기존 ProvisioningOutput/AppDeployOutput 계약 유지."""
+    provider: TargetInfraType = "onprem"
+
+    @staticmethod
+    def _ref(config):
+        ref = config.extra_params.get("onprem_config_ref") if config else None
+        ref = ref or os.getenv("ONPREM_CONFIG_REF")
+        if not isinstance(ref, str) or not ref.startswith("secret://"):
+            raise UnsupportedTarget("운영 설정 ONPREM_CONFIG_REF에 온프렘 secret:// 설정 참조가 필요합니다")
+        return ref
+
+    def provision(self, run_id, target_infra, config, ctx):
+        from app.features.provisioning.onprem import service
+        return service.provision(run_id=run_id, config_ref=self._ref(config), ctx=ctx)
+
+    def deploy_app(self, run_id, target_infra, config, ctx, source_credentials_ref=None):
+        from app.features.provisioning.onprem import service
+        return service.deploy_app(run_id=run_id, config_ref=self._ref(config),
+                                  target_infra=target_infra, ctx=ctx,
+                                  source_credentials_ref=source_credentials_ref)
+
+
 TARGET_ADAPTERS: Mapping[TargetInfraType, TargetAdapter] = {
     "gcp": GcpTargetAdapter(),
     "azure": AzureTargetAdapter(),
     "aws": AwsTargetAdapter(),
+    "onprem": OnpremTargetAdapter(),
 }
 
 

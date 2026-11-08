@@ -1,0 +1,39 @@
+{
+  "app_url": "https://app.example.com",
+  "healthy": true,
+  "target": {
+    "cloud": "onprem",
+    "project_id": null,
+    "region": "local",
+    "db": {
+      "instance": "onprem-demo",
+      "private_ip": "127.0.0.1",
+      "port": 15432,
+      "database": "appdb",
+      "version": "16",
+      "ssl_mode": "ENCRYPTED_ONLY"
+    },
+    "network": {
+      "vpc_name": null,
+      "subnet_cidrs": null,
+      "psa_range_cidr": null
+    },
+    "app": {
+      "url": "https://app.example.com",
+      "db_user": "alpha_app"
+    },
+    "credentials_ref": {
+      "cloud": "secret://onprem/config",
+      "admin": "secret://onprem/admin",
+      "ddl_user": null,
+      "sink_user": null
+    }
+  },
+  "changes": {
+    "add": 1,
+    "change": 0,
+    "destroy": 0
+  },
+  "applied": true,
+  "worker_target_updated": true
+}

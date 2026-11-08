@@ -1,0 +1,256 @@
+{
+  "$defs": {
+    "FixedApp": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "db_user": {
+          "title": "Db User",
+          "type": "string"
+        }
+      },
+      "required": [
+        "db_user"
+      ],
+      "title": "FixedApp",
+      "type": "object"
+    },
+    "FixedCredentials": {
+      "additionalProperties": false,
+      "properties": {
+        "cloud": {
+          "pattern": "^secret://[^\\s]+$",
+          "title": "Cloud",
+          "type": "string"
+        },
+        "admin": {
+          "pattern": "^secret://[^\\s]+$",
+          "title": "Admin",
+          "type": "string"
+        },
+        "ddl_user": {
+          "anyOf": [
+            {
+              "pattern": "^secret://[^\\s]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ddl User"
+        },
+        "sink_user": {
+          "anyOf": [
+            {
+              "pattern": "^secret://[^\\s]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sink User"
+        }
+      },
+      "required": [
+        "cloud",
+        "admin"
+      ],
+      "title": "FixedCredentials",
+      "type": "object"
+    },
+    "FixedDb": {
+      "additionalProperties": false,
+      "properties": {
+        "instance": {
+          "title": "Instance",
+          "type": "string"
+        },
+        "private_ip": {
+          "title": "Private Ip",
+          "type": "string"
+        },
+        "port": {
+          "default": 5432,
+          "title": "Port",
+          "type": "integer"
+        },
+        "database": {
+          "title": "Database",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "ssl_mode": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ssl Mode"
+        }
+      },
+      "required": [
+        "instance",
+        "private_ip",
+        "database"
+      ],
+      "title": "FixedDb",
+      "type": "object"
+    },
+    "FixedNetwork": {
+      "additionalProperties": false,
+      "properties": {
+        "vpc_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vpc Name"
+        },
+        "subnet_cidrs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subnet Cidrs"
+        },
+        "psa_range_cidr": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Psa Range Cidr"
+        }
+      },
+      "title": "FixedNetwork",
+      "type": "object"
+    },
+    "OnpremTarget": {
+      "additionalProperties": false,
+      "description": "기존 DB 모듈 TargetInput의 필드 집합을 유지하고 확장 필드를 금지한다.",
+      "properties": {
+        "cloud": {
+          "const": "onprem",
+          "default": "onprem",
+          "title": "Cloud",
+          "type": "string"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Id"
+        },
+        "region": {
+          "title": "Region",
+          "type": "string"
+        },
+        "db": {
+          "$ref": "#/$defs/FixedDb"
+        },
+        "network": {
+          "$ref": "#/$defs/FixedNetwork"
+        },
+        "app": {
+          "$ref": "#/$defs/FixedApp"
+        },
+        "credentials_ref": {
+          "$ref": "#/$defs/FixedCredentials"
+        }
+      },
+      "required": [
+        "region",
+        "db",
+        "app",
+        "credentials_ref"
+      ],
+      "title": "OnpremTarget",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "target": {
+      "$ref": "#/$defs/OnpremTarget"
+    },
+    "problems": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Problems",
+      "type": "array"
+    },
+    "changes": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Changes",
+      "type": "object"
+    },
+    "applied": {
+      "title": "Applied",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "target",
+    "changes",
+    "applied"
+  ],
+  "title": "OnpremProvisioningOutput",
+  "type": "object"
+}

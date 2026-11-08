@@ -1,0 +1,12 @@
+{
+  "service_name": "",
+  "aws_region": "ap-northeast-2",
+  "aws_credentials_ref": "",
+  "db_admin_ref": "",
+  "target_infra": {
+    "provider": "onprem",
+    "extra_params": {
+      "onprem_config_ref": "secret://onprem-test/config"
+    }
+  }
+}

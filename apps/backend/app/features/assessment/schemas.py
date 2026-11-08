@@ -83,7 +83,7 @@ class InventoryForPlanning(BaseModel):
 
 
 # 목적지 클라우드. workflows 의 TargetInfraType 과 같은 값. 호환 규칙이 없는 목적지(ncp)는 호환 검사가 unknown
-TargetCloud = Literal["gcp", "aws", "azure", "ncp"]
+TargetCloud = Literal["gcp", "aws", "azure", "ncp", "onprem"]
 
 
 class TargetSelection(BaseModel):
