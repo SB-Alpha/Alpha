@@ -20,13 +20,24 @@ import {
   type FinopsEstimate,
   type TrafficInputs,
 } from "@/lib/finopsApi";
+import {
+  DEFAULT_PROFILE_ID,
+  EMPTY_INPUTS,
+  WORKLOAD_PROFILES,
+  applyProfile,
+  profileById,
+  valueOrigin,
+  type FinopsUserInputs,
+  type ValueOrigin,
+  type WorkloadProfile,
+} from "@/lib/finopsProfiles";
 import { STAGE_LABEL } from "@/lib/labels";
 import { isRecord } from "@/lib/plan";
 import type { RunStatus } from "@/lib/workflows";
 
 // 금액·교차점·차익거래는 모두 백엔드 /finops/estimate 가 가격 API 단가로 냅니다. 이 카드는 단가표나 계산식을 갖지 않습니다.
-// 입력은 세 가지뿐입니다: run 에서 읽은 값(원본 위치, 계획의 목적지·DB 크기), 사용자가 넣은 값(표시: 사용자 입력),
-// 그리고 모름(미제공). 모르는 값은 기본값으로 채우지 않고 요청에서 뺍니다.
+// 입력은 네 가지입니다: run 에서 읽은 값(원본 위치, 계획의 목적지·DB 크기), 예시 프로필 값(표시: 예시값, 가정),
+// 사용자가 넣은 값(표시: 사용자 입력), 그리고 모름(미제공). 처음에는 "일반 웹 서비스" 예시 프로필을 넣어 둡니다.
 
 interface Props {
   run: RunStatus;
@@ -79,25 +90,29 @@ function useCandidates(facts: ReturnType<typeof readRunFacts>) {
   }));
 }
 
-interface UserInputs {
-  sourceAppVcpu: number | null;
-  sourceAppMemoryMib: number | null;
-  dbInstanceClass: string | null;
-  dbStorageGb: number | null;
-  traffic: TrafficInputs;
-}
+type UserInputs = FinopsUserInputs;
 
-const EMPTY_INPUTS: UserInputs = {
-  sourceAppVcpu: null,
-  sourceAppMemoryMib: null,
-  dbInstanceClass: null,
-  dbStorageGb: null,
-  traffic: { rps: null, idlePercent: null, avgLatencyMs: null, readRatio: null, avgResponseKb: null },
+const ORIGIN_TEXT: Record<ValueOrigin, string> = {
+  missing: NOT_PROVIDED,
+  plan: "계획값",
+  example: "예시값",
+  user: "사용자 입력",
 };
+const ORIGIN_TONE: Record<ValueOrigin, string> = {
+  missing: "text-ink/40",
+  plan: "font-semibold text-emerald-800",
+  example: "font-semibold text-amber-800",
+  user: "font-semibold text-ink",
+};
+
+function OriginTag({ origin }: { origin: ValueOrigin }) {
+  return <span className={ORIGIN_TONE[origin]}>{ORIGIN_TEXT[origin]}</span>;
+}
 
 function NumberField(props: {
   label: string;
   value: number | null;
+  origin: ValueOrigin;
   onChange: (v: number | null) => void;
   unit?: string;
   min?: number;
@@ -108,9 +123,7 @@ function NumberField(props: {
     <label className="block">
       <span className="flex justify-between font-mono text-[11px] text-ink/65">
         <span>{props.label}</span>
-        <span className={props.value === null ? "text-ink/40" : "font-semibold text-ink"}>
-          {props.value === null ? NOT_PROVIDED : "사용자 입력"}
-        </span>
+        <OriginTag origin={props.origin} />
       </span>
       <span className="mt-1 flex items-center gap-1">
         <input
@@ -133,26 +146,76 @@ function NumberField(props: {
   );
 }
 
+/** 예시 프로필 고르기. 고르면 아래 값을 그 프로필로 채우고, "비우기" 는 모든 값을 미제공으로 돌립니다. */
+function ProfilePicker({
+  profile,
+  onPick,
+}: {
+  profile: WorkloadProfile | null;
+  onPick: (id: WorkloadProfile["id"] | null) => void;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="예시 프로필">
+        <span className="font-mono text-[11px] text-ink/60">예시 프로필</span>
+        {WORKLOAD_PROFILES.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            aria-pressed={profile?.id === p.id}
+            onClick={() => onPick(p.id)}
+            className={`rounded border px-2 py-0.5 text-[11px] transition-colors ${
+              profile?.id === p.id
+                ? "border-ink bg-ink font-semibold text-white"
+                : "border-ink/30 bg-white text-ink/80 hover:border-ink"
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={() => onPick(null)}
+          className="rounded border border-transparent px-1.5 py-0.5 text-[11px] text-ink/55 underline-offset-2 hover:text-ink hover:underline"
+        >
+          비우기
+        </button>
+      </div>
+      <p className="text-[11px] text-ink/60">
+        {profile
+          ? `${profile.label}: ${profile.description}. assessment 가 아직 읽지 못한 값을 이 가정값으로 채웠습니다 (예시값 · 실측 아님). 값을 고치면 "사용자 입력" 으로 계산합니다.`
+          : "예시 프로필을 고르지 않았습니다. 비워 둔 값의 금액은 미제공이고, 넣은 값은 \"사용자 입력\" 으로 계산합니다."}
+      </p>
+    </div>
+  );
+}
+
 function InputControls({
   inputs,
   setInputs,
   planDiskGb,
+  profile,
+  onPickProfile,
 }: {
   inputs: UserInputs;
   setInputs: (next: UserInputs) => void;
   planDiskGb: number | null;
+  profile: WorkloadProfile | null;
+  onPickProfile: (id: WorkloadProfile["id"] | null) => void;
 }) {
   const t = inputs.traffic;
   const setTraffic = (patch: Partial<TrafficInputs>) => setInputs({ ...inputs, traffic: { ...t, ...patch } });
+  // 프로필 값과 같으면 예시값, 다르면 사용자 입력입니다. DB 디스크는 계획값이 있으면 예시를 쓰지 않습니다.
+  const example = profile ? applyProfile(profile, planDiskGb) : null;
+  const ex = example ?? EMPTY_INPUTS;
   return (
     <div className="mt-3 space-y-3 rounded-lg border border-ink/15 bg-paper/70 px-3.5 py-2.5">
-      <p className="text-[11px] text-ink/60">
-        아래 값은 assessment 가 아직 읽지 못한 값입니다. 비워 두면 해당 금액은 미제공이고, 넣은 값은 &quot;사용자 입력&quot; 으로 계산합니다.
-      </p>
+      <ProfilePicker profile={profile} onPick={onPickProfile} />
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <NumberField
           label="원본 앱 vCPU"
           value={inputs.sourceAppVcpu}
+          origin={valueOrigin(inputs.sourceAppVcpu, ex.sourceAppVcpu)}
           min={0.25}
           step={0.25}
           onChange={(v) => setInputs({ ...inputs, sourceAppVcpu: v })}
@@ -161,6 +224,7 @@ function InputControls({
           label="원본 앱 메모리"
           unit="MiB"
           value={inputs.sourceAppMemoryMib}
+          origin={valueOrigin(inputs.sourceAppMemoryMib, ex.sourceAppMemoryMib)}
           min={128}
           step={128}
           onChange={(v) => setInputs({ ...inputs, sourceAppMemoryMib: v === null ? null : Math.round(v) })}
@@ -168,9 +232,7 @@ function InputControls({
         <label className="block">
           <span className="flex justify-between font-mono text-[11px] text-ink/65">
             <span>원본 RDS 등급</span>
-            <span className={inputs.dbInstanceClass === null ? "text-ink/40" : "font-semibold text-ink"}>
-              {inputs.dbInstanceClass === null ? NOT_PROVIDED : "사용자 입력"}
-            </span>
+            <OriginTag origin={valueOrigin(inputs.dbInstanceClass, ex.dbInstanceClass)} />
           </span>
           <input
             value={inputs.dbInstanceClass ?? ""}
@@ -183,17 +245,27 @@ function InputControls({
           label={`DB 디스크${planDiskGb !== null && inputs.dbStorageGb === null ? ` (계획값 ${planDiskGb}GB)` : ""}`}
           unit="GB"
           value={inputs.dbStorageGb}
+          origin={
+            inputs.dbStorageGb === null && planDiskGb !== null ? "plan" : valueOrigin(inputs.dbStorageGb, ex.dbStorageGb)
+          }
           min={10}
           step={10}
           onChange={(v) => setInputs({ ...inputs, dbStorageGb: v === null ? null : Math.round(v) })}
         />
       </div>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        <NumberField label="요청 있는 시간 RPS" value={t.rps} min={0} onChange={(v) => setTraffic({ rps: v })} />
+        <NumberField
+          label="요청 있는 시간 RPS"
+          value={t.rps}
+          origin={valueOrigin(t.rps, ex.traffic.rps)}
+          min={0}
+          onChange={(v) => setTraffic({ rps: v })}
+        />
         <NumberField
           label="유휴 시간"
           unit="%"
           value={t.idlePercent}
+          origin={valueOrigin(t.idlePercent, ex.traffic.idlePercent)}
           min={0}
           max={95}
           onChange={(v) => setTraffic({ idlePercent: v })}
@@ -202,6 +274,7 @@ function InputControls({
           label="요청당 처리 시간"
           unit="ms"
           value={t.avgLatencyMs}
+          origin={valueOrigin(t.avgLatencyMs, ex.traffic.avgLatencyMs)}
           min={1}
           onChange={(v) => setTraffic({ avgLatencyMs: v })}
         />
@@ -209,6 +282,7 @@ function InputControls({
           label="읽기 비율"
           unit="%"
           value={t.readRatio === null ? null : Math.round(t.readRatio * 100)}
+          origin={valueOrigin(t.readRatio, ex.traffic.readRatio)}
           min={0}
           max={100}
           onChange={(v) => setTraffic({ readRatio: v === null ? null : v / 100 })}
@@ -217,6 +291,7 @@ function InputControls({
           label="평균 응답 크기"
           unit="KB"
           value={t.avgResponseKb}
+          origin={valueOrigin(t.avgResponseKb, ex.traffic.avgResponseKb)}
           min={0.1}
           onChange={(v) => setTraffic({ avgResponseKb: v })}
         />
@@ -278,7 +353,17 @@ function CloudSelector({
 function FinOpsCardBody({ run }: Props) {
   const facts = readRunFacts(run);
   const candidates = useCandidates(facts);
-  const [inputs, setInputs] = useState<UserInputs>(EMPTY_INPUTS);
+  // 처음에는 예시 프로필(일반 웹 서비스)로 채워 FinOps 가 전부 미제공으로 시작하지 않게 합니다. 값은 "예시값" 으로 표시합니다.
+  const [profileId, setProfileId] = useState<WorkloadProfile["id"] | null>(DEFAULT_PROFILE_ID);
+  const [inputs, setInputs] = useState<UserInputs>(() => {
+    const profile = profileById(DEFAULT_PROFILE_ID);
+    return profile ? applyProfile(profile, facts.dbStorageGb) : EMPTY_INPUTS;
+  });
+  const pickProfile = (id: WorkloadProfile["id"] | null) => {
+    const profile = profileById(id);
+    setProfileId(profile ? profile.id : null);
+    setInputs(profile ? applyProfile(profile, facts.dbStorageGb) : EMPTY_INPUTS);
+  };
   const [selected, setSelected] = useState<TargetProvider>(facts.targetProvider ?? "gcp");
 
   const realLag = numberMetric(run, METRIC_KEYS.replicationLagBytes);
@@ -353,7 +438,13 @@ function FinOpsCardBody({ run }: Props) {
         />
       )}
 
-      <InputControls inputs={inputs} setInputs={setInputs} planDiskGb={facts.dbStorageGb} />
+      <InputControls
+        inputs={inputs}
+        setInputs={setInputs}
+        planDiskGb={facts.dbStorageGb}
+        profile={profileById(profileId)}
+        onPickProfile={pickProfile}
+      />
 
       {estimate.status === "ready" && estimate.data.input.assumptions.length > 0 && (
         <details className="mt-3 rounded-lg border border-ink/15 bg-paper/30 p-3 text-xs">
