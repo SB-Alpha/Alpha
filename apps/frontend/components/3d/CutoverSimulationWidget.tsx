@@ -3,13 +3,12 @@
 import dynamic from "next/dynamic";
 import { useState } from "react";
 import type { RunStatus } from "@/lib/workflows";
-import type { Step3Mode } from "./physics/PhysicsControlsOverlay";
 
 const PhysicsCanvasView = dynamic(() => import("./physics/PhysicsCanvasView"), {
   ssr: false,
   loading: () => (
-    <div className="flex h-80 w-full items-center justify-center bg-paper font-mono text-xs text-ink/50">
-      전환 트래픽 뷰 & 주행 데모 불러오는 중…
+    <div className="flex h-[380px] w-full items-center justify-center bg-paper font-mono text-xs text-ink/50 sm:h-[460px]">
+      전환 트래픽 뷰 불러오는 중…
     </div>
   ),
 });
@@ -17,15 +16,13 @@ const PhysicsCanvasView = dynamic(() => import("./physics/PhysicsCanvasView"), {
 interface Props {
   run: RunStatus;
   defaultOpen?: boolean;
-  initialMode?: Step3Mode;
   title?: string;
 }
 
 export function CutoverSimulationWidget({
   run,
   defaultOpen = true,
-  initialMode = "cutover_valve",
-  title = "전환 트래픽: 실시간 Worker 상태 · 실측 기록 재생 & 파이프라인 주행",
+  title = "전환 트래픽: 실시간 Worker 상태 · 실측 기록 재생",
 }: Props) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -68,8 +65,8 @@ export function CutoverSimulationWidget({
       </div>
 
       {isOpen && (
-        <div className={isFullscreen ? "flex-1 min-h-[480px] w-full" : "h-80 sm:h-96 w-full"}>
-          <PhysicsCanvasView run={run} initialMode={initialMode} />
+        <div className={isFullscreen ? "min-h-0 w-full flex-1 overflow-y-auto" : "w-full"}>
+          <PhysicsCanvasView run={run} fill={isFullscreen} />
         </div>
       )}
     </div>

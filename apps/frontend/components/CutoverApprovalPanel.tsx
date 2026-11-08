@@ -155,12 +155,12 @@ export function CutoverApprovalPanel({ run, runId, readiness, isBusy, isTrafficU
         <PreflightChecklist report={report} isLoading={isLoading} error={error} />
       </div>
 
-      {/* Step 3: 승인 ② 전환 트래픽 뷰 (실시간 Worker 상태 · 실측 기록 재생) & 데모 주행 모드 */}
+      {/* Step 3: 승인 ② 전환 트래픽 뷰 (실시간 Worker 상태 · 실측 기록 재생) */}
       <div className="mt-4 border-t border-ink/10 pt-4">
         <CutoverSimulationWidget
           run={run}
           defaultOpen={true}
-          title="승인 ② 전 트래픽 게이트: 실시간 Worker 상태 & 파이프라인 주행"
+          title="승인 ② 전 트래픽 게이트: 실시간 Worker 상태 · 실측 기록 재생"
         />
       </div>
 

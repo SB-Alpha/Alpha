@@ -1,30 +1,26 @@
 "use client";
 
 import { OrbitControls, PerspectiveCamera } from "@react-three/drei";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { useCallback, useEffect, useRef, useState } from "react";
+import * as THREE from "three";
 import { cutoverOverlayFacts, cutoverSteps, servingSide } from "@/lib/dashboard";
 import { replayPhaseAt, replayableSteps } from "@/lib/cutoverReplay";
 import { liveTrafficPhase, totalRate, useEdgeLive } from "@/lib/edgeLive";
-import type { StageReportCardData } from "@/lib/topology3d";
 import type { RunStatus } from "@/lib/workflows";
 import { CutoverPhysicsScene, type CutoverPhase } from "./CutoverPhysicsScene";
 import {
-  PhysicsControlsOverlay,
+  CutoverInfoPanel,
+  CutoverTopBar,
   type PhaseView,
   type ReplayControls,
-  type Step3Mode,
   type TrafficView,
 } from "./PhysicsControlsOverlay";
-import {
-  PipelineDrivingScene,
-  type CameraMode,
-  type DrivingControlState,
-} from "./PipelineDrivingScene";
 
 interface Props {
   run: RunStatus;
-  initialMode?: Step3Mode;
+  /** 전체화면처럼 부모 높이를 채울 때. 아니면 3D 영역 높이를 고정합니다. */
+  fill?: boolean;
 }
 
 // 풀(48개)과 구슬 수명으로 화면에 담을 수 있는 초당 구슬 수. 더 많으면 구슬 1개가 요청 여러 건을 뜻합니다.
@@ -34,11 +30,34 @@ const REPLAY_END_PAUSE_MS = 1500;
 
 type Replay = { key: string; index: number; isDone: boolean };
 
-export default function PhysicsCanvasView({ run, initialMode = "cutover_valve" }: Props) {
-  const [mode, setMode] = useState<Step3Mode>(initialMode);
+// 카메라는 장면 가운데(y 0.85)를 봅니다. 장면은 y -1.3(수집통 바닥) ~ 3.0(보류 슈트 위)입니다.
+const CAMERA_TARGET: [number, number, number] = [0, 0.85, 0];
+const CAMERA_POSITION: [number, number, number] = [0, 1.5, 8.6];
+const CAMERA_FOV = 42;
+// 좌우 수집통(x ±3.3)과 그 아래 라벨까지 담아야 하는 가로 반폭 (월드 단위)
+const SCENE_HALF_WIDTH = 4.7;
 
-  // 실시간 게이트 상태: Worker mode/next_origin 만 씁니다. 화면이 전환 뷰일 때만 폴링합니다.
-  const { snapshot, rate, fetchError } = useEdgeLive(1500, mode === "cutover_valve");
+/** 캔버스가 좁으면(세로로 긴 화면) 가로가 잘리지 않을 만큼 카메라를 뒤로 뺍니다. */
+function FitSceneWidth() {
+  const camera = useThree((s) => s.camera);
+  const aspect = useThree((s) => s.size.width / Math.max(1, s.size.height));
+  useEffect(() => {
+    if (!(camera instanceof THREE.PerspectiveCamera)) return;
+    const target = new THREE.Vector3(...CAMERA_TARGET);
+    const base = new THREE.Vector3(...CAMERA_POSITION).distanceTo(target);
+    const halfFov = THREE.MathUtils.degToRad(camera.fov / 2);
+    const distance = Math.max(base, SCENE_HALF_WIDTH / (Math.tan(halfFov) * aspect));
+    const direction = camera.position.clone().sub(target).normalize();
+    camera.position.copy(target.add(direction.multiplyScalar(distance)));
+    camera.updateProjectionMatrix();
+  }, [camera, aspect]);
+  return null;
+}
+
+// 상태 바(위)·3D 장면(가운데)·정보 패널(아래)을 세로로 쌓습니다. 정보 상자는 장면 위에 겹치지 않습니다.
+export default function PhysicsCanvasView({ run, fill = false }: Props) {
+  // 실시간 게이트 상태: Worker mode/next_origin 만 씁니다.
+  const { snapshot, rate, fetchError } = useEdgeLive(1500, true);
   const worker = snapshot?.worker ?? null;
   const livePhase: CutoverPhase = liveTrafficPhase(worker);
 
@@ -86,7 +105,9 @@ export default function PhysicsCanvasView({ run, initialMode = "cutover_valve" }
     ? {
         phase,
         source: activeReplay.isDone ? "replay_done" : "replay",
-        stepLabel: currentStep ? `${activeReplay.index + 1}/${replaySteps.length} ${currentStep.step} · ${currentStep.elapsedMs.toLocaleString("ko-KR")}ms` : `0/${replaySteps.length} 시작 전`,
+        stepLabel: currentStep
+          ? `${activeReplay.index + 1}/${replaySteps.length} ${currentStep.step} · ${currentStep.elapsedMs.toLocaleString("ko-KR")}ms`
+          : `0/${replaySteps.length} 시작 전`,
       }
     : { phase, source: "live", stepLabel: null };
 
@@ -106,8 +127,7 @@ export default function PhysicsCanvasView({ run, initialMode = "cutover_valve" }
 
   // 구슬은 실시간 보기에서만, 실측 요청 비율만큼 만듭니다. 재생 중에는 그때의 트래픽 기록이 없으므로 만들지 않습니다.
   const measuredRate = totalRate(rate);
-  const ballsPerSec =
-    activeReplay || measuredRate === null ? null : Math.min(measuredRate, MAX_BALLS_PER_SEC);
+  const ballsPerSec = activeReplay || measuredRate === null ? null : Math.min(measuredRate, MAX_BALLS_PER_SEC);
   const traffic: TrafficView = {
     worker,
     fetchError,
@@ -116,94 +136,38 @@ export default function PhysicsCanvasView({ run, initialMode = "cutover_valve" }
     isReplay: activeReplay !== null,
   };
 
-  // 주행 데모 상태
-  const [drivingCheckpoint, setDrivingCheckpoint] = useState<StageReportCardData | null>(null);
-  const [speedKmh, setSpeedKmh] = useState(0);
-  const [gear, setGear] = useState<"P" | "D" | "R">("P");
-  const [cameraMode, setCameraMode] = useState<CameraMode>("chase");
-  const [driveControls, setDriveControls] = useState<DrivingControlState>({
-    forward: false,
-    backward: false,
-    left: false,
-    right: false,
-    brake: false,
-    resetSignal: 0,
-  });
-
-  const handleUpdateDriveControl = (patch: Partial<DrivingControlState>) => {
-    setDriveControls((prev) => ({ ...prev, ...patch }));
-  };
-
-  const handleResetVehicle = () => {
-    setDriveControls((prev) => ({ ...prev, resetSignal: prev.resetSignal + 1 }));
-  };
-
-  const handleCheckpointChange = useCallback(
-    (cp: StageReportCardData, spd: number, nextGear?: "P" | "D" | "R") => {
-      setDrivingCheckpoint(cp);
-      setSpeedKmh(spd);
-      if (nextGear) setGear(nextGear);
-    },
-    []
-  );
-
   return (
-    <div className="relative h-full w-full overflow-hidden bg-paper select-none">
-      <Canvas
-        shadows
-        dpr={[1, 2]}
-        gl={{ antialias: true }}
-        className="h-full w-full"
-      >
-        <color attach="background" args={["#f6f4ef"]} />
+    <div className={`flex w-full flex-col bg-paper select-none ${fill ? "h-full" : ""}`}>
+      <CutoverTopBar phaseView={phaseView} traffic={traffic} replay={replayControls} />
 
-        {mode === "cutover_valve" ? (
-          <>
-            <PerspectiveCamera makeDefault position={[0, 0.9, 6.9]} fov={40} />
-            <OrbitControls
-              enablePan={false}
-              enableZoom={true}
-              minDistance={4.5}
-              maxDistance={10}
-              minPolarAngle={Math.PI / 6}
-              maxPolarAngle={Math.PI / 2 - 0.05}
-              dampingFactor={0.08}
-            />
-            <ambientLight intensity={1.15} />
-            <directionalLight position={[6, 10, 6]} intensity={1.1} castShadow />
-            <directionalLight position={[-6, 6, -4]} intensity={0.45} />
+      <div className={`relative w-full ${fill ? "min-h-[360px] flex-1" : "h-[380px] sm:h-[460px] lg:h-[520px]"}`}>
+        <Canvas shadows dpr={[1, 2]} gl={{ antialias: true }} className="h-full w-full">
+          <color attach="background" args={["#f6f4ef"]} />
+          <PerspectiveCamera makeDefault position={CAMERA_POSITION} fov={CAMERA_FOV} />
+          <FitSceneWidth />
+          <OrbitControls
+            target={CAMERA_TARGET}
+            enablePan={false}
+            enableZoom={true}
+            minDistance={4.5}
+            maxDistance={18}
+            minPolarAngle={Math.PI / 6}
+            maxPolarAngle={Math.PI / 2 - 0.05}
+            dampingFactor={0.08}
+          />
+          <ambientLight intensity={1.15} />
+          <directionalLight position={[6, 10, 6]} intensity={1.1} castShadow />
+          <directionalLight position={[-6, 6, -4]} intensity={0.45} />
 
-            <CutoverPhysicsScene run={run} phase={phase} ballsPerSec={ballsPerSec} />
-          </>
-        ) : (
-          <>
-            <PerspectiveCamera makeDefault position={[0, 3.2, 7.2]} fov={44} />
-            <PipelineDrivingScene
-              run={run}
-              controls={driveControls}
-              cameraMode={cameraMode}
-              onToggleCameraMode={setCameraMode}
-              onCheckpointChange={handleCheckpointChange}
-            />
-          </>
-        )}
-      </Canvas>
+          <CutoverPhysicsScene run={run} phase={phase} ballsPerSec={ballsPerSec} />
+        </Canvas>
+      </div>
 
-      <PhysicsControlsOverlay
-        mode={mode}
-        onChangeMode={setMode}
+      <CutoverInfoPanel
+        phaseView={phaseView}
+        traffic={traffic}
         measured={cutoverOverlayFacts(run)}
         reportedServing={servingSide(run)}
-        phaseView={phaseView}
-        replay={replayControls}
-        traffic={traffic}
-        drivingCheckpoint={drivingCheckpoint}
-        speedKmh={speedKmh}
-        gear={gear}
-        cameraMode={cameraMode}
-        onChangeCameraMode={setCameraMode}
-        onUpdateDriveControl={handleUpdateDriveControl}
-        onResetVehicle={handleResetVehicle}
       />
     </div>
   );

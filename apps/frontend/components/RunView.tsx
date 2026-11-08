@@ -143,7 +143,7 @@ export function RunView() {
             onApprove={(comment) => act(() => workflows.approve(run.run_id, "plan", comment))}
           />
 
-          {/* Step 3 포함: 전환 기록 및 전환 트래픽 뷰(실시간 · 실측 재생) / 데모 주행 */}
+          {/* Step 3 포함: 전환 기록 및 전환 트래픽 뷰(실시간 · 실측 재생) */}
           <CutoverTimeline run={run} />
 
           <SelfHealingCard run={run} isBusy={isBusy} />
