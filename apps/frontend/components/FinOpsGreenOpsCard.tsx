@@ -26,6 +26,8 @@ import {
   WORKLOAD_PROFILES,
   applyProfile,
   profileById,
+  resolveDisk,
+  usesExampleValues,
   valueOrigin,
   type FinopsUserInputs,
   type ValueOrigin,
@@ -194,20 +196,22 @@ function InputControls({
   inputs,
   setInputs,
   planDiskGb,
+  disk,
   profile,
   onPickProfile,
 }: {
   inputs: UserInputs;
   setInputs: (next: UserInputs) => void;
   planDiskGb: number | null;
+  /** 지금 계산에 쓰는 DB 디스크와 그 출처 (사용자 값 ?? 계획값 ?? 예시값). */
+  disk: { value: number | null; origin: ValueOrigin };
   profile: WorkloadProfile | null;
   onPickProfile: (id: WorkloadProfile["id"] | null) => void;
 }) {
   const t = inputs.traffic;
   const setTraffic = (patch: Partial<TrafficInputs>) => setInputs({ ...inputs, traffic: { ...t, ...patch } });
-  // 프로필 값과 같으면 예시값, 다르면 사용자 입력입니다. DB 디스크는 계획값이 있으면 예시를 쓰지 않습니다.
-  const example = profile ? applyProfile(profile, planDiskGb) : null;
-  const ex = example ?? EMPTY_INPUTS;
+  // 프로필 값과 같으면 예시값, 다르면 사용자 입력입니다. DB 디스크는 disk 로 따로 받습니다.
+  const ex = profile ? applyProfile(profile) : EMPTY_INPUTS;
   return (
     <div className="mt-3 space-y-3 rounded-lg border border-ink/15 bg-paper/70 px-3.5 py-2.5">
       <ProfilePicker profile={profile} onPick={onPickProfile} />
@@ -242,12 +246,10 @@ function InputControls({
           />
         </label>
         <NumberField
-          label={`DB 디스크${planDiskGb !== null && inputs.dbStorageGb === null ? ` (계획값 ${planDiskGb}GB)` : ""}`}
+          label={`DB 디스크${planDiskGb !== null && disk.origin === "user" ? ` (계획값 ${planDiskGb}GB)` : ""}`}
           unit="GB"
-          value={inputs.dbStorageGb}
-          origin={
-            inputs.dbStorageGb === null && planDiskGb !== null ? "plan" : valueOrigin(inputs.dbStorageGb, ex.dbStorageGb)
-          }
+          value={disk.value}
+          origin={disk.origin}
           min={10}
           step={10}
           onChange={(v) => setInputs({ ...inputs, dbStorageGb: v === null ? null : Math.round(v) })}
@@ -357,13 +359,20 @@ function FinOpsCardBody({ run }: Props) {
   const [profileId, setProfileId] = useState<WorkloadProfile["id"] | null>(DEFAULT_PROFILE_ID);
   const [inputs, setInputs] = useState<UserInputs>(() => {
     const profile = profileById(DEFAULT_PROFILE_ID);
-    return profile ? applyProfile(profile, facts.dbStorageGb) : EMPTY_INPUTS;
+    return profile ? applyProfile(profile) : EMPTY_INPUTS;
   });
   const pickProfile = (id: WorkloadProfile["id"] | null) => {
     const profile = profileById(id);
     setProfileId(profile ? profile.id : null);
-    setInputs(profile ? applyProfile(profile, facts.dbStorageGb) : EMPTY_INPUTS);
+    setInputs(profile ? applyProfile(profile) : EMPTY_INPUTS);
   };
+  const profile = profileById(profileId);
+  // DB 디스크는 상태에 넣지 않고 그릴 때마다 고릅니다. 계획이 나중에 생기면 바로 계획값을 씁니다.
+  const disk = resolveDisk(inputs.dbStorageGb, facts.dbStorageGb, profile);
+  const exampleBasis =
+    profile && (usesExampleValues(inputs, profile) || disk.origin === "example")
+      ? `예시 프로필 기준 (가정): ${profile.label}`
+      : null;
   const [selected, setSelected] = useState<TargetProvider>(facts.targetProvider ?? "gcp");
 
   const realLag = numberMetric(run, METRIC_KEYS.replicationLagBytes);
@@ -377,7 +386,7 @@ function FinOpsCardBody({ run }: Props) {
     dbInstanceClass: inputs.dbInstanceClass,
     dbVcpu: facts.dbVcpu,
     dbMemoryGib: facts.dbMemoryGib,
-    dbStorageGb: inputs.dbStorageGb ?? facts.dbStorageGb,
+    dbStorageGb: disk.value,
     candidates: candidates ?? [],
     traffic: inputs.traffic,
     replicationLagBytes: realLag,
@@ -418,6 +427,11 @@ function FinOpsCardBody({ run }: Props) {
           <span className="rounded border border-ink/30 bg-paper px-1.5 py-0.5 font-mono text-[10px] font-medium text-ink/75">
             가격 API 공시가 · 청구액 아님
           </span>
+          {exampleBasis && (
+            <span className="rounded border border-amber-400 bg-amber-50 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-900">
+              {exampleBasis}
+            </span>
+          )}
         </div>
         <CloudSelector selected={selected} onSelect={setSelected} data={estimate.status === "ready" ? estimate.data : null} />
       </div>
@@ -435,6 +449,7 @@ function FinOpsCardBody({ run }: Props) {
           onChangeRps={(rps) => setTraffic({ rps })}
           onChangeIdlePercent={(idlePercent) => setTraffic({ idlePercent })}
           realTelemetry={realTelemetry}
+          exampleBasis={exampleBasis}
         />
       )}
 
@@ -442,7 +457,8 @@ function FinOpsCardBody({ run }: Props) {
         inputs={inputs}
         setInputs={setInputs}
         planDiskGb={facts.dbStorageGb}
-        profile={profileById(profileId)}
+        disk={disk}
+        profile={profile}
         onPickProfile={pickProfile}
       />
 

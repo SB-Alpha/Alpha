@@ -433,6 +433,7 @@ export function PriceApiEstimate({
   onChangeRps,
   onChangeIdlePercent,
   realTelemetry,
+  exampleBasis = null,
 }: {
   state: EstimateState;
   selectedProvider?: TargetProvider;
@@ -441,6 +442,8 @@ export function PriceApiEstimate({
   onChangeRps?: (rps: number) => void;
   onChangeIdlePercent?: (idle: number) => void;
   realTelemetry?: RealRunTelemetry;
+  /** 금액 계산에 예시 프로필 값이 들어갔을 때 금액 옆에 붙이는 안내 (예: "예시 프로필 기준 (가정): 일반 웹 서비스"). */
+  exampleBasis?: string | null;
 }) {
   const liveData = state.status === "ready" ? state.data : null;
 
@@ -490,6 +493,7 @@ export function PriceApiEstimate({
               <div className="text-right">
                 <span className="font-mono text-xl font-bold tabular-nums text-ink">{usd(selectedTotal)}/월</span>
                 <p className="text-[9px] text-amber-800">{ESTIMATE_LABEL} · 공시가 기준, 청구액 아님</p>
+                {exampleBasis && <p className="text-[10px] font-semibold text-amber-900">{exampleBasis} · 실측 아님</p>}
               </div>
             </div>
 
