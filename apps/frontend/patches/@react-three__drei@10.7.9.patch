@@ -1,0 +1,33 @@
+diff --git a/web/Html.js b/web/Html.js
+index 81d68b7f4e9893a7d0b436a398bb38883d333374..e646efd890ccb7a3dc3519c8c93921018d9874f0 100644
+--- a/web/Html.js
++++ b/web/Html.js
+@@ -140,7 +140,11 @@ const Html = /* @__PURE__ */React.forwardRef(({
+   }, [occlude]);
+   React.useLayoutEffect(() => {
+     if (group.current) {
+-      const currentRoot = root.current = ReactDOM.createRoot(el);
++      // Reuse a root whose unmount is still pending (StrictMode remount, or a target/transform change)
++      // instead of calling createRoot twice on the same container.
++      const pending = root.current && root.current.__unmountPending ? root.current : null;
++      const currentRoot = root.current = pending || ReactDOM.createRoot(el);
++      currentRoot.__unmountPending = false;
+       scene.updateMatrixWorld();
+       if (transform) {
+         el.style.cssText = `position:absolute;top:0;left:0;pointer-events:none;overflow:hidden;`;
+@@ -153,7 +157,14 @@ const Html = /* @__PURE__ */React.forwardRef(({
+       }
+       return () => {
+         if (target) target.removeChild(el);
+-        currentRoot.unmount();
++        // React 19 warns when a root is unmounted synchronously inside another root's commit, so defer it.
++        // If the effect runs again before the microtask, the root is reused and not unmounted.
++        currentRoot.__unmountPending = true;
++        queueMicrotask(() => {
++          if (!currentRoot.__unmountPending) return;
++          currentRoot.unmount();
++          if (root.current === currentRoot) root.current = null;
++        });
+       };
+     }
+   }, [target, transform]);
