@@ -42,6 +42,12 @@ export default function CanvasView({
       dpr={[1, 2]}
       gl={{ antialias: true }}
       className="h-full w-full select-none"
+      // 감싸는 div 는 overflow:hidden 인데, 가장자리 라벨을 누르면 브라우저가 이 div 를 스크롤해
+      // 장면과 상세 카드가 위로 밀려 헤더 밑에 가려집니다. 스크롤을 늘 0 으로 되돌립니다.
+      onScroll={(e) => {
+        e.currentTarget.scrollTop = 0;
+        e.currentTarget.scrollLeft = 0;
+      }}
     >
       <CloudMorphScene
         run={run}

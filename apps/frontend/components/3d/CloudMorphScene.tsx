@@ -156,7 +156,13 @@ export function CloudMorphScene({
             onNavigateSection={onNavigateSection}
           />
           {showFullTopology && (
-            <TopologyGraphNodes topology={topology} edge={edgeLive} fetchError={topologyError} />
+            <TopologyGraphNodes
+              topology={topology}
+              edge={edgeLive}
+              fetchError={topologyError}
+              selectedNode={selectedNode}
+              onSelectNode={onSelectNode}
+            />
           )}
         </group>
       </Bounds>

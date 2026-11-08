@@ -7,6 +7,7 @@ import * as THREE from "three";
 import { MAX_SAFE_LAG_BYTES } from "@/lib/dashboard";
 import { extractCdcArcData } from "@/lib/topology3d";
 import type { RunStatus } from "@/lib/workflows";
+import { DETAIL_CARD_CLASS, DETAIL_CARD_STYLE, pinAwayFromNode } from "./pinnedCard";
 
 interface Props {
   run: RunStatus;
@@ -163,11 +164,12 @@ export function CdcPipelineArc({
 
         {/* 호버/선택 시 실제 테이블 대조 및 CDC 상태 컴팩트 실측 카드 */}
         {showTooltip && (
-          <Html position={[0, 0.52, 0]} center zIndexRange={[100, 50]}>
+          <Html calculatePosition={pinAwayFromNode()} zIndexRange={[100, 50]}>
             <div
               onMouseEnter={() => setHovered(true)}
               onMouseLeave={() => setHovered(false)}
-              className="pointer-events-auto w-56 rounded-lg border border-ink bg-white/98 p-2 text-left text-ink shadow-[2px_2px_0_0_var(--color-ink)] backdrop-blur-xs"
+              className={DETAIL_CARD_CLASS}
+              style={DETAIL_CARD_STYLE}
             >
               <div className="flex items-center justify-between border-b border-ink/15 pb-1">
                 <span className="font-mono text-[10px] font-semibold">Debezium → Kafka → Sink</span>

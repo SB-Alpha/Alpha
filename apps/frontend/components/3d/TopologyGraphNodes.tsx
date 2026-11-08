@@ -4,6 +4,8 @@ import { Edges, Html, Line } from "@react-three/drei";
 import type { EdgeSnapshot, Topology, TopologyEdge, TopologyNode } from "@/lib/edgeLive";
 import { STATE_LABEL, STATE_TONE } from "@/lib/labels";
 import type { WorkflowState } from "@/lib/workflows";
+import { useState } from "react";
+import { DETAIL_CARD_CLASS, DETAIL_CARD_STYLE, pinAwayFromNode } from "./pinnedCard";
 
 // 실측 토폴로지 그래프. 노드·간선은 GET /runs/{id}/topology 응답만 그립니다.
 // 값을 모르면 "미제공"으로 적고, 고정 노드나 고정 지연 값을 넣지 않습니다.
@@ -13,6 +15,9 @@ interface Props {
   /** edge_worker 노드에 붙일 실시간 에지 상태. 없으면 미제공으로 보입니다. */
   edge: EdgeSnapshot | null;
   fetchError?: string | null;
+  /** 원본·CDC·목적지 노드 선택. 상세 카드는 한 번에 하나만 열려 겹치지 않게 합니다. */
+  selectedNode?: "source" | "cdc" | "target" | null;
+  onSelectNode?: (node: "source" | "cdc" | "target" | null) => void;
 }
 
 const MISSING = "미제공";
@@ -112,27 +117,73 @@ function edgeLiveLines(edge: EdgeSnapshot | null): string[] {
   return [`게이트 ${gate} · 응답 출처 ${origin}`, `프로브 지연 ${latency}`];
 }
 
-function NodeLabel({ node, extraLines }: { node: TopologyNode; extraLines: string[] }) {
+const MISSING_TONE = "bg-stone-100 text-stone-600 ring-stone-300";
+
+/** 노드 옆에 늘 보이는 작은 칩. 이름과 상태만 보이고, 누르면 상세 카드를 엽니다. */
+function NodeChip({ node, selected, onToggle }: { node: TopologyNode; selected: boolean; onToggle: () => void }) {
   const state = isWorkflowState(node.state) ? node.state : null;
-  const location = `${node.cloud ?? MISSING} · ${node.region ?? MISSING}`;
   return (
-    <div className="w-36 whitespace-normal rounded border border-ink bg-white/95 px-1.5 py-1 font-mono text-[9px] leading-tight text-ink shadow-[1px_1px_0_0_var(--color-ink)]">
-      <div className="flex items-center justify-between gap-1">
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+      aria-pressed={selected}
+      title={`${node.label} 상세 실측 보기`}
+      className={`pointer-events-auto flex max-w-[7.5rem] items-center gap-1 whitespace-nowrap rounded border bg-white/95 px-1 py-px font-mono text-[9px] leading-tight text-ink transition-transform hover:-translate-y-0.5 ${
+        selected ? "border-ink shadow-[1px_1px_0_0_var(--color-ink)]" : "border-ink/40"
+      }`}
+    >
+      <span className="truncate font-semibold">{node.label}</span>
+      <span className={`shrink-0 rounded px-0.5 ring-1 ${state ? STATE_TONE[state] : MISSING_TONE}`}>
+        {state ? STATE_LABEL[state] : MISSING}
+      </span>
+    </button>
+  );
+}
+
+/** 선택한 노드의 실측 상세. 캔버스 아래 모서리(노드 반대편)에 고정합니다. */
+function NodeDetailCard({ node, extraLines, onClose }: { node: TopologyNode; extraLines: string[]; onClose: () => void }) {
+  const state = isWorkflowState(node.state) ? node.state : null;
+  return (
+    <div className={`${DETAIL_CARD_CLASS} -translate-y-full font-mono text-[10px] leading-snug`} style={DETAIL_CARD_STYLE}>
+      <div className="flex items-center justify-between gap-1 border-b border-ink/15 pb-1">
         <span className="truncate font-semibold">{node.label}</span>
-        <span className={`shrink-0 rounded px-1 ring-1 ${state ? STATE_TONE[state] : "bg-stone-100 text-stone-600 ring-stone-300"}`}>
+        <span className={`shrink-0 rounded px-1 text-[9px] ring-1 ${state ? STATE_TONE[state] : MISSING_TONE}`}>
           {state ? STATE_LABEL[state] : MISSING}
         </span>
+        <button type="button" onClick={onClose} aria-label="상세 닫기" className="shrink-0 px-0.5 text-ink/50 hover:text-ink">
+          ✕
+        </button>
       </div>
-      <div className="truncate text-ink/65" title={location}>{location}</div>
-      <div className="truncate text-ink/65" title={node.resource ?? undefined}>{node.resource ?? `리소스 ${MISSING}`}</div>
+      <dl className="mt-1 space-y-0.5">
+        <div className="flex justify-between gap-2">
+          <dt className="shrink-0 text-ink/55">위치</dt>
+          <dd className="truncate">{`${node.cloud ?? MISSING} · ${node.region ?? MISSING}`}</dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="shrink-0 text-ink/55">리소스</dt>
+          <dd className="truncate" title={node.resource ?? undefined}>{node.resource ?? MISSING}</dd>
+        </div>
+      </dl>
       {extraLines.map((line) => (
-        <div key={line} className="truncate text-orange-900">{line}</div>
+        <p key={line} className="mt-0.5 truncate text-orange-900" title={line}>{line}</p>
       ))}
     </div>
   );
 }
 
-export function TopologyGraphNodes({ topology, edge, fetchError }: Props) {
+export function TopologyGraphNodes({ topology, edge, fetchError, selectedNode = null, onSelectNode }: Props) {
+  const [chosenId, setChosenId] = useState<string | null>(null);
+  // 원본·CDC·목적지 노드가 선택되면 그 카드가 우선이고, 토폴로지 상세는 닫힌 것으로 봅니다.
+  const selectedId = selectedNode === null ? chosenId : null;
+  const toggleNode = (id: string) => {
+    const next = selectedId === id ? null : id;
+    setChosenId(next);
+    if (next !== null) onSelectNode?.(null);
+  };
+
   if (!topology) {
     return (
       <Html position={[0, ROW_Y, ROW_Z]} center zIndexRange={[20, 0]}>
@@ -182,15 +233,23 @@ export function TopologyGraphNodes({ topology, edge, fetchError }: Props) {
         return (
           <group key={node.id} position={position}>
             <NodeShape node={node} color={color} />
-            {/* 라벨이 겹치지 않게 위·아래를 번갈아 놓습니다. */}
+            {/* 칩이 겹치지 않게 위·아래를 번갈아 놓습니다. 크기는 화면 기준으로 고정합니다 (확대해도 커지지 않음). */}
             <Html
-              position={[0, node.kind === "edge" || index % 2 === 1 ? 0.6 : -0.62, 0]}
+              position={[0, node.kind === "edge" || index % 2 === 1 ? 0.5 : -0.5, 0]}
               center
-              distanceFactor={7}
               zIndexRange={[30, 10]}
             >
-              <NodeLabel node={node} extraLines={extraLines} />
+              <NodeChip
+                node={node}
+                selected={selectedId === node.id}
+                onToggle={() => toggleNode(node.id)}
+              />
             </Html>
+            {selectedId === node.id && (
+              <Html calculatePosition={pinAwayFromNode("bottom")} zIndexRange={[90, 40]}>
+                <NodeDetailCard node={node} extraLines={extraLines} onClose={() => setChosenId(null)} />
+              </Html>
+            )}
           </group>
         );
       })}
